@@ -1,0 +1,68 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar FFmpeg (LGPL, shared)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # El nombre del zip cambia con cada versión de FFmpeg: se elige la
+          # rama estable más reciente publicada en la release "latest".
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
+          $release = Invoke-RestMethod -Headers $headers https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest
+          $asset = $release.assets |
+            Where-Object { $_.name -match '^ffmpeg-n(\d+)\.(\d+)-latest-win64-lgpl-shared-.*\.zip$' } |
+            Sort-Object { [int]($_.name -replace '^ffmpeg-n(\d+)\.(\d+).*','$1') * 100 + [int]($_.name -replace '^ffmpeg-n(\d+)\.(\d+).*','$2') } -Descending |
+            Select-Object -First 1
+          if (-not $asset) { throw "No se encontró un build LGPL shared de FFmpeg" }
+          Write-Host "FFmpeg: $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          $dir = Get-ChildItem ffmpeg-tmp | Select-Object -First 1
+          Move-Item $dir.FullName ffmpeg
+          Get-ChildItem ffmpeg/lib | Select-Object Name
+          Get-ChildItem ffmpeg/bin | Select-Object Name
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configurar
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg
+
+      - name: Compilar
+        run: cmake --build build
+
+      - name: Empaquetar
+        shell: pwsh
+        run: cmake --install build --prefix dist
+
+      - name: Instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup --no-progress -y
+            $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /DAppVersion=0.1.0 /DSourceDir=..\dist installer\spectre.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectre-portable-x64
+          path: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectre-instalador
+          path: installer/output/*.exe
