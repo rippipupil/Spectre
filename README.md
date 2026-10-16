@@ -13,7 +13,9 @@ Los clips se guardan en `Vídeos\Spectre`. La configuración y el log están en 
 
 ## Descargar
 
-Cada compilación de CI publica dos artefactos en la pestaña *Actions*: `spectre-instalador` (instalador, no pide administrador) y `spectre-portable-x64` (zip, se ejecuta `spectre.exe` directamente).
+**Instalador:** [Spectre-Setup.exe](https://github.com/rippipupil/Spectre/releases/latest/download/Spectre-Setup.exe). Lo instala todo (FFmpeg incluido, sin redistribuibles extra) y no pide administrador. También hay un [zip portable](https://github.com/rippipupil/Spectre/releases/latest/download/Spectre-Portable.zip).
+
+Cada cambio que entra en `main` publica una release nueva con el instalador (también al subir una etiqueta `vX.Y.Z`). Cada compilación deja además los artefactos `spectre-instalador` y `spectre-portable-x64` en *Actions*.
 
 ## Cómo consume tan poco
 

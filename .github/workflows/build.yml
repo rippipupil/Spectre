@@ -3,8 +3,12 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   windows:
@@ -48,6 +52,17 @@ jobs:
         shell: pwsh
         run: cmake --install build --prefix dist
 
+      - name: Comprobar dependencias del exe
+        shell: pwsh
+        run: |
+          # El exe usa CRT estático: no debe necesitar el redistribuible de VC++.
+          $deps = dumpbin /dependents dist\spectre.exe | Out-String
+          Write-Host $deps
+          if ($deps -match '(?i)(vcruntime|msvcp)\d*\.dll') { throw "spectre.exe depende del runtime de VC++" }
+          foreach ($dll in 'avcodec','avformat','avutil','swresample') {
+            if (-not (Get-ChildItem dist -Filter "$dll-*.dll")) { throw "Falta $dll en dist" }
+          }
+
       - name: Instalador (Inno Setup)
         shell: pwsh
         run: |
@@ -55,7 +70,10 @@ jobs:
             choco install innosetup --no-progress -y
             $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
           }
-          iscc /DAppVersion=0.1.0 /DSourceDir=..\dist installer\spectre.iss
+          $version = "0.1.$env:GITHUB_RUN_NUMBER"
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { $version = $env:GITHUB_REF_NAME.Substring(1) }
+          iscc /DAppVersion=$version /DSourceDir=..\dist installer\spectre.iss
+          Compress-Archive dist\* installer\output\Spectre-Portable.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -66,3 +84,16 @@ jobs:
         with:
           name: spectre-instalador
           path: installer/output/*.exe
+
+      - name: Publicar release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Cada cambio en main (o etiqueta vX.Y.Z) publica una release con
+          # enlace directo a Spectre-Setup.exe.
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME } else { "v0.1.$env:GITHUB_RUN_NUMBER" }
+          gh release create $tag installer/output/Spectre-Setup.exe installer/output/Spectre-Portable.zip `
+            --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Spectre $tag" --latest `
+            --notes "Descarga **Spectre-Setup.exe**, ejecútalo y sigue el asistente. Instala Spectre y todo lo que necesita (FFmpeg incluido, sin redistribuibles extra). No pide administrador."
