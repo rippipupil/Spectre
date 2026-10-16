@@ -36,24 +36,36 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   if (!settings_.target.window && !settings_.target.monitor)
     settings_.target.monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
 
-  // 1. Dispositivo y captura. WGC primero; DDA si WGC no existe o falla.
-  bool useWgc = settings_.captureApi != "dda" && WgcSupported();
-  bool started = false;
-  if (useWgc && gpu_.Create(nullptr)) {
+  // 1. Dispositivo y captura. WGC si puede capturar sin el marco amarillo
+  // (o si se eligió a mano); si no, Desktop Duplication, que nunca lo dibuja.
+  // WGC con marco queda como último recurso.
+  bool wgcAvailable = settings_.captureApi != "dda" && WgcSupported();
+  bool preferWgc = wgcAvailable && (settings_.captureApi == "wgc" || WgcBorderless());
+  auto tryWgc = [&] {
+    if (!gpu_.Create(nullptr)) return false;
     capture_ = CreateWgcCapture();
-    started = capture_->Start(gpu_.Device(), settings_.target, UINT(settings_.fps), settings_.cursor);
-  }
-  if (!started && settings_.captureApi != "wgc") {
+    return capture_->Start(gpu_.Device(), settings_.target, UINT(settings_.fps), settings_.cursor);
+  };
+  auto tryDda = [&] {
     HMONITOR mon = settings_.target.monitor ? settings_.target.monitor
                                             : MonitorFromWindow(settings_.target.window, MONITOR_DEFAULTTOPRIMARY);
     auto adapter = GpuDevice::AdapterForMonitor(mon);
-    if (gpu_.Create(adapter.Get())) {
-      capture_ = CreateDdaCapture();
-      CaptureTarget t;
-      t.monitor = mon;
-      started = capture_->Start(gpu_.Device(), t, UINT(settings_.fps), settings_.cursor);
-      if (started) settings_.target = t;
-    }
+    if (!gpu_.Create(adapter.Get())) return false;
+    capture_ = CreateDdaCapture();
+    CaptureTarget t;
+    t.monitor = mon;
+    if (!capture_->Start(gpu_.Device(), t, UINT(settings_.fps), settings_.cursor)) return false;
+    settings_.target = t;
+    return true;
+  };
+  bool started = preferWgc && tryWgc();
+  if (!started && settings_.captureApi != "wgc") {
+    capture_.reset();
+    started = tryDda();
+  }
+  if (!started && wgcAvailable && !preferWgc) {
+    capture_.reset();
+    started = tryWgc();
   }
   if (!started) {
     Log("No se pudo iniciar la captura");
@@ -227,7 +239,8 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto buffer = buffer_;
   auto streams = streams_;
   auto notify = notify_;
-  std::thread([buffer, streams, notify, path, seconds] {
+  auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
+  std::thread([buffer, streams, notify, path, seconds, pending] {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     Sleep(300); // deja que llegue el audio de los últimos milisegundos
     auto packets = buffer->Snapshot(seconds);

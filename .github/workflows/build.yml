@@ -43,7 +43,7 @@ jobs:
           arch: x64
 
       - name: Configurar
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg -DSPECTRE_BUILD_VERSION=0.1.${{ github.run_number }}
 
       - name: Compilar
         run: cmake --build build
@@ -96,4 +96,4 @@ jobs:
           $tag = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME } else { "v0.1.$env:GITHUB_RUN_NUMBER" }
           gh release create $tag installer/output/Spectre-Setup.exe installer/output/Spectre-Portable.zip `
             --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Spectre $tag" --latest `
-            --notes "Descarga **Spectre-Setup.exe**, ejecútalo y sigue el asistente. Instala Spectre y todo lo que necesita (FFmpeg incluido, sin redistribuibles extra). No pide administrador."
+            --notes "Descarga **Spectre-Setup.exe** y ábrelo. Incluye todo lo necesario y no pide permisos de administrador. Si ya tienes Spectre, se actualiza conservando tus ajustes. Atajos: Alt+Z abre el panel, Alt+F10 guarda un clip y Alt+F9 empieza o detiene una grabación."

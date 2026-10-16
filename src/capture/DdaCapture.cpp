@@ -67,8 +67,9 @@ private:
 
   void Run() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-    const int64_t minInterval = QpcFrequency() / fps_ - QpcFrequency() / 1000;
-    int64_t lastCopy = 0;
+    // Rejilla de 1/fps con medio periodo de margen (ver WgcCapture::OnFrame).
+    const int64_t period = QpcFrequency() / std::max<UINT>(fps_, 1);
+    int64_t nextDue = 0;
     while (running_) {
       if (!duplication_) {
         Sleep(250);
@@ -89,14 +90,14 @@ private:
         break;
       }
       int64_t now = QpcNow();
-      if (info.LastPresentTime.QuadPart != 0 && now - lastCopy >= minInterval) {
+      if (info.LastPresentTime.QuadPart != 0 && (nextDue == 0 || now >= nextDue - period / 2)) {
         ComPtr<ID3D11Texture2D> tex;
         if (SUCCEEDED(resource.As(&tex))) {
           D3D11_TEXTURE2D_DESC d;
           tex->GetDesc(&d);
           GpuLock lock(GpuMutex());
           Publish(device_.Get(), context_.Get(), tex.Get(), d.Width, d.Height);
-          lastCopy = now;
+          nextDue = (nextDue == 0 || now - nextDue > period) ? now + period : nextDue + period;
         }
       }
       resource.Reset();

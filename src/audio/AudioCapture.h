@@ -55,7 +55,7 @@ private:
   std::thread thread_;
   HANDLE stopEvent_ = nullptr;
   HANDLE readyEvent_ = nullptr;
-  bool startOk_ = false;
+  std::atomic<bool> startOk_{false};
 
   std::mutex mutex_;
   std::vector<float> fifo_; // ring buffer de muestras intercaladas

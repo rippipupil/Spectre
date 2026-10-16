@@ -34,18 +34,21 @@ target_link_libraries(ffmpeg INTERFACE
   ${SPECTRE_FFMPEG_DIR}/lib/avformat.lib
   ${SPECTRE_FFMPEG_DIR}/lib/avutil.lib)
 
+set(SPECTRE_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Versión que muestra la app (CI pone la de la release)")
 file(GLOB_RECURSE SPECTRE_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_executable(spectre WIN32 ${SPECTRE_SOURCES} res/spectre.rc)
 target_include_directories(spectre PRIVATE src)
 target_compile_definitions(spectre PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
-  SPECTRE_VERSION="${PROJECT_VERSION}")
+  SPECTRE_VERSION="${SPECTRE_BUILD_VERSION}")
 target_compile_options(spectre PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /EHsc)
 target_link_libraries(spectre PRIVATE imgui nlohmann_json::nlohmann_json ffmpeg
   d3d11 dxgi dcomp windowsapp mfplat mfreadwrite mf mfuuid ole32 uuid
-  avrt shell32 user32 gdi32 dwmapi advapi32 mmdevapi)
+  avrt shell32 shcore user32 gdi32 dwmapi advapi32 mmdevapi delayimp)
 # El manifiesto va en el .rc; evitamos que el linker genere otro.
-target_link_options(spectre PRIVATE /MANIFEST:NO)
+# Media Foundation (solo la webcam) se carga en diferido: en las ediciones N de
+# Windows no existe y, enlazada directamente, Spectre ni arrancaría.
+target_link_options(spectre PRIVATE /MANIFEST:NO /DELAYLOAD:mfplat.dll /DELAYLOAD:mfreadwrite.dll /DELAYLOAD:mf.dll)
 
 install(TARGETS spectre RUNTIME DESTINATION .)
 install(DIRECTORY ${SPECTRE_FFMPEG_DIR}/bin/ DESTINATION . FILES_MATCHING
