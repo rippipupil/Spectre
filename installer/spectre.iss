@@ -18,7 +18,7 @@ DefaultGroupName=Spectre
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=output
-OutputBaseFilename=SpectreSetup-{#AppVersion}
+OutputBaseFilename=Spectre-Setup
 SetupIconFile=..\res\spectre.ico
 UninstallDisplayIcon={app}\spectre.exe
 Compression=lzma2/max
@@ -56,3 +56,13 @@ Filename: "{cmd}"; Parameters: "/C taskkill /IM spectre.exe /F"; Flags: runhidde
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\Spectre"
+
+[Code]
+// Las ediciones N/KN de Windows no traen Media Foundation (cámara y
+// encoder de respaldo). Se avisa en vez de fallar en silencio.
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if not FileExists(ExpandConstant('{sys}\mfplat.dll')) then
+    MsgBox('Tu Windows no tiene Media Foundation (ediciones N). Instala el "Media Feature Pack" desde Configuración > Aplicaciones > Características opcionales para que la cámara funcione.', mbInformation, MB_OK);
+end;
