@@ -70,7 +70,7 @@ jobs:
             choco install innosetup --no-progress -y
             $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
           }
-          $version = '0.1.0'
+          $version = "0.1.$env:GITHUB_RUN_NUMBER"
           if ($env:GITHUB_REF -like 'refs/tags/v*') { $version = $env:GITHUB_REF_NAME.Substring(1) }
           iscc /DAppVersion=$version /DSourceDir=..\dist installer\spectre.iss
           Compress-Archive dist\* installer\output\Spectre-Portable.zip
@@ -86,11 +86,14 @@ jobs:
           path: installer/output/*.exe
 
       - name: Publicar release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME installer/output/Spectre-Setup.exe installer/output/Spectre-Portable.zip `
-            --repo $env:GITHUB_REPOSITORY --title "Spectre $env:GITHUB_REF_NAME" --latest `
-            --notes "Descarga **Spectre-Setup.exe**, ejecútalo y sigue el asistente. Instala Spectre y todo lo que necesita (FFmpeg incluido, sin redistribuibles extra). No pide administrador." 
+          # Cada cambio en main (o etiqueta vX.Y.Z) publica una release con
+          # enlace directo a Spectre-Setup.exe.
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME } else { "v0.1.$env:GITHUB_RUN_NUMBER" }
+          gh release create $tag installer/output/Spectre-Setup.exe installer/output/Spectre-Portable.zip `
+            --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Spectre $tag" --latest `
+            --notes "Descarga **Spectre-Setup.exe**, ejecútalo y sigue el asistente. Instala Spectre y todo lo que necesita (FFmpeg incluido, sin redistribuibles extra). No pide administrador."
