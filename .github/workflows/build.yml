@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descargar FFmpeg (LGPL, shared)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          $dir = Get-ChildItem ffmpeg-tmp | Select-Object -First 1
+          Move-Item $dir.FullName ffmpeg
+          Get-ChildItem ffmpeg/lib | Select-Object Name
+          Get-ChildItem ffmpeg/bin | Select-Object Name
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configurar
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg
+
+      - name: Compilar
+        run: cmake --build build
+
+      - name: Empaquetar
+        shell: pwsh
+        run: cmake --install build --prefix dist
+
+      - name: Instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup --no-progress -y
+            $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /DAppVersion=0.1.0 /DSourceDir=..\dist installer\spectre.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectre-portable-x64
+          path: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectre-instalador
+          path: installer/output/*.exe
