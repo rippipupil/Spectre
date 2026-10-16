@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <mfidl.h>
 #include <wrl/client.h>
 
 #include <atomic>
@@ -32,6 +33,7 @@ public:
 
 private:
   void Run(std::wstring id);
+  void ReleaseSource();
 
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> context_;
@@ -40,6 +42,8 @@ private:
   bool hasFrame_ = false;
   std::atomic<bool> running_{false};
   std::thread thread_;
+  std::mutex sourceMutex_;
+  ComPtr<IMFMediaSource> source_;
 };
 
 } // namespace spectre

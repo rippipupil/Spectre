@@ -103,10 +103,13 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
   UINT w = UINT(rect.right - rect.left), h = UINT(rect.bottom - rect.top);
   if (!hwnd_) {
     DWORD ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    if (kind_ == Kind::Toast) ex |= WS_EX_NOACTIVATE;
+    // El aviso deja pasar los clics a cualquier ventana de debajo (HTTRANSPARENT
+    // solo funciona con ventanas del mismo hilo).
+    if (kind_ == Kind::Toast) ex |= WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT;
     hwnd_ = CreateWindowExW(ex, kind_ == Kind::Menu ? kMenuClass : kToastClass, L"Spectre", WS_POPUP, rect.left,
                             rect.top, int(w), int(h), nullptr, nullptr, instance_, this);
     if (!hwnd_) return false;
+    if (kind_ == Kind::Toast) SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
     // El menú y los avisos nunca aparecen en los clips.
     SetWindowDisplayAffinity(hwnd_, WDA_EXCLUDEFROMCAPTURE);
     scale_ = float(GetDpiForWindow(hwnd_)) / 96.0f;
@@ -118,10 +121,14 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
   } else if (w != width_ || h != height_) {
     SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h), SWP_NOACTIVATE);
     rtv_.Reset();
-    swapChain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     ComPtr<ID3D11Texture2D> back;
-    swapChain_->GetBuffer(0, IID_PPV_ARGS(&back));
-    device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_);
+    if (FAILED(swapChain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) ||
+        FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&back))) ||
+        FAILED(device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_))) {
+      // GPU reiniciada (driver actualizado, TDR...): se crea todo de nuevo.
+      Hide();
+      return Show(rect, activate);
+    }
     width_ = w;
     height_ = h;
   }

@@ -78,6 +78,10 @@ bool ParseHotkey(const std::string& text, UINT* modifiers, UINT* vk) {
     }
   }
   if (!key) return false;
+  // Sin Ctrl, Alt ni Win el atajo se "come" la tecla en todo Windows (no se
+  // podría escribir esa letra). Solo se permiten solas F13-F24, Pausa y Bloq Despl.
+  bool standalone = (key >= VK_F13 && key <= VK_F24) || key == VK_PAUSE || key == VK_SCROLL;
+  if (!(mods & (MOD_ALT | MOD_CONTROL | MOD_WIN)) && !standalone) return false;
   *modifiers = mods | MOD_NOREPEAT;
   *vk = key;
   return true;
@@ -209,16 +213,21 @@ ProcessUsage SampleProcessUsage() {
 std::vector<ClipFile> ListClips(const std::string& folder, size_t max) {
   std::vector<std::pair<std::filesystem::file_time_type, ClipFile>> found;
   std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(Widen(folder), ec)) {
-    if (!entry.is_regular_file(ec)) continue;
+  // increment(ec) en vez del ++ del range-for, que lanza si la carpeta
+  // desaparece a mitad (unidad de red o USB) y tumbaría la app.
+  std::filesystem::directory_iterator it(Widen(folder), ec), end;
+  for (; !ec && it != end; it.increment(ec)) {
+    const auto& entry = *it;
+    std::error_code fec; // errores de un archivo concreto: no cortan el listado
+    if (!entry.is_regular_file(fec)) continue;
     auto ext = entry.path().extension().wstring();
     for (auto& c : ext) c = wchar_t(towlower(c));
     if (ext != L".mp4") continue;
     ClipFile clip;
     clip.path = Narrow(entry.path().wstring());
     clip.name = Narrow(entry.path().filename().wstring());
-    clip.size = entry.file_size(ec);
-    found.emplace_back(entry.last_write_time(ec), std::move(clip));
+    clip.size = entry.file_size(fec);
+    found.emplace_back(entry.last_write_time(fec), std::move(clip));
   }
   std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
   std::vector<ClipFile> out;

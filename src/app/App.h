@@ -8,6 +8,7 @@
 
 #include <shellapi.h>
 
+#include <deque>
 #include <functional>
 #include <optional>
 #include <string>
@@ -43,7 +44,7 @@ private:
   void UpdatePipeline(bool forceRestart = false);
   bool StartPipeline();
   PipelineSettings BuildSettings() const;
-  std::string OutputName(const char* prefix) const;
+  std::string OutputName(const char* prefix);
   bool RegisterHotkeys();
   void UnregisterHotkeys();
   void CheckGame();
@@ -84,6 +85,10 @@ private:
   HWND previousForeground_ = nullptr;
   HMONITOR menuMonitor_ = nullptr;
   UINT menuGeneration_ = 0;     // descarta avisos de cierre de un menú anterior
+  ULONGLONG menuClosedAt_ = 0;
+  ULONGLONG startFailedAt_ = 0; // la captura falló al arrancar: no reintentar en bucle
+  DWORD pipelinePid_ = 0;       // proceso cuyo audio se captura (0 = todo el sistema)
+  std::deque<std::string> recentNames_; // nombres ya usados aunque el archivo aún no exista
   bool restartPending_ = false; // cambios de captura a aplicar al terminar la grabación
   std::string toastText_;
   bool toastError_ = false;

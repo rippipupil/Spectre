@@ -13,6 +13,7 @@ namespace spectre {
 
 std::vector<CameraDevice> EnumerateCameras() {
   std::vector<CameraDevice> list;
+  if (!MediaFoundationAvailable()) return list;
   ComPtr<IMFAttributes> attrs;
   if (FAILED(MFCreateAttributes(&attrs, 1))) return list;
   attrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
@@ -36,6 +37,10 @@ std::vector<CameraDevice> EnumerateCameras() {
 
 bool Camera::Start(ID3D11Device* device, const std::string& id) {
   Stop();
+  if (!MediaFoundationAvailable()) {
+    Log("Cámara: Media Foundation no está disponible (Windows N)");
+    return false;
+  }
   device_ = device;
   device_->GetImmediateContext(&context_);
   std::wstring wid = Widen(id);
@@ -54,6 +59,12 @@ bool Camera::Start(ID3D11Device* device, const std::string& id) {
 
 void Camera::Stop() {
   running_ = false;
+  {
+    // ReadSample es bloqueante: si la cámara deja de mandar imágenes (tapa de
+    // privacidad, otra app la coge), apagar la fuente lo desbloquea.
+    std::lock_guard lock(sourceMutex_);
+    if (source_) source_->Shutdown();
+  }
   if (thread_.joinable()) thread_.join();
   GpuLock lock(GpuMutex());
   texture_.Reset();
@@ -81,6 +92,11 @@ void Camera::Run(std::wstring id) {
   attrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
   attrs->SetString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, id.c_str());
   HRESULT hr = MFCreateDeviceSource(attrs.Get(), &source);
+  if (SUCCEEDED(hr)) {
+    std::lock_guard lock(sourceMutex_);
+    source_ = source;
+    if (!running_) hr = MF_E_SHUTDOWN; // Stop() llegó mientras se abría
+  }
   if (SUCCEEDED(hr)) {
     ComPtr<IMFAttributes> readerAttrs;
     MFCreateAttributes(&readerAttrs, 1);
@@ -121,7 +137,8 @@ void Camera::Run(std::wstring id) {
   }
   if (FAILED(hr) || w == 0 || h == 0) {
     Log("Cámara: no se pudo abrir (0x%08X)", unsigned(hr));
-    if (source) source->Shutdown();
+    reader.Reset();
+    ReleaseSource();
     CoUninitialize();
     return;
   }
@@ -188,8 +205,14 @@ void Camera::Run(std::wstring id) {
     else buffer->Unlock();
   }
   reader.Reset();
-  if (source) source->Shutdown();
+  ReleaseSource();
   CoUninitialize();
+}
+
+void Camera::ReleaseSource() {
+  std::lock_guard lock(sourceMutex_);
+  if (source_) source_->Shutdown();
+  source_.Reset();
 }
 
 } // namespace spectre

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -30,6 +31,21 @@ std::string SanitizeFileName(std::string_view name);
 std::string FormatBytes(uint64_t bytes);
 
 void Log(const char* fmt, ...);
+
+// Media Foundation (webcam) se enlaza en diferido: no existe en Windows N.
+// Comprobar antes de llamar a cualquier función MF*.
+bool MediaFoundationAvailable();
+
+// Escrituras de archivos en segundo plano (clips, recortes). Al salir se
+// espera a que terminen para no dejar MP4 cortados.
+std::atomic<int>& PendingWrites();
+struct PendingWrite {
+  PendingWrite() { ++PendingWrites(); }
+  ~PendingWrite() { --PendingWrites(); }
+  PendingWrite(const PendingWrite&) = delete;
+  PendingWrite& operator=(const PendingWrite&) = delete;
+};
+void WaitForPendingWrites(DWORD timeoutMs);
 
 // Un solo mutex protege el contexto inmediato de D3D11, que comparten la
 // captura, el encoder, la cámara y el overlay. FFmpeg usa el mismo mutex a

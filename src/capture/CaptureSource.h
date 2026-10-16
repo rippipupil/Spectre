@@ -63,5 +63,7 @@ protected:
 std::unique_ptr<CaptureSource> CreateWgcCapture();
 std::unique_ptr<CaptureSource> CreateDdaCapture();
 bool WgcSupported();
+// true si WGC puede capturar sin el marco amarillo (Windows 11 con permiso).
+bool WgcBorderless();
 
 } // namespace spectre

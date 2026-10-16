@@ -1061,8 +1061,11 @@ void DrawSettings(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGui::PopStyleColor(2);
   ImGui::PopStyleVar(2);
 
-  if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
-    a.close();
+  // Esc en un campo de texto o un desplegable solo cierra eso. ImGui los
+  // desactiva en este mismo frame, por eso se mira también el anterior.
+  bool busy = ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+  if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !busy && !m.busyLastFrame) a.close();
+  m.busyLastFrame = busy;
 }
 
 void DrawToast(OverlayWindow& w, const std::string& text, bool error, float alpha) {

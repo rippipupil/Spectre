@@ -42,6 +42,7 @@ struct MenuModel {
   unsigned long long openedAt = 0; // GetTickCount64 al abrir (animación de entrada)
   float panelWidth = 0, panelHeight = 0; // tamaño real del panel en el último frame
   int page = 0;                          // página activa de los ajustes
+  bool busyLastFrame = false;            // había un campo o desplegable activo
   int selectedClip = -1;
   double clipDuration = 0;
   float trimStart = 0, trimEnd = 0;

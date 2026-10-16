@@ -10,6 +10,11 @@
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Graphics.DirectX.h>
+#include <winrt/Windows.Security.Authorization.AppCapabilityAccess.h>
+
+#include <chrono>
+#include <mutex>
+#include <thread>
 
 namespace spectre {
 
@@ -25,6 +30,40 @@ bool WgcSupported() {
   }
 }
 
+bool WgcBorderless() {
+  // Sin IsBorderRequired (Windows 10) WGC dibuja un marco amarillo permanente.
+  // En Windows 11 hay que pedir permiso para quitarlo; a las apps de escritorio
+  // se les concede sin preguntar. Se pide una vez, en un hilo MTA para no
+  // bloquear el apartamento STA de la interfaz.
+  static std::once_flag once;
+  static bool allowed = false;
+  std::call_once(once, [] {
+    try {
+      if (!ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession",
+                                             L"IsBorderRequired"))
+        return;
+      if (!ApiInformation::IsTypePresent(L"Windows.Graphics.Capture.GraphicsCaptureAccess")) {
+        allowed = true;
+        return;
+      }
+      std::thread([] {
+        try {
+          winrt::init_apartment(winrt::apartment_type::multi_threaded);
+          auto op = wgc::GraphicsCaptureAccess::RequestAccessAsync(wgc::GraphicsCaptureAccessKind::Borderless);
+          if (op.wait_for(std::chrono::seconds(3)) == winrt::Windows::Foundation::AsyncStatus::Completed)
+            allowed = op.GetResults() == winrt::Windows::Security::Authorization::AppCapabilityAccess::
+                                             AppCapabilityAccessStatus::Allowed;
+          winrt::uninit_apartment();
+        } catch (...) {
+        }
+      }).join();
+    } catch (...) {
+    }
+    Log("WGC: captura sin borde %s", allowed ? "disponible" : "no disponible");
+  });
+  return allowed;
+}
+
 namespace {
 
 class WgcCapture final : public CaptureSource {
@@ -36,7 +75,9 @@ public:
     try {
       device_ = device;
       device_->GetImmediateContext(&context_);
-      minInterval_ = QpcFrequency() / std::max<UINT>(fps, 1) - QpcFrequency() / 1000; // ~1 ms de margen
+      period_ = QpcFrequency() / std::max<UINT>(fps, 1);
+      nextDue_ = 0;
+      stopping_ = false;
 
       ComPtr<IDXGIDevice> dxgi;
       if (FAILED(device_.As(&dxgi))) return false;
@@ -96,6 +137,12 @@ public:
   }
 
   void Stop() override {
+    {
+      // FrameArrived llega en hilos del pool: revoke() no espera a un callback
+      // en curso, así que se marca la parada bajo el mismo mutex que OnFrame.
+      std::lock_guard lock(frameMutex_);
+      stopping_ = true;
+    }
     frameArrived_.revoke();
     closed_.revoke();
     try {
@@ -103,6 +150,7 @@ public:
       if (pool_) pool_.Close();
     } catch (...) {
     }
+    std::lock_guard lock(frameMutex_);
     session_ = nullptr;
     pool_ = nullptr;
     item_ = nullptr;
@@ -113,16 +161,20 @@ public:
 
 private:
   void OnFrame(const wgc::Direct3D11CaptureFramePool& sender) {
+    std::lock_guard guard(frameMutex_);
+    if (stopping_) return;
     auto frame = sender.TryGetNextFrame();
     if (!frame) return;
     auto contentSize = frame.ContentSize();
 
-    // Si el monitor refresca a más fps que el vídeo, no copiamos frames que
-    // el encoder nunca va a usar.
+    // Si el monitor refresca a más fps que el vídeo, no se copian frames que
+    // el encoder nunca va a usar. Se mide contra una rejilla de 1/fps con medio
+    // periodo de margen: medir desde la última copia descartaba demasiados
+    // (un monitor de 144 Hz se quedaba en 48 fps).
     int64_t now = QpcNow();
     bool resized = contentSize.Width != size_.Width || contentSize.Height != size_.Height;
-    if (!resized && now - lastCopy_ < minInterval_) return;
-    lastCopy_ = now;
+    if (!resized && nextDue_ != 0 && now < nextDue_ - period_ / 2) return;
+    nextDue_ = (nextDue_ == 0 || now - nextDue_ > period_) ? now + period_ : nextDue_ + period_;
 
     try {
       auto surface = frame.Surface();
@@ -157,8 +209,10 @@ private:
   wgc::Direct3D11CaptureFramePool::FrameArrived_revoker frameArrived_;
   wgc::GraphicsCaptureItem::Closed_revoker closed_;
   winrt::Windows::Graphics::SizeInt32 size_{};
-  int64_t lastCopy_ = 0;
-  int64_t minInterval_ = 0;
+  int64_t period_ = 0;
+  int64_t nextDue_ = 0;
+  std::mutex frameMutex_;
+  bool stopping_ = false;
 };
 
 } // namespace
