@@ -19,7 +19,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   // Una sola instancia: si ya hay una, le pedimos que abra el menú.
   HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\SpectreSingleInstance");
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
-    if (HWND other = FindWindowW(L"SpectreMain", nullptr)) PostMessageW(other, WM_SPECTRE_SHOW_MENU, 0, 0);
+    if (HWND other = FindWindowW(L"SpectreMain", nullptr)) {
+      // Le cedemos el primer plano: si no, Windows no deja que su panel coja el foco.
+      DWORD pid = 0;
+      GetWindowThreadProcessId(other, &pid);
+      AllowSetForegroundWindow(pid);
+      PostMessageW(other, WM_SPECTRE_SHOW_MENU, 0, 0);
+    }
     return 0;
   }
 

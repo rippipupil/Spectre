@@ -8,8 +8,10 @@
 
 #include <shellapi.h>
 
+#include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace spectre {
 
@@ -25,10 +27,15 @@ private:
   void SaveClip();
   void ToggleRecording();
   void ToggleReplay();
+  void ToggleMicrophone();
+  void ToggleCamera();
+  void SetClipSeconds(int seconds);
   void ToggleMenu();
   void OpenMenu();
+  void OpenSettings();
+  void BackToPanel();
   void CloseMenu();
-  void ApplyConfig(const Config& next);
+  void ApplyConfig(const Config& next, bool quiet = false);
   void Quit();
 
   // Estado
@@ -48,6 +55,12 @@ private:
   void RemoveTrayIcon();
   void ShowTrayMenu();
   void RenderOverlays();
+  RECT MenuRect() const;
+  void PlaceMenu(bool activate);
+  // Las acciones del menú se ejecutan después del frame de ImGui: cerrar o
+  // redimensionar la ventana en mitad del frame tumbaba la app.
+  void Defer(std::function<void()> action) { deferred_.push_back(std::move(action)); }
+  void RunDeferred();
 
   HINSTANCE instance_ = nullptr;
   HWND hwnd_ = nullptr;
@@ -60,11 +73,18 @@ private:
   std::optional<ForegroundApp> game_;
   ULONGLONG lastGameSeen_ = 0;
 
+  enum class MenuMode { Panel, Settings };
+
   OverlayWindow menu_;
   OverlayWindow toast_;
+  MenuMode menuMode_ = MenuMode::Panel;
   MenuModel menuModel_;
   MenuActions menuActions_;
+  std::vector<std::function<void()>> deferred_;
   HWND previousForeground_ = nullptr;
+  HMONITOR menuMonitor_ = nullptr;
+  UINT menuGeneration_ = 0;     // descarta avisos de cierre de un menú anterior
+  bool restartPending_ = false; // cambios de captura a aplicar al terminar la grabación
   std::string toastText_;
   bool toastError_ = false;
   ULONGLONG toastUntil_ = 0;

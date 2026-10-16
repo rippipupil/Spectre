@@ -73,6 +73,8 @@ public:
   void StopRecording();
   bool Recording() const { return recorder_ && recorder_->Active(); }
   void SetReplaySeconds(double seconds);
+  bool MicCaptured() const { return running_ && audio_.HasMic(); }
+  void SetMicMuted(bool muted) { audio_.SetMicMuted(muted); }
   PipelineStats Stats();
 
 private:

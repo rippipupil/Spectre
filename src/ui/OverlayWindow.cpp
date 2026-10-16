@@ -71,6 +71,20 @@ std::string FontPath(const wchar_t* file) {
   std::error_code ec;
   return std::filesystem::exists(p, ec) ? Narrow(p.wstring()) : std::string();
 }
+// Los rangos por defecto de ImGui solo traen Latin-1: los símbolos que usa el
+// menú (● ○ ■ ▶ ⚙ …) salían como "?". Se añaden solo esos glifos desde Segoe UI
+// Symbol para que el atlas de fuentes siga siendo pequeño.
+void MergeSymbols(ImGuiIO& io, float size) {
+  static const ImWchar ranges[] = {0x2022, 0x2022, 0x2026, 0x2026, 0x2190, 0x2193, 0x25A0, 0x25A0,
+                                   0x25B6, 0x25B6, 0x25CB, 0x25CB, 0x25CF, 0x25CF, 0x2699, 0x2699,
+                                   0x2702, 0x2702, 0};
+  auto path = FontPath(L"seguisym.ttf");
+  if (path.empty()) return;
+  ImFontConfig cfg;
+  cfg.MergeMode = true;
+  cfg.PixelSnapH = true;
+  io.Fonts->AddFontFromFileTTF(path.c_str(), size, &cfg, ranges);
+}
 } // namespace
 
 void OverlayWindow::Init(HINSTANCE instance, Kind kind) {
@@ -131,7 +145,27 @@ void OverlayWindow::Hide() {
   DestroyGraphics();
   HWND h = hwnd_;
   hwnd_ = nullptr;
+  hasHitRegion_ = false;
   DestroyWindow(h);
+}
+
+void OverlayWindow::SetHitRegion(const RECT* rect) {
+  if (!hwnd_) return;
+  if (!rect) {
+    if (hasHitRegion_) SetWindowRgn(hwnd_, nullptr, FALSE);
+    hasHitRegion_ = false;
+    return;
+  }
+  if (hasHitRegion_ && EqualRect(rect, &hitRegion_)) return;
+  // Rectangular a propósito: una región redondeada recortaría el antialiasing
+  // de las esquinas; fuera del panel la ventana es transparente igualmente.
+  HRGN rgn = CreateRectRgn(rect->left, rect->top, rect->right, rect->bottom);
+  if (rgn && SetWindowRgn(hwnd_, rgn, FALSE)) {
+    hitRegion_ = *rect;
+    hasHitRegion_ = true;
+  } else if (rgn) {
+    DeleteObject(rgn);
+  }
 }
 
 bool OverlayWindow::CreateGraphics(UINT width, UINT height) {
@@ -211,8 +245,11 @@ void OverlayWindow::SetupImGui() {
     cfg.SizePixels = 13.0f * scale_;
     main = io.Fonts->AddFontDefault(&cfg);
   }
-  boldFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * scale_) : main;
-  bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.6f * scale_) : main;
+  MergeSymbols(io, base * scale_);
+  boldFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * scale_) : nullptr;
+  if (boldFont_) MergeSymbols(io, base * scale_);
+  bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.6f * scale_) : nullptr;
+  if (bigFont_) MergeSymbols(io, base * 1.6f * scale_);
   if (!boldFont_) boldFont_ = main;
   if (!bigFont_) bigFont_ = main;
 
@@ -223,13 +260,14 @@ void OverlayWindow::SetupImGui() {
 
 void OverlayWindow::Render(const std::function<void()>& draw) {
   if (!hwnd_ || !imgui_) return;
+  // draw() no debe ocultar ni redimensionar esta ventana: las acciones del
+  // menú se aplazan hasta después del frame (ver App::RenderOverlays).
   ImGui::SetCurrentContext(imgui_);
   ImGui_ImplDX11_NewFrame();
   ImGui_ImplWin32_NewFrame();
   ImGui::NewFrame();
   draw();
   ImGui::Render();
-  if (!hwnd_) return; // draw() pudo cerrar la ventana
   const float clear[4] = {0, 0, 0, 0};
   context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
   context_->ClearRenderTargetView(rtv_.Get(), clear);
@@ -246,8 +284,13 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     self = reinterpret_cast<OverlayWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   }
   if (self && self->imgui_) {
+    // Se restaura el contexto anterior: este mensaje puede llegar en mitad del
+    // frame de la otra ventana (SetWindowPos, ShowWindow... son síncronos).
+    ImGuiContext* previous = ImGui::GetCurrentContext();
     ImGui::SetCurrentContext(self->imgui_);
-    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
+    LRESULT handled = ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
+    ImGui::SetCurrentContext(previous);
+    if (handled) return 1;
   }
   switch (msg) {
   case WM_MOUSEACTIVATE:
@@ -259,6 +302,9 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
   case WM_CLOSE:
     if (self && self->onCloseRequested) self->onCloseRequested();
     return 0;
+  case WM_ACTIVATE:
+    if (LOWORD(wp) == WA_INACTIVE && self && self->onDeactivated) self->onDeactivated();
+    break;
   case WM_ERASEBKGND:
     return 1;
   default:

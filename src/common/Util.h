@@ -42,5 +42,6 @@ constexpr UINT WM_SPECTRE_NOTIFY = WM_APP + 10;   // lParam = new std::string* (
 constexpr UINT WM_SPECTRE_SHOW_MENU = WM_APP + 11; // otra instancia pide abrir el menú
 constexpr UINT WM_SPECTRE_TRAY = WM_APP + 12;
 constexpr UINT WM_SPECTRE_PIPELINE_ERROR = WM_APP + 13; // lParam = new std::string*
+constexpr UINT WM_SPECTRE_CLOSE_MENU = WM_APP + 14;     // wParam = generación del menú
 
 } // namespace spectre

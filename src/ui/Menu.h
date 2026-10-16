@@ -16,14 +16,17 @@ namespace spectre {
 
 class OverlayWindow;
 
-// Datos que el menú muestra. Las listas de dispositivos se rellenan al
-// abrir el menú (no se consultan en cada frame).
+// Datos que muestran el panel rápido (Alt+Z) y la ventana de ajustes. Las
+// listas de dispositivos solo se cargan al abrir los ajustes: abrir el panel
+// no enumera cámaras ni audio, así aparece al instante.
 struct MenuModel {
-  Config config; // copia de trabajo, se aplica con "Aplicar"
+  Config config; // panel: copia del config activo; ajustes: copia de trabajo
   bool dirty = false;
+  bool devicesLoaded = false;
   PipelineStats stats;
   ProcessUsage usage;
   bool replayActive = false;
+  bool micLive = false; // el micrófono se está capturando (se puede silenciar al vuelo)
   bool gameDetected = false;
   std::string gameName;
   std::string hotkeyError;
@@ -36,24 +39,40 @@ struct MenuModel {
   std::string outputDir;
 
   // Estado de la interfaz
+  unsigned long long openedAt = 0; // GetTickCount64 al abrir (animación de entrada)
+  float panelWidth = 0, panelHeight = 0; // tamaño real del panel en el último frame
+  int page = 0;                          // página activa de los ajustes
   int selectedClip = -1;
   double clipDuration = 0;
   float trimStart = 0, trimEnd = 0;
 };
 
+// Todas las acciones se ejecutan después del frame de ImGui (App las aplaza):
+// pueden cerrar o redimensionar la ventana sin romper el frame en curso.
 struct MenuActions {
   std::function<void()> saveClip;
   std::function<void()> toggleRecording;
   std::function<void()> toggleReplay;
+  std::function<void()> toggleMic;
+  std::function<void()> toggleCamera;
+  std::function<void(int)> setClipSeconds;
+  std::function<void()> openSettings;
+  std::function<void()> backToPanel;
   std::function<void()> close;
   std::function<void()> quit;
   std::function<void(const Config&)> apply;
   std::function<void()> refreshClips;
+  std::function<void(const std::string&)> openPath;
+  std::function<void(const std::string&)> showInFolder;
   std::function<void(const std::string&, double, double)> trim;
   std::function<double(const std::string&)> probeDuration;
 };
 
-void DrawMenu(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
+// Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).
+constexpr float kPanelWidth = 320.0f;
+
+void DrawPanel(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
+void DrawSettings(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
 void DrawToast(OverlayWindow& window, const std::string& text, bool error, float alpha);
 
 } // namespace spectre
