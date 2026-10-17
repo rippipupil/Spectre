@@ -19,6 +19,7 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
   startQpc_ = startQpc;
   sink_ = std::move(sink);
   produced_ = 0;
+  micMuted_ = false;
 
   if (settings.system) {
     system_ = std::make_unique<AudioCapture>();
@@ -125,6 +126,7 @@ void AudioPipeline::EncodeChunk() {
   if (system_) system_->Read(sysBuf_.data(), kFrameSize);
   if (mic_) mic_->Read(micBuf_.data(), kFrameSize);
 
+  const float micGain = micMuted_ ? 0.0f : settings_.micVolume;
   for (auto& t : tracks_) {
     frame_->nb_samples = kFrameSize;
     frame_->format = AV_SAMPLE_FMT_FLTP;
@@ -140,8 +142,8 @@ void AudioPipeline::EncodeChunk() {
         r += sysBuf_[i * 2 + 1] * settings_.systemVolume;
       }
       if (t.sourceMask & 2) {
-        l += micBuf_[i * 2] * settings_.micVolume;
-        r += micBuf_[i * 2 + 1] * settings_.micVolume;
+        l += micBuf_[i * 2] * micGain;
+        r += micBuf_[i * 2 + 1] * micGain;
       }
       left[i] = std::clamp(l, -1.0f, 1.0f);
       right[i] = std::clamp(r, -1.0f, 1.0f);

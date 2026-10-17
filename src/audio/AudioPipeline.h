@@ -34,6 +34,9 @@ public:
   void Stop();
 
   const StreamList& Streams() const { return streams_; }
+  bool HasMic() const { return mic_ != nullptr; }
+  // Silencia el micrófono sin reiniciar la captura (el buffer de replay no se pierde).
+  void SetMicMuted(bool muted) { micMuted_ = muted; }
 
 private:
   struct Track {
@@ -54,6 +57,7 @@ private:
   std::vector<Track> tracks_;
   StreamList streams_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> micMuted_{false};
   std::thread thread_;
   int64_t produced_ = 0;
   AVFrame* frame_ = nullptr;

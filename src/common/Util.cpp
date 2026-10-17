@@ -133,4 +133,23 @@ std::recursive_mutex& GpuMutex() {
   return m;
 }
 
+bool MediaFoundationAvailable() {
+  static const bool available = [] {
+    for (const wchar_t* dll : {L"mfplat.dll", L"mfreadwrite.dll", L"mf.dll"})
+      if (!LoadLibraryExW(dll, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) return false;
+    return true;
+  }();
+  return available;
+}
+
+std::atomic<int>& PendingWrites() {
+  static std::atomic<int> count{0};
+  return count;
+}
+
+void WaitForPendingWrites(DWORD timeoutMs) {
+  ULONGLONG until = GetTickCount64() + timeoutMs;
+  while (PendingWrites() > 0 && GetTickCount64() < until) Sleep(50);
+}
+
 } // namespace spectre

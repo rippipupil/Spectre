@@ -140,9 +140,11 @@ bool AudioCapture::Start(AudioSourceKind kind, const std::string& deviceId, DWOR
   startOk_ = false;
   running_ = true;
   thread_ = std::thread([this] { Run(); });
-  WaitForSingleObject(readyEvent_, 6000);
-  if (!startOk_) Stop();
-  return startOk_;
+  // Si el dispositivo tarda demasiado (Bluetooth, activación del audio de un
+  // proceso) se da por fallido aunque el hilo termine abriéndolo después.
+  bool ok = WaitForSingleObject(readyEvent_, 6000) == WAIT_OBJECT_0 && startOk_;
+  if (!ok) Stop();
+  return ok;
 }
 
 void AudioCapture::Stop() {

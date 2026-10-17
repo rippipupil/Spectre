@@ -25,7 +25,8 @@ Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0.17763
+; 2004 (19041): ocultar el panel de las capturas y el audio por proceso lo necesitan.
+MinVersion=10.0.19041
 WizardStyle=modern
 CloseApplications=yes
 
@@ -34,7 +35,8 @@ Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "autostart"; Description: "Iniciar Spectre con Windows"; GroupDescription: "Opciones:"
+; Solo en la primera instalación: al actualizar manda lo que el usuario eligió en la app.
+Name: "autostart"; Description: "Iniciar Spectre con Windows"; GroupDescription: "Opciones:"; Check: not IsUpgrade
 Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; GroupDescription: "Opciones:"; Flags: unchecked
 
 [Files]
@@ -47,6 +49,8 @@ Name: "{userdesktop}\Spectre"; Filename: "{app}\spectre.exe"; Tasks: desktopicon
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Spectre"; ValueData: """{app}\spectre.exe"" --tray"; Flags: uninsdeletevalue; Tasks: autostart
+; La app también puede activar el inicio con Windows: al desinstalar se borra siempre.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Spectre"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\spectre.exe"; Description: "Abrir Spectre"; Flags: nowait postinstall skipifsilent
@@ -58,11 +62,16 @@ Filename: "{cmd}"; Parameters: "/C taskkill /IM spectre.exe /F"; Flags: runhidde
 Type: filesandordirs; Name: "{userappdata}\Spectre"
 
 [Code]
-// Las ediciones N/KN de Windows no traen Media Foundation (cámara y
-// encoder de respaldo). Se avisa en vez de fallar en silencio.
+function IsUpgrade(): Boolean;
+begin
+  Result := RegValueExists(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'UninstallString');
+end;
+
+// Las ediciones N/KN de Windows no traen Media Foundation. Spectre funciona
+// igual, pero la webcam no; se avisa en vez de fallar en silencio.
 function InitializeSetup(): Boolean;
 begin
   Result := True;
   if not FileExists(ExpandConstant('{sys}\mfplat.dll')) then
-    MsgBox('Tu Windows no tiene Media Foundation (ediciones N). Instala el "Media Feature Pack" desde Configuración > Aplicaciones > Características opcionales para que la cámara funcione.', mbInformation, MB_OK);
+    MsgBox('Tu Windows no incluye Media Foundation (ediciones N). Spectre funcionará, pero sin webcam. Para usarla, instala el "Paquete de características multimedia" desde Configuración > Aplicaciones > Características opcionales.', mbInformation, MB_OK);
 end;

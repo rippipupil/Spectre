@@ -28,6 +28,11 @@ public:
   void Hide();
   bool Visible() const { return hwnd_ != nullptr; }
   HWND Hwnd() const { return hwnd_; }
+  UINT Width() const { return width_; }
+  UINT Height() const { return height_; }
+  // Zona que recibe clics (coordenadas de la ventana); fuera de ella el ratón
+  // pasa a la ventana de debajo. nullptr = toda la ventana.
+  void SetHitRegion(const RECT* rect);
 
   // draw se ejecuta dentro de un frame de ImGui.
   void Render(const std::function<void()>& draw);
@@ -36,7 +41,8 @@ public:
   ImFont* BigFont() const { return bigFont_; }
   float Scale() const { return scale_; }
 
-  std::function<void()> onCloseRequested;
+  std::function<void()> onCloseRequested; // Alt+F4 sobre la ventana
+  std::function<void()> onDeactivated;    // el usuario hizo clic en otra ventana
 
 private:
   static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -49,6 +55,8 @@ private:
   HWND hwnd_ = nullptr;
   UINT width_ = 0, height_ = 0;
   float scale_ = 1.0f;
+  RECT hitRegion_{};
+  bool hasHitRegion_ = false;
 
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> context_;
