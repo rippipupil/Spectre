@@ -2,6 +2,7 @@
 // pero funciona en Windows 10 anteriores a 1903 y con drivers donde WGC falla.
 
 #include "capture/CaptureSource.h"
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <dxgi1_2.h>
@@ -25,7 +26,10 @@ public:
     fps_ = std::max<UINT>(fps, 1);
     if (!Duplicate()) return false;
     running_ = true;
-    thread_ = std::thread([this] { Run(); });
+    thread_ = std::thread([this] {
+      InstallThreadCrashHandler();
+      Run();
+    });
     Log("DDA: captura iniciada");
     return true;
   }
@@ -68,7 +72,8 @@ private:
   void Run() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     // Rejilla de 1/fps con medio periodo de margen (ver WgcCapture::OnFrame).
-    const int64_t period = QpcFrequency() / std::max<UINT>(fps_, 1);
+    // Hasta 2×fps copias: ver el mismo límite en WgcCapture.
+    const int64_t period = QpcFrequency() / (2 * std::max<UINT>(fps_, 1));
     int64_t nextDue = 0;
     while (running_) {
       if (!duplication_) {

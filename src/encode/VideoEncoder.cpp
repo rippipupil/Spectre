@@ -8,6 +8,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 
+#include <algorithm>
 #include <cstring>
 
 namespace spectre {
@@ -95,10 +96,18 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
   for (const auto& name : order) {
     const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
     if (!codec) continue;
-    if (TryOpen(codec, settings)) {
+    // Primero con las opciones de calidad; si el driver las rechaza, el mismo
+    // encoder en modo simple antes que bajar a uno peor.
+    bool ok = TryOpen(codec, settings, false);
+    if (!ok) {
+      Log("%s no aceptó las opciones de calidad; se abre en modo simple", codec->name);
+      ok = TryOpen(codec, settings, true);
+    }
+    if (ok) {
       name_ = name;
-      Log("Encoder de vídeo: %s %dx%d@%d %d kbps (%s)", name_.c_str(), settings.width, settings.height,
-          settings.fps, settings.bitrateKbps, ZeroCopy() ? "cero copias" : "memoria de sistema");
+      Log("Encoder de vídeo: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s)", name_.c_str(), settings.width,
+          settings.height, settings.fps, settings.quality.targetKbps, settings.quality.maxKbps,
+          settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema");
       return true;
     }
   }
@@ -107,20 +116,26 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
   return false;
 }
 
-bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s) {
+bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, bool simple) {
   const Candidate* cand = FindCandidate(codec->name);
   const bool zeroCopy = cand && cand->zeroCopy && SupportsPixFmt(codec, AV_PIX_FMT_D3D11);
+  const QualityPlan& q = s.quality;
+  const int level = q.level < 0 ? 2 : q.level; // personalizada usa las opciones de "alta"
+  const int64_t target = int64_t(q.targetKbps) * 1000;
+  const int64_t cap = int64_t(std::max(q.maxKbps, q.targetKbps)) * 1000;
 
   ctx_ = avcodec_alloc_context3(codec);
   ctx_->width = s.width;
   ctx_->height = s.height;
   ctx_->time_base = {1, s.fps};
   ctx_->framerate = {s.fps, 1};
-  ctx_->gop_size = s.fps; // keyframe cada segundo: clips cortados con precisión sin recodificar
+  // Keyframe cada 2 s: los clips se cortan sin recodificar y, frente a uno
+  // por segundo, sobran bits para el resto de fotogramas.
+  ctx_->gop_size = s.fps * 2;
   ctx_->max_b_frames = 0;
-  ctx_->bit_rate = int64_t(s.bitrateKbps) * 1000;
-  ctx_->rc_max_rate = ctx_->bit_rate;
-  ctx_->rc_buffer_size = int(ctx_->bit_rate * 2);
+  ctx_->bit_rate = target;
+  ctx_->rc_max_rate = cap;
+  ctx_->rc_buffer_size = int(std::min<int64_t>(cap * 2, INT32_MAX));
   ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
   ctx_->color_range = AVCOL_RANGE_MPEG;
   ctx_->color_primaries = AVCOL_PRI_BT709;
@@ -129,23 +144,69 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s) 
 
   AVDictionary* opts = nullptr;
   std::string n = codec->name;
+  const std::string cq = std::to_string(q.cq);
   if (n.find("nvenc") != std::string::npos) {
-    av_dict_set(&opts, "preset", "p4", 0);
-    av_dict_set(&opts, "tune", "hq", 0);
-    av_dict_set(&opts, "rc", "cbr", 0);
-    av_dict_set(&opts, "rc-lookahead", "0", 0);
     av_dict_set(&opts, "forced-idr", "1", 0);
     av_dict_set(&opts, "delay", "0", 0);
+    av_dict_set(&opts, "rc-lookahead", "0", 0);
+    av_dict_set(&opts, "tune", "hq", 0);
+    if (simple) {
+      av_dict_set(&opts, "preset", "p4", 0);
+      av_dict_set(&opts, "rc", "cbr", 0);
+      ctx_->rc_max_rate = ctx_->bit_rate;
+    } else {
+      // VBR con calidad objetivo: las escenas fáciles ocupan poco y las de
+      // mucho movimiento reciben bits hasta el tope. AQ espacial reparte los
+      // bits donde la imagen es más compleja; multipass afina el control de
+      // tasa a un cuarto de resolución, casi gratis en NVENC.
+      static const char* kPreset[] = {"p4", "p4", "p5", "p6"};
+      av_dict_set(&opts, "preset", kPreset[level], 0);
+      av_dict_set(&opts, "rc", "vbr", 0);
+      av_dict_set(&opts, "spatial-aq", "1", 0);
+      av_dict_set(&opts, "aq-strength", "8", 0);
+      if (level >= 2) av_dict_set(&opts, "multipass", "qres", 0);
+      // Bitrate manual: VBR clásico alrededor del valor elegido. Preajuste:
+      // calidad objetivo (cq) y NVENC decide el bitrate hasta el tope.
+      if (q.level >= 0) {
+        av_dict_set(&opts, "cq", cq.c_str(), 0);
+        ctx_->bit_rate = 0;
+      }
+    }
   } else if (n.find("amf") != std::string::npos) {
-    av_dict_set(&opts, "usage", "lowlatency", 0);
-    av_dict_set(&opts, "quality", "speed", 0);
-    av_dict_set(&opts, "rc", "cbr", 0);
+    if (simple) {
+      av_dict_set(&opts, "usage", "lowlatency", 0);
+      av_dict_set(&opts, "quality", "speed", 0);
+      av_dict_set(&opts, "rc", "cbr", 0);
+      ctx_->rc_max_rate = ctx_->bit_rate;
+    } else {
+      static const char* kQuality[] = {"speed", "balanced", "balanced", "quality"};
+      av_dict_set(&opts, "usage", "transcoding", 0);
+      av_dict_set(&opts, "quality", kQuality[level], 0);
+      av_dict_set(&opts, "rc", "vbr_peak", 0);
+      av_dict_set(&opts, "enforce_hrd", "0", 0);
+      if (level >= 1) av_dict_set(&opts, "vbaq", "1", 0);
+    }
   } else if (n.find("qsv") != std::string::npos) {
-    av_dict_set(&opts, "preset", "veryfast", 0);
     av_dict_set(&opts, "look_ahead", "0", 0);
+    if (simple) {
+      av_dict_set(&opts, "preset", "veryfast", 0);
+      ctx_->rc_max_rate = ctx_->bit_rate;
+    } else {
+      static const char* kPreset[] = {"veryfast", "faster", "medium", "medium"};
+      av_dict_set(&opts, "preset", kPreset[level], 0);
+    }
   } else if (n.find("_mf") != std::string::npos) {
-    av_dict_set(&opts, "rate_control", "cbr", 0);
-    av_dict_set(&opts, "scenario", "live_streaming", 0);
+    if (simple) {
+      av_dict_set(&opts, "rate_control", "cbr", 0);
+      av_dict_set(&opts, "scenario", "live_streaming", 0);
+      ctx_->rc_max_rate = ctx_->bit_rate;
+    } else {
+      av_dict_set(&opts, "rate_control", "pc_vbr", 0);
+      av_dict_set(&opts, "scenario", "archive", 0);
+    }
+  } else if (n.find("openh264") != std::string::npos) {
+    // Software: no hay opciones de calidad que no cuesten CPU. Se usa el tope.
+    ctx_->bit_rate = cap;
   }
 
   bool ok = false;
@@ -164,7 +225,7 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s) 
   if (ok) {
     int err = avcodec_open2(ctx_, codec, &opts);
     if (err < 0) {
-      Log("No se pudo abrir %s: %s", codec->name, AvError(err).c_str());
+      Log("No se pudo abrir %s (%s): %s", codec->name, simple ? "simple" : "calidad", AvError(err).c_str());
       ok = false;
     }
   }

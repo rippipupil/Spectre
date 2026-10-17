@@ -1,10 +1,12 @@
 #include "audio/AudioPipeline.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <avrt.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace spectre {
 
@@ -60,7 +62,17 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
   sysBuf_.assign(kFrameSize * kAudioChannels, 0.0f);
   micBuf_.assign(kFrameSize * kAudioChannels, 0.0f);
   running_ = true;
-  thread_ = std::thread([this] { Run(); });
+  systemLevel_ = micLevel_ = 0.0f;
+  systemPeak_ = micPeak_ = 0.0f;
+  lastLevelLog_ = startedAt_ = QpcNow();
+  thread_ = std::thread([this] {
+    InstallThreadCrashHandler();
+    try {
+      Run();
+    } catch (const std::exception& e) {
+      Log("Audio: excepción en el hilo de mezcla: %s", e.what());
+    }
+  });
   Log("Audio: %zu pista(s), sistema=%d micrófono=%d", tracks_.size(), system_ ? 1 : 0, mic_ ? 1 : 0);
   return true;
 }
@@ -72,7 +84,7 @@ bool AudioPipeline::OpenTrack(Track& track, const char* title) {
   track.ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
   track.ctx->sample_rate = kAudioRate;
   av_channel_layout_default(&track.ctx->ch_layout, kAudioChannels);
-  track.ctx->bit_rate = 160000;
+  track.ctx->bit_rate = 192000;
   track.ctx->time_base = {1, kAudioRate};
   track.ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
   int err = avcodec_open2(track.ctx, codec, nullptr);
@@ -115,6 +127,24 @@ void AudioPipeline::Run() {
     Sleep(10);
     int64_t target = (QpcNow() - startQpc_) * kAudioRate / freq - kLatencyFrames;
     while (running_ && target - produced_ >= kFrameSize) EncodeChunk();
+    // Nivel de cada fuente: el medidor lo lee en cada frame y el log lo
+    // registra cada 10 s el primer minuto y luego cada 5 min, para no llenarlo.
+    // Un pico a 0 con el juego sonando delata que se escucha el dispositivo
+    // equivocado.
+    float sys = system_ ? system_->TakePeak() : 0.0f;
+    float mic = mic_ ? mic_->TakePeak() : 0.0f;
+    systemLevel_ = std::max(sys, systemLevel_.load() * 0.85f);
+    micLevel_ = std::max(mic, micLevel_.load() * 0.85f);
+    systemPeak_ = std::max(systemPeak_, sys);
+    micPeak_ = std::max(micPeak_, mic);
+    int64_t now = QpcNow();
+    int64_t interval = now - startedAt_ < freq * 60 ? freq * 10 : freq * 300;
+    if (now - lastLevelLog_ > interval) {
+      lastLevelLog_ = now;
+      auto db = [](float peak) { return peak > 1e-5f ? 20.0f * std::log10(peak) : -100.0f; };
+      Log("Audio nivel: sistema %.0f dB, micrófono %.0f dB", db(systemPeak_), db(micPeak_));
+      systemPeak_ = micPeak_ = 0.0f;
+    }
   }
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }

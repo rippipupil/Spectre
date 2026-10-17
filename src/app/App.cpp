@@ -1,4 +1,5 @@
 #include "app/App.h"
+#include "app/CrashHandler.h"
 
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
@@ -47,7 +48,7 @@ float MonitorScale(HMONITOR monitor) {
 bool SameCaptureSettings(const Config& a, const Config& b) {
   return a.captureMode == b.captureMode && a.monitorIndex == b.monitorIndex && a.captureApi == b.captureApi &&
          a.captureCursor == b.captureCursor && a.fps == b.fps && a.outputHeight == b.outputHeight &&
-         a.bitrateKbps == b.bitrateKbps && a.codec == b.codec && a.encoder == b.encoder &&
+         a.quality == b.quality && a.bitrateKbps == b.bitrateKbps && a.codec == b.codec && a.encoder == b.encoder &&
          a.gpuPriority == b.gpuPriority && a.captureSystemAudio == b.captureSystemAudio &&
          a.outputDeviceId == b.outputDeviceId && a.gameAudioOnly == b.gameAudioOnly && a.captureMic == b.captureMic &&
          a.micDeviceId == b.micDeviceId && a.systemVolume == b.systemVolume && a.micVolume == b.micVolume &&
@@ -110,14 +111,22 @@ int App::Run(HINSTANCE instance, bool startInTray) {
     HWND hwnd = hwnd_;
     auto pending = std::make_shared<PendingWrite>();
     std::thread([hwnd, path, start, end, pending] {
-      auto in = std::filesystem::path(Widen(path));
-      std::wstring base = in.stem().wstring() + L"_recorte_" + Widen(TimestampForFile());
-      auto out = in.parent_path() / (base + L".mp4");
-      std::error_code ec;
-      for (int i = 2; std::filesystem::exists(out, ec); ++i)
-        out = in.parent_path() / (base + L"_" + std::to_wstring(i) + L".mp4");
+      InstallThreadCrashHandler();
       std::string error;
-      bool ok = TrimFile(path, Narrow(out.wstring()), start, end, &error);
+      bool ok = false;
+      std::filesystem::path out;
+      try {
+        auto in = std::filesystem::path(Widen(path));
+        std::wstring base = in.stem().wstring() + L"_recorte_" + Widen(TimestampForFile());
+        out = in.parent_path() / (base + L".mp4");
+        std::error_code ec;
+        for (int i = 2; std::filesystem::exists(out, ec); ++i)
+          out = in.parent_path() / (base + L"_" + std::to_wstring(i) + L".mp4");
+        ok = TrimFile(path, Narrow(out.wstring()), start, end, &error);
+      } catch (const std::exception& e) {
+        error = std::string("No se pudo recortar: ") + e.what();
+        Log("Recorte: excepción: %s", e.what());
+      }
       auto* msg = new std::string(ok ? "Recorte guardado: " + Narrow(out.filename().wstring()) : error);
       if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
     }).detach();
@@ -429,6 +438,7 @@ PipelineSettings App::BuildSettings() const {
   s.cursor = config_.captureCursor;
   s.fps = config_.fps;
   s.outputHeight = config_.outputHeight;
+  s.quality = config_.quality;
   s.bitrateKbps = config_.bitrateKbps;
   s.codec = config_.codec;
   s.encoder = config_.encoder;
@@ -456,6 +466,7 @@ bool App::StartPipeline() {
   HWND hwnd = hwnd_;
   PipelineSettings settings = BuildSettings();
   pipelinePid_ = settings.audio.processOnly ? settings.audio.processId : 0;
+  pipelineWindow_ = settings.target.window;
   bool ok = pipeline_.Start(settings, [hwnd](const std::string& message, bool error) {
     auto* text = new std::string(message);
     if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, error ? 1 : 0, reinterpret_cast<LPARAM>(text))) delete text;
@@ -487,7 +498,10 @@ void App::CheckGame() {
     // Modo "ventana del juego": la captura sigue al juego activo. Se comprueba
     // en cada pasada (no solo cuando cambia), por si la primera vez se estaba
     // grabando o la captura no pudo arrancar.
-    bool retarget = config_.captureMode == "game" && gameActive && pipeline_.TargetWindow() != game_->window;
+    // Se compara con la ventana pedida, no con la efectiva: si WGC no pudo y se
+    // cayó a DDA (siempre en Windows 10), la efectiva es el monitor y se
+    // reiniciaba el pipeline cada 2 s, vaciando el replay.
+    bool retarget = config_.captureMode == "game" && gameActive && pipelineWindow_ != game_->window;
     // "Solo el audio del juego": el proceso capturado tiene que seguir al juego,
     // también en modo pantalla completa y cuando el juego se cierra.
     bool processAudio = config_.captureSystemAudio && config_.gameAudioOnly;
@@ -574,11 +588,23 @@ void App::RefreshMenuModel(bool devices) {
 
 void App::RenderOverlays() {
   ULONGLONG now = GetTickCount64();
+  // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio.
+  // Hide() provoca un aviso de desactivación con la generación actual; se sube
+  // después para que ese aviso quede obsoleto y no cierre el menú nuevo.
+  if (menu_.Visible() && menu_.Lost()) {
+    RECT rect = MenuRect();
+    menu_.Hide();
+    ++menuGeneration_;
+    if (!menu_.Show(rect, true)) CloseMenu();
+    if (menuMode_ == MenuMode::Settings && menu_.Visible()) menu_.SetHitRegion(nullptr);
+  }
+  if (toast_.Visible() && toast_.Lost()) toast_.Hide();
   if (menu_.Visible()) {
     if (now - lastStats_ > 1000) {
       lastStats_ = now;
       RefreshMenuModel(false);
     }
+    pipeline_.AudioLevels(&menuModel_.systemLevel, &menuModel_.micLevel);
     if (menuMode_ == MenuMode::Panel) {
       menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_); });
       if (menuModel_.panelHeight > 0) {

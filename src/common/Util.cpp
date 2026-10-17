@@ -118,9 +118,11 @@ void Log(const char* fmt, ...) {
   std::lock_guard lock(mutex);
   if (!file.is_open()) {
     auto path = AppDataDir() / L"spectre.log";
-    // El log se rota simplemente al pasar de 2 MB para no crecer sin límite.
+    // Al pasar de 2 MB el log se renombra a spectre.old.log: no crece sin
+    // límite y las líneas CRASH: del cierre anterior siguen ahí.
     std::error_code ec;
-    if (std::filesystem::file_size(path, ec) > 2 * 1024 * 1024) std::filesystem::remove(path, ec);
+    if (std::filesystem::file_size(path, ec) > 2 * 1024 * 1024)
+      std::filesystem::rename(path, AppDataDir() / L"spectre.old.log", ec);
     file.open(path, std::ios::app);
   }
   file << line;

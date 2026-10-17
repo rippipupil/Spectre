@@ -88,6 +88,7 @@ private:
   ULONGLONG menuClosedAt_ = 0;
   ULONGLONG startFailedAt_ = 0; // la captura falló al arrancar: no reintentar en bucle
   DWORD pipelinePid_ = 0;       // proceso cuyo audio se captura (0 = todo el sistema)
+  HWND pipelineWindow_ = nullptr; // ventana pedida al arrancar (nula = monitor)
   std::deque<std::string> recentNames_; // nombres ya usados aunque el archivo aún no exista
   bool restartPending_ = false; // cambios de captura a aplicar al terminar la grabación
   std::string toastText_;

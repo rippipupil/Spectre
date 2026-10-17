@@ -1,6 +1,7 @@
 #pragma once
 
 #include "encode/Media.h"
+#include "encode/Quality.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -18,7 +19,7 @@ struct VideoEncoderSettings {
   int width = 1920;
   int height = 1080;
   int fps = 60;
-  int bitrateKbps = 20000;
+  QualityPlan quality;        // bitrate, tope y calidad objetivo (ver Quality.h)
   std::string codec = "h264"; // h264 | hevc | av1
   std::string preferred = "auto";
 };
@@ -51,7 +52,9 @@ public:
   bool ZeroCopy() const { return hwFrames_ != nullptr; }
 
 private:
-  bool TryOpen(const AVCodec* codec, const VideoEncoderSettings& s);
+  // simple: sin las opciones de calidad (VBR, AQ, multipass...), por si el
+  // driver no las admite y preferimos este encoder a uno peor.
+  bool TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, bool simple);
   bool SetupHwFrames(const VideoEncoderSettings& s);
   bool SetupStaging(const VideoEncoderSettings& s);
   bool SendStaging(int index, const PacketSink& sink);
