@@ -75,7 +75,10 @@ public:
     try {
       device_ = device;
       device_->GetImmediateContext(&context_);
-      period_ = QpcFrequency() / std::max<UINT>(fps, 1);
+      // Se admiten hasta 2×fps copias: con una rejilla de 1/fps sin sincronizar
+      // con la del encoder, en monitores de 144 Hz salían frames duplicados y
+      // saltados según la fase. Cuesta como mucho fps copias de textura extra.
+      period_ = QpcFrequency() / (2 * std::max<UINT>(fps, 1));
       nextDue_ = 0;
       stopping_ = false;
 
@@ -118,7 +121,9 @@ public:
       }
       if (ApiInformation::IsPropertyPresent(sessionClass, L"MinUpdateInterval")) {
         // Windows 11 24H2+: el propio sistema limita la frecuencia de captura.
-        session_.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan(10'000'000 / std::max<UINT>(fps, 1)));
+        // Medio periodo: con 1/fps exacto un monitor de 144 Hz solo entregaría
+        // uno de cada tres refrescos (48 fps).
+        session_.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan(10'000'000 / (2 * std::max<UINT>(fps, 1))));
       }
 
       frameArrived_ = pool_.FrameArrived(winrt::auto_revoke, [this](auto&& sender, auto&&) { OnFrame(sender); });
@@ -167,9 +172,9 @@ private:
     if (!frame) return;
     auto contentSize = frame.ContentSize();
 
-    // Si el monitor refresca a más fps que el vídeo, no se copian frames que
-    // el encoder nunca va a usar. Se mide contra una rejilla de 1/fps con medio
-    // periodo de margen: medir desde la última copia descartaba demasiados
+    // Si el monitor refresca a mucho más que el vídeo, no se copian frames que
+    // el encoder nunca va a usar. Se mide contra una rejilla de 1/(2·fps) con
+    // medio periodo de margen: medir desde la última copia descartaba demasiados
     // (un monitor de 144 Hz se quedaba en 48 fps).
     int64_t now = QpcNow();
     bool resized = contentSize.Width != size_.Width || contentSize.Height != size_.Height;

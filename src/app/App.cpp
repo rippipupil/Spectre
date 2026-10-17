@@ -466,6 +466,7 @@ bool App::StartPipeline() {
   HWND hwnd = hwnd_;
   PipelineSettings settings = BuildSettings();
   pipelinePid_ = settings.audio.processOnly ? settings.audio.processId : 0;
+  pipelineWindow_ = settings.target.window;
   bool ok = pipeline_.Start(settings, [hwnd](const std::string& message, bool error) {
     auto* text = new std::string(message);
     if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, error ? 1 : 0, reinterpret_cast<LPARAM>(text))) delete text;
@@ -497,7 +498,10 @@ void App::CheckGame() {
     // Modo "ventana del juego": la captura sigue al juego activo. Se comprueba
     // en cada pasada (no solo cuando cambia), por si la primera vez se estaba
     // grabando o la captura no pudo arrancar.
-    bool retarget = config_.captureMode == "game" && gameActive && pipeline_.TargetWindow() != game_->window;
+    // Se compara con la ventana pedida, no con la efectiva: si WGC no pudo y se
+    // cayó a DDA (siempre en Windows 10), la efectiva es el monitor y se
+    // reiniciaba el pipeline cada 2 s, vaciando el replay.
+    bool retarget = config_.captureMode == "game" && gameActive && pipelineWindow_ != game_->window;
     // "Solo el audio del juego": el proceso capturado tiene que seguir al juego,
     // también en modo pantalla completa y cuando el juego se cierra.
     bool processAudio = config_.captureSystemAudio && config_.gameAudioOnly;

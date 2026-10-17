@@ -72,7 +72,8 @@ private:
   void Run() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     // Rejilla de 1/fps con medio periodo de margen (ver WgcCapture::OnFrame).
-    const int64_t period = QpcFrequency() / std::max<UINT>(fps_, 1);
+    // Hasta 2×fps copias: ver el mismo límite en WgcCapture.
+    const int64_t period = QpcFrequency() / (2 * std::max<UINT>(fps_, 1));
     int64_t nextDue = 0;
     while (running_) {
       if (!duplication_) {
