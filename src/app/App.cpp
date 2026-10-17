@@ -47,7 +47,7 @@ float MonitorScale(HMONITOR monitor) {
 bool SameCaptureSettings(const Config& a, const Config& b) {
   return a.captureMode == b.captureMode && a.monitorIndex == b.monitorIndex && a.captureApi == b.captureApi &&
          a.captureCursor == b.captureCursor && a.fps == b.fps && a.outputHeight == b.outputHeight &&
-         a.bitrateKbps == b.bitrateKbps && a.codec == b.codec && a.encoder == b.encoder &&
+         a.quality == b.quality && a.bitrateKbps == b.bitrateKbps && a.codec == b.codec && a.encoder == b.encoder &&
          a.gpuPriority == b.gpuPriority && a.captureSystemAudio == b.captureSystemAudio &&
          a.outputDeviceId == b.outputDeviceId && a.gameAudioOnly == b.gameAudioOnly && a.captureMic == b.captureMic &&
          a.micDeviceId == b.micDeviceId && a.systemVolume == b.systemVolume && a.micVolume == b.micVolume &&
@@ -110,14 +110,21 @@ int App::Run(HINSTANCE instance, bool startInTray) {
     HWND hwnd = hwnd_;
     auto pending = std::make_shared<PendingWrite>();
     std::thread([hwnd, path, start, end, pending] {
-      auto in = std::filesystem::path(Widen(path));
-      std::wstring base = in.stem().wstring() + L"_recorte_" + Widen(TimestampForFile());
-      auto out = in.parent_path() / (base + L".mp4");
-      std::error_code ec;
-      for (int i = 2; std::filesystem::exists(out, ec); ++i)
-        out = in.parent_path() / (base + L"_" + std::to_wstring(i) + L".mp4");
       std::string error;
-      bool ok = TrimFile(path, Narrow(out.wstring()), start, end, &error);
+      bool ok = false;
+      std::filesystem::path out;
+      try {
+        auto in = std::filesystem::path(Widen(path));
+        std::wstring base = in.stem().wstring() + L"_recorte_" + Widen(TimestampForFile());
+        out = in.parent_path() / (base + L".mp4");
+        std::error_code ec;
+        for (int i = 2; std::filesystem::exists(out, ec); ++i)
+          out = in.parent_path() / (base + L"_" + std::to_wstring(i) + L".mp4");
+        ok = TrimFile(path, Narrow(out.wstring()), start, end, &error);
+      } catch (const std::exception& e) {
+        error = std::string("No se pudo recortar: ") + e.what();
+        Log("Recorte: excepción: %s", e.what());
+      }
       auto* msg = new std::string(ok ? "Recorte guardado: " + Narrow(out.filename().wstring()) : error);
       if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
     }).detach();
@@ -429,6 +436,7 @@ PipelineSettings App::BuildSettings() const {
   s.cursor = config_.captureCursor;
   s.fps = config_.fps;
   s.outputHeight = config_.outputHeight;
+  s.quality = config_.quality;
   s.bitrateKbps = config_.bitrateKbps;
   s.codec = config_.codec;
   s.encoder = config_.encoder;
@@ -574,11 +582,22 @@ void App::RefreshMenuModel(bool devices) {
 
 void App::RenderOverlays() {
   ULONGLONG now = GetTickCount64();
+  // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio.
+  // Se sube la generación para que el aviso de desactivación de Hide() no lo cierre.
+  if (menu_.Visible() && menu_.Lost()) {
+    ++menuGeneration_;
+    RECT rect = MenuRect();
+    menu_.Hide();
+    if (!menu_.Show(rect, true)) CloseMenu();
+    if (menuMode_ == MenuMode::Settings && menu_.Visible()) menu_.SetHitRegion(nullptr);
+  }
+  if (toast_.Visible() && toast_.Lost()) toast_.Hide();
   if (menu_.Visible()) {
     if (now - lastStats_ > 1000) {
       lastStats_ = now;
       RefreshMenuModel(false);
     }
+    pipeline_.AudioLevels(&menuModel_.systemLevel, &menuModel_.micLevel);
     if (menuMode_ == MenuMode::Panel) {
       menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_); });
       if (menuModel_.panelHeight > 0) {

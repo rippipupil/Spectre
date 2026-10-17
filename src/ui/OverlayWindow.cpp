@@ -153,6 +153,7 @@ void OverlayWindow::Hide() {
   HWND h = hwnd_;
   hwnd_ = nullptr;
   hasHitRegion_ = false;
+  lost_ = false;
   DestroyWindow(h);
 }
 
@@ -279,7 +280,11 @@ void OverlayWindow::Render(const std::function<void()>& draw) {
   context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
   context_->ClearRenderTargetView(rtv_.Get(), clear);
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-  swapChain_->Present(1, 0);
+  HRESULT hr = swapChain_->Present(1, 0);
+  if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+    if (!lost_) Log("Overlay: la GPU se reinició (0x%08X), se recrea la ventana", unsigned(hr));
+    lost_ = true;
+  }
 }
 
 LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

@@ -35,6 +35,15 @@ public:
 
   const StreamList& Streams() const { return streams_; }
   bool HasMic() const { return mic_ != nullptr; }
+  bool HasSystem() const { return system_ != nullptr; }
+  // Nivel de pico reciente (0..1) de cada fuente, para el medidor de Ajustes.
+  void Levels(float* system, float* mic) const {
+    if (system) *system = systemLevel_;
+    if (mic) *mic = micLevel_;
+  }
+  // Dispositivo y formato con los que se abrió cada fuente (vacío si no hay).
+  std::string SystemDescription() const { return system_ ? system_->Description() : std::string(); }
+  std::string MicDescription() const { return mic_ ? mic_->Description() : std::string(); }
   // Silencia el micrófono sin reiniciar la captura (el buffer de replay no se pierde).
   void SetMicMuted(bool muted) { micMuted_ = muted; }
 
@@ -58,6 +67,10 @@ private:
   StreamList streams_;
   std::atomic<bool> running_{false};
   std::atomic<bool> micMuted_{false};
+  std::atomic<float> systemLevel_{0.0f};
+  std::atomic<float> micLevel_{0.0f};
+  float systemPeak_ = 0, micPeak_ = 0; // máximo desde la última línea del log
+  int64_t lastLevelLog_ = 0;
   std::thread thread_;
   int64_t produced_ = 0;
   AVFrame* frame_ = nullptr;

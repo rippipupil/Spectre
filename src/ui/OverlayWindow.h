@@ -27,6 +27,8 @@ public:
   bool Show(const RECT& rect, bool activate);
   void Hide();
   bool Visible() const { return hwnd_ != nullptr; }
+  // La GPU se reinició (driver actualizado, TDR): hay que ocultar y volver a mostrar.
+  bool Lost() const { return lost_; }
   HWND Hwnd() const { return hwnd_; }
   UINT Width() const { return width_; }
   UINT Height() const { return height_; }
@@ -57,6 +59,7 @@ private:
   float scale_ = 1.0f;
   RECT hitRegion_{};
   bool hasHitRegion_ = false;
+  bool lost_ = false;
 
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> context_;

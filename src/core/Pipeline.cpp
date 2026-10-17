@@ -92,7 +92,8 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   es.width = width_;
   es.height = height_;
   es.fps = settings_.fps;
-  es.bitrateKbps = settings_.bitrateKbps;
+  plan_ = PlanQuality(settings_.quality, settings_.bitrateKbps, width_, height_, settings_.fps, settings_.codec);
+  es.quality = plan_;
   es.codec = settings_.codec;
   es.preferred = settings_.encoder;
   if (!encoder_.Open(es, gpu_.Device())) {
@@ -127,7 +128,15 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   }
 
   running_ = true;
-  videoThread_ = std::thread([this] { VideoLoop(); });
+  failed_ = false;
+  videoThread_ = std::thread([this] {
+    try {
+      VideoLoop();
+    } catch (const std::exception& e) {
+      Log("Vídeo: excepción en el hilo de captura: %s", e.what());
+      failed_ = true;
+    }
+  });
   Log("Pipeline iniciado: %dx%d@%d, captura %s, encoder %s", width_, height_, settings_.fps, capture_->Name(),
       encoder_.Name().c_str());
   return true;
@@ -193,11 +202,12 @@ void Pipeline::VideoLoop() {
   const int64_t freq = QpcFrequency();
   const int fps = settings_.fps;
   int64_t lastIndex = -1;
+  int consecutiveFailures = 0;
   auto sink = [this](const AVPacket* pkt, int stream) {
     if (acceptPackets_) buffer_->Push(pkt, stream);
   };
 
-  while (running_) {
+  while (running_ && !failed_) {
     int64_t now = QpcNow();
     int64_t index = (now - startQpc_) * fps / freq;
     if (index > lastIndex) {
@@ -207,10 +217,21 @@ void Pipeline::VideoLoop() {
         bool ok = encoder_.Encode(
             index, [&](ID3D11Texture2D* dst, UINT slice) { return Render(dst, slice, frame); }, sink);
         double ms = QpcToSeconds(QpcNow() - t0) * 1000.0;
-        std::lock_guard lock(statsMutex_);
-        encodeMs_ = encodeMs_ * 0.95 + ms * 0.05;
-        if (ok) framesEncoded_++;
-        if (lastIndex >= 0 && index > lastIndex + 1) framesSkipped_ += uint64_t(index - lastIndex - 1);
+        {
+          std::lock_guard lock(statsMutex_);
+          encodeMs_ = encodeMs_ * 0.95 + ms * 0.05;
+          if (ok) framesEncoded_++;
+          if (lastIndex >= 0 && index > lastIndex + 1) framesSkipped_ += uint64_t(index - lastIndex - 1);
+        }
+        // GPU reiniciada (driver actualizado, TDR) o encoder que ya no acepta
+        // nada: mejor reiniciar el pipeline entero que seguir fallando en silencio.
+        consecutiveFailures = ok ? 0 : consecutiveFailures + 1;
+        HRESULT removed = gpu_.Device() ? gpu_.Device()->GetDeviceRemovedReason() : S_OK;
+        if (removed != S_OK || consecutiveFailures > fps * 3) {
+          Log("Vídeo: %s (0x%08X), se reinicia la captura",
+              removed != S_OK ? "la GPU se reinició" : "el encoder lleva 3 s sin aceptar frames", unsigned(removed));
+          failed_ = true;
+        }
       }
       lastIndex = index;
     }
@@ -243,8 +264,13 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   std::thread([buffer, streams, notify, path, seconds, pending] {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     Sleep(300); // deja que llegue el audio de los últimos milisegundos
-    auto packets = buffer->Snapshot(seconds);
-    bool ok = WriteClip(path, streams, packets);
+    bool ok = false;
+    try {
+      auto packets = buffer->Snapshot(seconds);
+      ok = WriteClip(path, streams, packets);
+    } catch (const std::exception& e) {
+      Log("Clip: excepción al guardar: %s", e.what());
+    }
     Log("Clip %s: %s", ok ? "guardado" : "FALLÓ", path.c_str());
     if (notify) {
       auto name = std::filesystem::path(Widen(path)).filename();
@@ -287,6 +313,10 @@ PipelineStats Pipeline::Stats() {
   s.width = width_;
   s.height = height_;
   s.fps = settings_.fps;
+  s.targetKbps = plan_.targetKbps;
+  s.maxKbps = plan_.maxKbps;
+  s.systemAudio = audio_.SystemDescription();
+  s.micAudio = audio_.MicDescription();
   {
     std::lock_guard lock(statsMutex_);
     s.encodeMs = encodeMs_;

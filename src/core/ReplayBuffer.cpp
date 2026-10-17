@@ -43,10 +43,11 @@ void ReplayBuffer::Push(const AVPacket* packet, int stream) {
 }
 
 void ReplayBuffer::Trim() {
-  // Se guarda 1 s extra para tener siempre un keyframe antes del inicio del clip.
+  // Se guardan 3 s extra para tener siempre un keyframe (uno cada 2 s)
+  // antes del inicio del clip.
   auto overLimit = [&] {
     if (entries_.empty()) return false;
-    return bytes_ > maxBytes_ || lastVideoTime_ - entries_.front().time > seconds_ + 1.5;
+    return bytes_ > maxBytes_ || lastVideoTime_ - entries_.front().time > seconds_ + 3.0;
   };
   if (!overLimit()) return;
   while (overLimit()) {

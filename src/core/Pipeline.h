@@ -24,7 +24,8 @@ struct PipelineSettings {
   bool cursor = true;
   int fps = 60;
   int outputHeight = 1080; // 0 = nativa
-  int bitrateKbps = 20000;
+  std::string quality = "alta"; // baja | media | alta | maxima | personalizada
+  int bitrateKbps = 20000;      // solo con quality = personalizada
   std::string codec = "h264";
   std::string encoder = "auto";
   bool gpuPriority = true;
@@ -43,12 +44,15 @@ struct PipelineStats {
   std::string capture;
   std::string gpu;
   int width = 0, height = 0, fps = 0;
+  int targetKbps = 0, maxKbps = 0;
   double encodeMs = 0;
   uint64_t framesEncoded = 0;
   uint64_t framesSkipped = 0;
   size_t bufferBytes = 0;
   double bufferSeconds = 0;
   int audioTracks = 0;
+  std::string systemAudio; // dispositivo y formato abiertos (vacío = no se captura)
+  std::string micAudio;
   bool recording = false;
   double recordSeconds = 0;
   std::string recordPath;
@@ -64,7 +68,9 @@ public:
   bool Start(const PipelineSettings& settings, Notify notify);
   void Stop();
   bool Running() const { return running_; }
-  bool CaptureLost() const { return capture_ && capture_->Lost(); }
+  // La captura se perdió, la GPU se reinició o el encoder dejó de aceptar
+  // frames: la app reinicia el pipeline.
+  bool CaptureLost() const { return failed_ || (capture_ && capture_->Lost()); }
   HWND TargetWindow() const { return settings_.target.window; }
 
   // Guarda los últimos `seconds` segundos en `path` (asíncrono).
@@ -75,6 +81,14 @@ public:
   void SetReplaySeconds(double seconds);
   bool MicCaptured() const { return running_ && audio_.HasMic(); }
   void SetMicMuted(bool muted) { audio_.SetMicMuted(muted); }
+  // Nivel de pico reciente (0..1) de cada fuente de audio, barato de leer en cada frame.
+  void AudioLevels(float* system, float* mic) const {
+    if (running_) audio_.Levels(system, mic);
+    else {
+      if (system) *system = 0;
+      if (mic) *mic = 0;
+    }
+  }
   PipelineStats Stats();
 
 private:
@@ -96,6 +110,8 @@ private:
 
   std::atomic<bool> running_{false};
   std::atomic<bool> acceptPackets_{false};
+  std::atomic<bool> failed_{false};
+  QualityPlan plan_;
   std::thread videoThread_;
   int64_t startQpc_ = 0;
   int width_ = 0, height_ = 0;

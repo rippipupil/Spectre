@@ -32,7 +32,8 @@ target_include_directories(ffmpeg INTERFACE ${SPECTRE_FFMPEG_DIR}/include)
 target_link_libraries(ffmpeg INTERFACE
   ${SPECTRE_FFMPEG_DIR}/lib/avcodec.lib
   ${SPECTRE_FFMPEG_DIR}/lib/avformat.lib
-  ${SPECTRE_FFMPEG_DIR}/lib/avutil.lib)
+  ${SPECTRE_FFMPEG_DIR}/lib/avutil.lib
+  ${SPECTRE_FFMPEG_DIR}/lib/swresample.lib)
 
 set(SPECTRE_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Versión que muestra la app (CI pone la de la release)")
 file(GLOB_RECURSE SPECTRE_SOURCES CONFIGURE_DEPENDS src/*.cpp)

@@ -1,4 +1,5 @@
 #include "app/App.h"
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <mfapi.h>
@@ -15,6 +16,7 @@ extern "C" {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   using namespace spectre;
+  InstallCrashHandler();
 
   // Una sola instancia: si ya hay una, le pedimos que abra el menú.
   HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\SpectreSingleInstance");
@@ -51,8 +53,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   int code;
   {
     App app;
-    code = app.Run(instance, tray);
+    try {
+      code = app.Run(instance, tray);
+    } catch (const std::exception& e) {
+      Log("CRASH: excepción C++ en el hilo principal: %s", e.what());
+      throw; // std::terminate -> volcado
+    }
   }
+  Log("Spectre cerrado (código %d)", code);
 
   if (mf) MFShutdown();
   winrt::uninit_apartment();

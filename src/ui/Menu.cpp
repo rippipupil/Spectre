@@ -659,6 +659,43 @@ bool ChoiceCombo(const char* id, T& value, const std::vector<std::pair<T, const 
   return changed;
 }
 
+// Bitrate máximo que usará la configuración en edición (para las estimaciones).
+int EstimatedKbps(const MenuModel& m) {
+  const auto& c = m.config;
+  int height = c.outputHeight > 0 ? c.outputHeight : (m.stats.running && m.stats.height > 0 ? m.stats.height : 1080);
+  int width = height * 16 / 9;
+  if (m.stats.running && m.stats.height > 0) width = height * m.stats.width / m.stats.height;
+  return PlanQuality(c.quality, c.bitrateKbps, width, height, c.fps, c.codec).maxKbps;
+}
+
+// Medidor de nivel: barra en la columna de controles, con el dispositivo y
+// formato reales debajo. Si la barra no se mueve con el juego sonando, se
+// está escuchando el dispositivo equivocado.
+void LevelMeter(const char* label, float level, bool active, const std::string& description) {
+  FieldLabel(label);
+  float w = std::min(ImGui::GetContentRegionAvail().x, 340 * s_);
+  float h = 8 * s_;
+  ImVec2 p = ImGui::GetCursorScreenPos();
+  float rowH = ImGui::GetFrameHeight();
+  ImVec2 a(p.x, p.y + (rowH - h) * 0.5f), b(p.x + w, a.y + h);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(a, b, C(col::Surface), h * 0.5f);
+  if (active) {
+    // Escala en dB: -60 dB a la izquierda, 0 dB a la derecha.
+    float db = level > 1e-5f ? 20.0f * std::log10(level) : -100.0f;
+    float t = std::clamp(1.0f + db / 60.0f, 0.0f, 1.0f);
+    ImU32 color = db > -3.0f ? C(col::Red) : db > -12.0f ? C(col::Amber) : C(col::Green);
+    if (t > 0) dl->AddRectFilled(a, ImVec2(a.x + w * t, b.y), color, h * 0.5f);
+  }
+  ImGui::Dummy(ImVec2(w, rowH));
+  if (!active) {
+    Help("La captura está parada o esta fuente no se pudo abrir: no hay nivel que mostrar. Mira spectre.log.");
+  } else {
+    std::string text = "Capturando: " + description;
+    Help(text.c_str());
+  }
+}
+
 void PageClips(MenuModel& m, const MenuActions& a) {
   auto& c = m.config;
   Heading("Replay");
@@ -670,9 +707,9 @@ void PageClips(MenuModel& m, const MenuActions& a) {
   m.dirty |= ChoiceCombo<int>("##len", c.clipSeconds,
                               {{15, "15 segundos"}, {30, "30 segundos"}, {60, "1 minuto"},
                                {120, "2 minutos"}, {300, "5 minutos"}});
-  double estimate = double(c.bitrateKbps) * 1000.0 / 8.0 * c.clipSeconds * 1.1;
+  double estimate = double(EstimatedKbps(m)) * 1000.0 / 8.0 * c.clipSeconds * 1.1;
   char hint[200];
-  snprintf(hint, sizeof(hint), "El replay guarda vídeo ya comprimido. Con esta calidad ocupa unos %s de RAM.",
+  snprintf(hint, sizeof(hint), "El replay guarda vídeo ya comprimido. Con esta calidad ocupa como mucho unos %s de RAM.",
            FormatBytes(uint64_t(estimate)).c_str());
   Help(hint);
 
@@ -724,7 +761,7 @@ void PageClips(MenuModel& m, const MenuActions& a) {
       ImGui::SameLine();
       if (ImGui::Button("Reproducir")) a.openPath(clip.path);
       Help("El recorte no recodifica: es instantáneo y sin pérdida. El inicio se ajusta al fotograma clave anterior "
-           "(como mucho 1 segundo antes).");
+           "(como mucho 2 segundos antes).");
     }
   }
 }
@@ -752,13 +789,25 @@ void PageVideo(MenuModel& m) {
                                {720, "720p"}, {480, "480p"}});
   FieldLabel("Fotogramas por segundo");
   m.dirty |= ChoiceCombo<int>("##fps", c.fps, {{30, "30 fps"}, {60, "60 fps"}, {120, "120 fps"}});
-  FieldLabel("Bitrate");
-  int mbps = c.bitrateKbps / 1000;
-  if (ImGui::SliderInt("##br", &mbps, 2, 80, "%d Mbps")) {
-    c.bitrateKbps = mbps * 1000;
-    m.dirty = true;
+  FieldLabel("Calidad");
+  m.dirty |= ChoiceCombo<std::string>("##quality", c.quality, QualityOptions());
+  if (c.quality == "personalizada") {
+    FieldLabel("Bitrate");
+    int mbps = c.bitrateKbps / 1000;
+    if (ImGui::SliderInt("##br", &mbps, 2, 100, "%d Mbps")) {
+      c.bitrateKbps = mbps * 1000;
+      m.dirty = true;
+    }
+    Help("Bitrate fijo. Para 1080p a 60 fps, 30 Mbps se ve muy bien; más bitrate usa más RAM y disco.");
+  } else {
+    char hint[240];
+    snprintf(hint, sizeof(hint),
+             "El encoder apunta a una calidad constante y usa hasta %d Mbps en las escenas de más movimiento "
+             "(para la resolución y los fps elegidos). Alta es el equilibrio recomendado; Máxima es lo que usa "
+             "ShadowPlay en Alta.",
+             EstimatedKbps(m) / 1000);
+    Help(hint);
   }
-  Help("Para 1080p a 60 fps, entre 15 y 20 Mbps se ve bien. Más bitrate da más calidad, pero usa más RAM y disco.");
 
   Heading("Codificación");
   FieldLabel("Códec");
@@ -790,6 +839,7 @@ void PageAudio(MenuModel& m) {
   ImGui::BeginDisabled(!c.captureSystemAudio);
   FieldLabel("Dispositivo de salida");
   m.dirty |= DeviceCombo("##out", c.outputDeviceId, m.outputs);
+  LevelMeter("Nivel", m.systemLevel, m.stats.running && !m.stats.systemAudio.empty(), m.stats.systemAudio);
   m.dirty |= SwitchField("Solo el audio del juego", &c.gameAudioOnly,
                          "Deja fuera Discord, la música y el resto de apps. Necesita Windows 10 2004 o posterior y un "
                          "juego a pantalla completa.");
@@ -802,6 +852,7 @@ void PageAudio(MenuModel& m) {
   ImGui::BeginDisabled(!c.captureMic);
   FieldLabel("Dispositivo de entrada");
   m.dirty |= DeviceCombo("##in", c.micDeviceId, m.inputs);
+  LevelMeter("Nivel", m.micLevel, m.stats.running && !m.stats.micAudio.empty(), m.stats.micAudio);
   FieldLabel("Volumen");
   m.dirty |= ImGui::SliderFloat("##micvol", &c.micVolume, 0.0f, 2.0f, "x%.2f");
   ImGui::EndDisabled();
@@ -911,6 +962,8 @@ void PagePerformance(MenuModel& m) {
   row("Encoder", s.encoder);
   snprintf(buf, sizeof(buf), "%d x %d a %d fps", s.width, s.height, s.fps);
   row("Vídeo", buf);
+  snprintf(buf, sizeof(buf), "hasta %d Mbps", s.maxKbps / 1000);
+  row("Bitrate", buf);
   snprintf(buf, sizeof(buf), "%.2f ms", s.encodeMs);
   row("Tiempo por fotograma", buf);
   snprintf(buf, sizeof(buf), "%llu codificados, %llu descartados", (unsigned long long)s.framesEncoded,

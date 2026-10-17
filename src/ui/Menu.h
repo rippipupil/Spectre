@@ -27,6 +27,7 @@ struct MenuModel {
   ProcessUsage usage;
   bool replayActive = false;
   bool micLive = false; // el micrófono se está capturando (se puede silenciar al vuelo)
+  float systemLevel = 0, micLevel = 0; // pico reciente (0..1) de cada fuente, se refresca en cada frame
   bool gameDetected = false;
   std::string gameName;
   std::string hotkeyError;
