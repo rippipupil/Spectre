@@ -2,6 +2,7 @@
 // pero funciona en Windows 10 anteriores a 1903 y con drivers donde WGC falla.
 
 #include "capture/CaptureSource.h"
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <dxgi1_2.h>
@@ -25,7 +26,10 @@ public:
     fps_ = std::max<UINT>(fps, 1);
     if (!Duplicate()) return false;
     running_ = true;
-    thread_ = std::thread([this] { Run(); });
+    thread_ = std::thread([this] {
+      InstallThreadCrashHandler();
+      Run();
+    });
     Log("DDA: captura iniciada");
     return true;
   }

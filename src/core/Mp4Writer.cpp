@@ -1,5 +1,6 @@
 #include "core/Mp4Writer.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 namespace spectre {
@@ -207,7 +208,10 @@ bool Recorder::Start(const std::string& path, const StreamList& streams) {
     queue_.clear();
   }
   running_ = true;
-  thread_ = std::thread([this] { Run(); });
+  thread_ = std::thread([this] {
+    InstallThreadCrashHandler();
+    Run();
+  });
   Log("Grabación iniciada: %s", path.c_str());
   return true;
 }

@@ -1,5 +1,6 @@
 #include "core/Pipeline.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <avrt.h>
@@ -130,6 +131,7 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   running_ = true;
   failed_ = false;
   videoThread_ = std::thread([this] {
+    InstallThreadCrashHandler();
     try {
       VideoLoop();
     } catch (const std::exception& e) {
@@ -228,8 +230,9 @@ void Pipeline::VideoLoop() {
         consecutiveFailures = ok ? 0 : consecutiveFailures + 1;
         HRESULT removed = gpu_.Device() ? gpu_.Device()->GetDeviceRemovedReason() : S_OK;
         if (removed != S_OK || consecutiveFailures > fps * 3) {
-          Log("Vídeo: %s (0x%08X), se reinicia la captura",
+          Log("Vídeo: %s (0x%08X), se reinicia la captura en unos segundos",
               removed != S_OK ? "la GPU se reinició" : "el encoder lleva 3 s sin aceptar frames", unsigned(removed));
+          failedAt_ = GetTickCount64();
           failed_ = true;
         }
       }
@@ -262,6 +265,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto notify = notify_;
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
   std::thread([buffer, streams, notify, path, seconds, pending] {
+    InstallThreadCrashHandler();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     Sleep(300); // deja que llegue el audio de los últimos milisegundos
     bool ok = false;

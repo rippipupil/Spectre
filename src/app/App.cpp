@@ -1,4 +1,5 @@
 #include "app/App.h"
+#include "app/CrashHandler.h"
 
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
@@ -110,6 +111,7 @@ int App::Run(HINSTANCE instance, bool startInTray) {
     HWND hwnd = hwnd_;
     auto pending = std::make_shared<PendingWrite>();
     std::thread([hwnd, path, start, end, pending] {
+      InstallThreadCrashHandler();
       std::string error;
       bool ok = false;
       std::filesystem::path out;
@@ -583,11 +585,12 @@ void App::RefreshMenuModel(bool devices) {
 void App::RenderOverlays() {
   ULONGLONG now = GetTickCount64();
   // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio.
-  // Se sube la generación para que el aviso de desactivación de Hide() no lo cierre.
+  // Hide() provoca un aviso de desactivación con la generación actual; se sube
+  // después para que ese aviso quede obsoleto y no cierre el menú nuevo.
   if (menu_.Visible() && menu_.Lost()) {
-    ++menuGeneration_;
     RECT rect = MenuRect();
     menu_.Hide();
+    ++menuGeneration_;
     if (!menu_.Show(rect, true)) CloseMenu();
     if (menuMode_ == MenuMode::Settings && menu_.Visible()) menu_.SetHitRegion(nullptr);
   }

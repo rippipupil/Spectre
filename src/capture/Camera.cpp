@@ -1,5 +1,6 @@
 #include "capture/Camera.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <mfapi.h>
@@ -53,7 +54,10 @@ bool Camera::Start(ID3D11Device* device, const std::string& id) {
     wid = Widen(cams.front().id);
   }
   running_ = true;
-  thread_ = std::thread([this, wid] { Run(wid); });
+  thread_ = std::thread([this, wid] {
+    InstallThreadCrashHandler();
+    Run(wid);
+  });
   return true;
 }
 

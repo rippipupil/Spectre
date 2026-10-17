@@ -7,5 +7,8 @@ namespace spectre {
 // en %APPDATA%\Spectre\crash\ para poder encontrar la causa. Sin esto, "se
 // cierra sola" no se puede diagnosticar.
 void InstallCrashHandler();
+// std::set_terminate es por hilo en el CRT de MSVC: cada std::thread lo llama
+// al empezar para que sus excepciones C++ sin capturar también dejen rastro.
+void InstallThreadCrashHandler();
 
 } // namespace spectre

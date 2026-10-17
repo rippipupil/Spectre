@@ -1,5 +1,6 @@
 #include "audio/AudioPipeline.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 #include <avrt.h>
@@ -63,8 +64,9 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
   running_ = true;
   systemLevel_ = micLevel_ = 0.0f;
   systemPeak_ = micPeak_ = 0.0f;
-  lastLevelLog_ = QpcNow();
+  lastLevelLog_ = startedAt_ = QpcNow();
   thread_ = std::thread([this] {
+    InstallThreadCrashHandler();
     try {
       Run();
     } catch (const std::exception& e) {
@@ -126,8 +128,9 @@ void AudioPipeline::Run() {
     int64_t target = (QpcNow() - startQpc_) * kAudioRate / freq - kLatencyFrames;
     while (running_ && target - produced_ >= kFrameSize) EncodeChunk();
     // Nivel de cada fuente: el medidor lo lee en cada frame y el log lo
-    // registra cada 10 s. Un pico a 0 con el juego sonando delata que se
-    // escucha el dispositivo equivocado.
+    // registra cada 10 s el primer minuto y luego cada 5 min, para no llenarlo.
+    // Un pico a 0 con el juego sonando delata que se escucha el dispositivo
+    // equivocado.
     float sys = system_ ? system_->TakePeak() : 0.0f;
     float mic = mic_ ? mic_->TakePeak() : 0.0f;
     systemLevel_ = std::max(sys, systemLevel_.load() * 0.85f);
@@ -135,10 +138,11 @@ void AudioPipeline::Run() {
     systemPeak_ = std::max(systemPeak_, sys);
     micPeak_ = std::max(micPeak_, mic);
     int64_t now = QpcNow();
-    if (now - lastLevelLog_ > freq * 10) {
+    int64_t interval = now - startedAt_ < freq * 60 ? freq * 10 : freq * 300;
+    if (now - lastLevelLog_ > interval) {
       lastLevelLog_ = now;
       auto db = [](float peak) { return peak > 1e-5f ? 20.0f * std::log10(peak) : -100.0f; };
-      Log("Audio nivel (10 s): sistema %.0f dB, micrófono %.0f dB", db(systemPeak_), db(micPeak_));
+      Log("Audio nivel: sistema %.0f dB, micrófono %.0f dB", db(systemPeak_), db(micPeak_));
       systemPeak_ = micPeak_ = 0.0f;
     }
   }

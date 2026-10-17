@@ -69,8 +69,13 @@ public:
   void Stop();
   bool Running() const { return running_; }
   // La captura se perdió, la GPU se reinició o el encoder dejó de aceptar
-  // frames: la app reinicia el pipeline.
-  bool CaptureLost() const { return failed_ || (capture_ && capture_->Lost()); }
+  // frames: la app reinicia el pipeline. Tras perder la GPU se esperan unos
+  // segundos: si fue una actualización del driver, Windows puede estar aún
+  // con el adaptador básico y arrancaríamos con un encoder por software.
+  bool CaptureLost() const {
+    if (failed_) return GetTickCount64() - failedAt_ > 4000;
+    return capture_ && capture_->Lost();
+  }
   HWND TargetWindow() const { return settings_.target.window; }
 
   // Guarda los últimos `seconds` segundos en `path` (asíncrono).
@@ -111,6 +116,7 @@ private:
   std::atomic<bool> running_{false};
   std::atomic<bool> acceptPackets_{false};
   std::atomic<bool> failed_{false};
+  std::atomic<ULONGLONG> failedAt_{0};
   QualityPlan plan_;
   std::thread videoThread_;
   int64_t startQpc_ = 0;

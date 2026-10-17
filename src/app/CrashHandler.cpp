@@ -56,8 +56,10 @@ void WriteDump(EXCEPTION_POINTERS* pointers) {
   info.ThreadId = GetCurrentThreadId();
   info.ExceptionPointers = pointers;
   info.ClientPointers = FALSE;
-  auto type = MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithHandleData |
-                            MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules);
+  // Pila de todos los hilos y la memoria a la que apuntan; sin las secciones
+  // de datos de cada módulo, que harían el archivo de decenas de MB.
+  auto type = MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo |
+                            MiniDumpWithUnloadedModules);
   BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), file, type, pointers ? &info : nullptr, nullptr, nullptr);
   CloseHandle(file);
   Log("CRASH: volcado %s en %s", ok ? "guardado" : "FALLÓ", Narrow(path.wstring()).c_str());
@@ -72,8 +74,19 @@ void WriteDump(EXCEPTION_POINTERS* pointers) {
   }
 }
 
+struct DumpRequest {
+  EXCEPTION_POINTERS* pointers;
+};
+
+DWORD WINAPI DumpThread(void* param) {
+  WriteDump(static_cast<DumpRequest*>(param)->pointers);
+  return 0;
+}
+
 LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* pointers) {
-  if (InterlockedCompareExchange(&g_handling, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH; // otro hilo ya lo hace
+  // Si dos hilos fallan a la vez, el segundo espera: si siguiera, Windows
+  // mataría el proceso a medio volcado.
+  if (InterlockedCompareExchange(&g_handling, 1, 0) != 0) Sleep(INFINITE);
   const EXCEPTION_RECORD* record = pointers ? pointers->ExceptionRecord : nullptr;
   if (record) {
     uintptr_t offset = 0;
@@ -86,7 +99,16 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* pointers) {
   } else {
     Log("CRASH: excepción sin información");
   }
-  WriteDump(pointers);
+  // El volcado se escribe desde otro hilo: al que ha fallado puede no quedarle
+  // pila (desbordamiento, 0xC00000FD) ni para llamar a MiniDumpWriteDump.
+  DumpRequest request{pointers};
+  HANDLE thread = CreateThread(nullptr, 0, DumpThread, &request, 0, nullptr);
+  if (thread) {
+    WaitForSingleObject(thread, 30000);
+    CloseHandle(thread);
+  } else {
+    WriteDump(pointers);
+  }
   return EXCEPTION_EXECUTE_HANDLER; // termina el proceso sin el diálogo de Windows
 }
 
@@ -123,12 +145,16 @@ void OnPureCall() { RaiseFatal("llamada a función virtual pura"); }
 
 } // namespace
 
+void InstallThreadCrashHandler() { std::set_terminate(OnTerminate); }
+
 void InstallCrashHandler() {
   SetUnhandledExceptionFilter(OnUnhandledException);
-  std::set_terminate(OnTerminate);
+  InstallThreadCrashHandler();
   _set_invalid_parameter_handler(OnInvalidParameter);
   _set_purecall_handler(OnPureCall);
-  _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+  // Un abort() que se escape de todo lo anterior sigue llegando al informe de
+  // errores de Windows (_CALL_REPORTFAULT): solo se quita el mensaje en consola.
+  _set_abort_behavior(0, _WRITE_ABORT_MSG);
   // Los errores de carga de DLL o de hardware no sacan el diálogo de Windows.
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 }

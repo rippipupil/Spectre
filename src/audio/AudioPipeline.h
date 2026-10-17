@@ -71,6 +71,7 @@ private:
   std::atomic<float> micLevel_{0.0f};
   float systemPeak_ = 0, micPeak_ = 0; // máximo desde la última línea del log
   int64_t lastLevelLog_ = 0;
+  int64_t startedAt_ = 0;
   std::thread thread_;
   int64_t produced_ = 0;
   AVFrame* frame_ = nullptr;

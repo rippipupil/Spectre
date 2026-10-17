@@ -1,5 +1,6 @@
 #include "audio/AudioCapture.h"
 
+#include "app/CrashHandler.h"
 #include "common/Compat.h"
 #include "common/Util.h"
 #include "encode/Media.h"
@@ -36,9 +37,10 @@ const GUID kSubtypeFloat = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa,
 constexpr size_t kFifoFrames = kAudioRate * 4;
 constexpr REFERENCE_TIME kBufferDuration = 2'000'000; // 200 ms
 // Un paquete puede llegar hasta 20 ms antes o después de donde el reloj dice
-// sin que se toque nada; más allá se rellena con silencio o se descarta.
+// sin que se toque nada; más allá se rellena con silencio (por detrás) o se
+// saltan las muestras que sobran (por delante), así el desfase con el vídeo
+// se queda en ±20 ms.
 constexpr int64_t kAlignTolerance = kAudioRate / 50;
-constexpr int64_t kAheadLimit = kAudioRate / 2;
 
 // Handler mínimo para ActivateAudioInterfaceAsync (debe ser agile).
 class ActivationHandler final : public IActivateAudioInterfaceCompletionHandler {
@@ -281,6 +283,7 @@ bool AudioCapture::Start(AudioSourceKind kind, const std::string& deviceId, DWOR
   startOk_ = false;
   running_ = true;
   thread_ = std::thread([this] {
+    InstallThreadCrashHandler();
     try {
       Run();
     } catch (const std::exception& e) {
@@ -334,7 +337,10 @@ void AudioCapture::Write(const float* data, size_t frames) {
   float peak = 0.0f;
   {
     std::lock_guard lock(mutex_);
-    for (size_t i = 0; i < frames; ++i) {
+    // Más de un anillo de silencio seguido es lo mismo que un anillo entero:
+    // se cuenta en la línea de tiempo pero no se escribe (y no se bloquea).
+    size_t toWrite = data ? frames : std::min(frames, kFifoFrames);
+    for (size_t i = 0; i < toWrite; ++i) {
       if (count_ == kFifoFrames) { // lleno: se descarta lo más antiguo
         readPos_ = (readPos_ + 1) % kFifoFrames;
         count_--;
@@ -357,11 +363,16 @@ void AudioCapture::Write(const float* data, size_t frames) {
 void AudioCapture::WriteSilence(size_t frames) { Write(nullptr, frames); }
 
 // Coloca la escritura en targetFrames (posición en la línea de tiempo): si
-// vamos por detrás se rellena con silencio. Ir por delante se tolera hasta
-// kAheadLimit; más allá, quien llama descarta el paquete.
-void AudioCapture::AlignTo(int64_t targetFrames) {
+// vamos por detrás más de la tolerancia se rellena con silencio. Devuelve
+// cuántas muestras del paquete hay que saltar si vamos por delante.
+size_t AudioCapture::AlignTo(int64_t targetFrames, size_t packetFrames) {
   int64_t behind = targetFrames - int64_t(framesWritten_);
-  if (behind > kAlignTolerance) WriteSilence(size_t(std::min<int64_t>(behind, kAudioRate * 2)));
+  if (behind > kAlignTolerance) {
+    WriteSilence(size_t(behind));
+    return 0;
+  }
+  if (-behind > kAlignTolerance) return size_t(std::min<int64_t>(-behind, int64_t(packetFrames)));
+  return 0;
 }
 
 void AudioCapture::CloseClient() {
@@ -524,31 +535,38 @@ void AudioCapture::Run() {
         } else {
           target = (QpcNow() - startQpc_) * kAudioRate / freq - kAudioRate / 50;
         }
+        // Muestras ya en float 48 kHz estéreo (convertidas si hace falta).
+        const float* samples = nullptr;
         size_t outFrames = frames;
-        if (c.swr) outFrames = size_t(std::max<int64_t>(0, (int64_t(frames) * kAudioRate + c.rate - 1) / c.rate));
-        bool ahead = int64_t(framesWritten_) > target + kAheadLimit; // reloj del dispositivo adelantado
-        if (!ahead) {
-          AlignTo(target);
-          if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-            WriteSilence(outFrames);
-          } else if (!c.swr) {
-            Write(reinterpret_cast<const float*>(data), frames);
-          } else {
-            int cap = swr_get_out_samples(c.swr, int(frames));
-            if (cap < int(outFrames)) cap = int(outFrames);
-            c.conv.resize(size_t(cap) * kAudioChannels);
-            uint8_t* out[1] = {reinterpret_cast<uint8_t*>(c.conv.data())};
-            const uint8_t* in[1] = {data};
-            int n = swr_convert(c.swr, out, cap, in, int(frames));
-            if (n > 0) Write(c.conv.data(), size_t(n));
-          }
+        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+          if (c.swr) outFrames = size_t((int64_t(frames) * kAudioRate + c.rate - 1) / c.rate);
+        } else if (!c.swr) {
+          samples = reinterpret_cast<const float*>(data);
+        } else {
+          int cap = std::max(swr_get_out_samples(c.swr, int(frames)), int(frames) * kAudioRate / c.rate + 64);
+          c.conv.resize(size_t(cap) * kAudioChannels);
+          uint8_t* out[1] = {reinterpret_cast<uint8_t*>(c.conv.data())};
+          const uint8_t* in[1] = {data};
+          int n = swr_convert(c.swr, out, cap, in, int(frames));
+          outFrames = size_t(std::max(n, 0));
+          samples = c.conv.data();
+        }
+        // Reloj del dispositivo adelantado: se saltan las muestras que sobran
+        // (o el paquete entero); atrasado: se rellena con silencio.
+        size_t skip = AlignTo(target, outFrames);
+        if (skip < outFrames) {
+          if (samples) Write(samples + skip * kAudioChannels, outFrames - skip);
+          else WriteSilence(outFrames - skip);
         }
         c.capture->ReleaseBuffer(frames);
         gotData = true;
       }
-      if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-        Log("Audio (%s): dispositivo desconectado, reintentando", KindName(kind_));
+      if (FAILED(hr)) {
+        // Dispositivo desconectado, servicio de audio reiniciado al instalar
+        // un driver... Cualquier error deja el cliente muerto: se reabre.
+        Log("Audio (%s): error 0x%08X, se reabre", KindName(kind_), unsigned(hr));
         CloseClient();
+        lastRetry = QpcNow();
       }
     } else if (QpcNow() - lastRetry > freq) {
       lastRetry = QpcNow();
@@ -560,8 +578,8 @@ void AudioCapture::Run() {
     // Nada sonando: WASAPI loopback no entrega paquetes, así que rellenamos
     // con silencio para mantener la línea de tiempo.
     int64_t expected = (now - startQpc_) * kAudioRate / freq;
-    int64_t behind = expected - int64_t(framesWritten_);
-    if (!gotData && now - lastData > freq / 20 && behind > kAudioRate / 100) WriteSilence(size_t(behind - kAudioRate / 40));
+    int64_t fill = expected - int64_t(framesWritten_) - kAudioRate / 40; // hasta 25 ms antes de "ahora"
+    if (!gotData && now - lastData > freq / 20 && fill > 0) WriteSilence(size_t(fill));
 
     // Si no se eligió un dispositivo concreto, se sigue al predeterminado de Windows.
     if (followDefault_ && client_ && now - lastDefaultCheck > freq) {
@@ -573,7 +591,7 @@ void AudioCapture::Run() {
         lastRetry = 0;
       }
     }
-    if (now - lastClockLog > freq * 60) {
+    if (now - lastClockLog > freq * 300) {
       lastClockLog = now;
       Log("Audio (%s): reloj %+.0f ms, %s", KindName(kind_), double(int64_t(framesWritten_) - expected) * 1000.0 / kAudioRate,
           client_ ? "capturando" : "sin dispositivo");

@@ -58,7 +58,7 @@ private:
   void CloseClient();
   void Write(const float* data, size_t frames);
   void WriteSilence(size_t frames);
-  void AlignTo(int64_t targetFrames);
+  size_t AlignTo(int64_t targetFrames, size_t packetFrames);
 
   AudioSourceKind kind_ = AudioSourceKind::SystemLoopback;
   std::wstring deviceId_;

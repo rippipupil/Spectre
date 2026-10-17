@@ -708,10 +708,23 @@ void PageClips(MenuModel& m, const MenuActions& a) {
                               {{15, "15 segundos"}, {30, "30 segundos"}, {60, "1 minuto"},
                                {120, "2 minutos"}, {300, "5 minutos"}});
   double estimate = double(EstimatedKbps(m)) * 1000.0 / 8.0 * c.clipSeconds * 1.1;
-  char hint[200];
-  snprintf(hint, sizeof(hint), "El replay guarda vídeo ya comprimido. Con esta calidad ocupa como mucho unos %s de RAM.",
-           FormatBytes(uint64_t(estimate)).c_str());
-  Help(hint);
+  double limit = double(c.maxBufferMB) * 1024.0 * 1024.0;
+  char hint[320];
+  if (estimate > limit) {
+    snprintf(hint, sizeof(hint),
+             "Con esta calidad y duración el replay puede necesitar hasta %s de RAM, más que el tope de %d MB de "
+             "Ajustes > General. En escenas de mucho movimiento el clip saldría más corto: sube el tope o baja la calidad.",
+             FormatBytes(uint64_t(estimate)).c_str(), c.maxBufferMB);
+    ImGui::PushStyleColor(ImGuiCol_Text, V(col::Amber));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, 560 * s_));
+    ImGui::TextWrapped("%s", hint);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+  } else {
+    snprintf(hint, sizeof(hint), "El replay guarda vídeo ya comprimido. Con esta calidad ocupa como mucho unos %s de RAM.",
+             FormatBytes(uint64_t(estimate)).c_str());
+    Help(hint);
+  }
 
   Heading("Clips recientes");
   ImGui::PushStyleColor(ImGuiCol_Text, V(col::Muted));
