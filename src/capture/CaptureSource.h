@@ -33,6 +33,7 @@ struct CapturedFrame {
   UINT width = 0;
   UINT height = 0;
   uint64_t sequence = 0;
+  int64_t qpc = 0; // cuándo llegó (QueryPerformanceCounter)
 };
 
 class CaptureSource {

@@ -3,6 +3,9 @@
 #include "app/CrashHandler.h"
 #include "common/Util.h"
 
+#include <algorithm>
+#include <cstdio>
+
 namespace spectre {
 
 bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fragmented) {
@@ -50,6 +53,9 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
   headerWritten_ = true;
   offsets_.assign(streams_.size(), 0);
   lastDts_.assign(streams_.size(), AV_NOPTS_VALUE);
+  firstPts_.assign(streams_.size(), AV_NOPTS_VALUE);
+  lastPts_.assign(streams_.size(), AV_NOPTS_VALUE);
+  dropped_.assign(streams_.size(), 0);
   haveOrigin_ = false;
   writtenSeconds_ = 0;
   tmp_ = av_packet_alloc();
@@ -76,9 +82,12 @@ bool Mp4Writer::Write(const AVPacket* packet, int stream) {
   if (tmp_->pts < 0 || tmp_->dts < 0 ||
       (lastDts_[size_t(stream)] != AV_NOPTS_VALUE && tmp_->dts <= lastDts_[size_t(stream)])) {
     av_packet_unref(tmp_);
+    dropped_[size_t(stream)]++;
     return true; // anterior al inicio o desordenado: se descarta
   }
   lastDts_[size_t(stream)] = tmp_->dts;
+  if (firstPts_[size_t(stream)] == AV_NOPTS_VALUE) firstPts_[size_t(stream)] = tmp_->pts;
+  lastPts_[size_t(stream)] = std::max(lastPts_[size_t(stream)], tmp_->pts);
   if (tmp_->duration == 0) tmp_->duration = desc.video ? 1 : 1024;
   if (stream == 0) writtenSeconds_ = double(tmp_->pts) * av_q2d(desc.timeBase);
 
@@ -92,6 +101,25 @@ bool Mp4Writer::Write(const AVPacket* packet, int stream) {
     return false;
   }
   return true;
+}
+
+std::string Mp4Writer::Summary() const {
+  std::string out;
+  for (size_t i = 0; i < streams_.size() && i < firstPts_.size(); ++i) {
+    const auto& d = streams_[i];
+    char buf[160];
+    if (firstPts_[i] == AV_NOPTS_VALUE) {
+      snprintf(buf, sizeof(buf), "%s vacía", d.title.c_str());
+    } else {
+      double tb = av_q2d(d.timeBase);
+      snprintf(buf, sizeof(buf), "%s %+.3f..%.3f s", d.title.c_str(), double(firstPts_[i]) * tb,
+               double(lastPts_[i]) * tb);
+    }
+    if (!out.empty()) out += ", ";
+    out += buf;
+    if (dropped_[i]) out += " (" + std::to_string(dropped_[i]) + " descartados)";
+  }
+  return out;
 }
 
 bool Mp4Writer::Close() {
@@ -114,6 +142,7 @@ bool WriteClip(const std::string& path, const StreamList& streams,
   if (!writer.Open(path, streams, false)) return false;
   for (const auto& [pkt, stream] : packets)
     if (!writer.Write(pkt.get(), stream)) return false;
+  Log("Clip: pistas %s", writer.Summary().c_str());
   return writer.Close();
 }
 
@@ -248,6 +277,7 @@ void Recorder::Stop() {
   }
   cv_.notify_one();
   thread_.join();
+  Log("Grabación: pistas %s", writer_.Summary().c_str());
   writer_.Close();
   Log("Grabación terminada: %s (%.1f s)", path_.c_str(), seconds_.load());
 }

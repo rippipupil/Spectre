@@ -1,5 +1,7 @@
 #include "core/ReplayBuffer.h"
 
+#include <algorithm>
+
 namespace spectre {
 
 void ReplayBuffer::Configure(const StreamList& streams, double seconds, size_t maxBytes) {
@@ -77,13 +79,31 @@ std::vector<std::pair<PacketPtr, int>> ReplayBuffer::Snapshot(double seconds) {
     }
   }
   if (first == entries_.size()) return out;
-  double firstTime = entries_[first].time;
-  for (size_t i = first; i < entries_.size(); ++i) {
-    const auto& e = entries_[i];
-    if (e.stream != 0 && e.time < firstTime) continue; // audio anterior al primer frame
-    out.emplace_back(ClonePacket(e.packet.get()), e.stream);
-  }
+  for (size_t i : ClipEntries(first)) out.emplace_back(ClonePacket(entries_[i].packet.get()), entries_[i].stream);
   return out;
+}
+
+std::vector<size_t> ReplayBuffer::ClipEntries(size_t first) const {
+  // El audio entra en el anillo ~100 ms después que el vídeo del mismo instante
+  // (margen de la mezcla), así que puede haber audio con t >= keyframe guardado
+  // antes que él: se recorre todo el anillo y se ordena por tiempo. Antes se
+  // empezaba en el keyframe y ese audio se perdía.
+  std::vector<size_t> idx;
+  double firstTime = entries_[first].time;
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const auto& e = entries_[i];
+    if (e.stream == 0 ? i < first : e.time < firstTime) continue;
+    idx.push_back(i);
+  }
+  // Cada pista ya está en orden; a igual tiempo, el vídeo primero (el MP4
+  // empieza en el keyframe).
+  std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+    const auto& x = entries_[a];
+    const auto& y = entries_[b];
+    if (x.time != y.time) return x.time < y.time;
+    return x.stream == 0 && y.stream != 0;
+  });
+  return idx;
 }
 
 void ReplayBuffer::AttachLive(PacketSink live) {
@@ -96,14 +116,8 @@ void ReplayBuffer::AttachLive(PacketSink live) {
       break;
     }
   }
-  if (first < entries_.size()) {
-    double firstTime = entries_[first].time;
-    for (size_t i = first; i < entries_.size(); ++i) {
-      const auto& e = entries_[i];
-      if (e.stream != 0 && e.time < firstTime) continue;
-      live(e.packet.get(), e.stream);
-    }
-  }
+  if (first < entries_.size())
+    for (size_t i : ClipEntries(first)) live(entries_[i].packet.get(), entries_[i].stream);
   live_ = std::move(live);
 }
 

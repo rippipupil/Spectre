@@ -38,6 +38,8 @@ private:
   };
   double TimeOf(const AVPacket* p, int stream) const;
   void Trim();
+  // Paquetes del clip que empieza en el keyframe entries_[first], en orden de tiempo.
+  std::vector<size_t> ClipEntries(size_t first) const;
 
   std::mutex mutex_;
   StreamList streams_;

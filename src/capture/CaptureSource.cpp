@@ -68,6 +68,7 @@ void CaptureSource::Publish(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D
   latest_.width = w;
   latest_.height = h;
   latest_.sequence++;
+  latest_.qpc = QpcNow();
 }
 
 } // namespace spectre
