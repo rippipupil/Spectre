@@ -100,13 +100,15 @@ ComPtr<IAudioClient> ActivateProcessLoopback(DWORD pid) {
                                                               __uuidof(IAudioClient), &pv, handler, &op)
                                 : E_OUTOFMEMORY;
   ComPtr<IAudioClient> client;
-  if (SUCCEEDED(hr) && WaitForSingleObject(handler->Event(), 5000) == WAIT_OBJECT_0) {
+  if (FAILED(hr)) {
+    Log("Audio por proceso: ActivateAudioInterfaceAsync falló 0x%08X", unsigned(hr));
+  } else if (WaitForSingleObject(handler->Event(), 5000) != WAIT_OBJECT_0) {
+    Log("Audio por proceso: la activación no respondió en 5 s");
+  } else {
     HRESULT activateHr = E_FAIL;
     ComPtr<IUnknown> unk;
     if (SUCCEEDED(op->GetActivateResult(&activateHr, &unk)) && SUCCEEDED(activateHr) && unk) unk.As(&client);
     else Log("Audio por proceso: activación falló 0x%08X", unsigned(activateHr));
-  } else {
-    Log("Audio por proceso: ActivateAudioInterfaceAsync falló 0x%08X", unsigned(hr));
   }
   handler->Release();
   return client;
@@ -672,6 +674,12 @@ void AudioCapture::Run() {
       UINT32 packetSize = 0;
       HRESULT hr;
       bool firstInBatch = true;
+      // Sin marca fiable, lo que hay en cola lleva esperando: la primera
+      // muestra del lote se capturó hace "lo que hay en cola" (no hace un
+      // paquete), así que tras un parón el atasco no se coloca tarde.
+      UINT32 queued = 0;
+      if (FAILED(c.client->GetCurrentPadding(&queued))) queued = 0;
+      const int64_t batchFrames = (QpcNow() - startQpc_) * kAudioRate / freq - int64_t(queued) * kAudioRate / c.rate;
       while (SUCCEEDED(hr = c.capture->GetNextPacketSize(&packetSize)) && packetSize > 0) {
         BYTE* data = nullptr;
         UINT32 frames = 0;
@@ -687,8 +695,8 @@ void AudioCapture::Run() {
         // Posición en la línea de tiempo de la primera muestra que sale.
         // Loopback (dispositivo o proceso): la marca de WASAPI (100 ns, mismo
         // origen que QueryPerformanceCounter), como hace OBS. Micrófono, o
-        // marca no fiable: la hora de llegada menos lo que dura el paquete,
-        // porque muchos drivers de micrófono dan marcas erróneas; los demás
+        // marca no fiable: la hora de llegada menos lo que había en cola
+        // (porque muchos drivers de micrófono dan marcas erróneas); los demás
         // paquetes del mismo lote van seguidos.
         const bool deviceTiming =
             kind_ != AudioSourceKind::Microphone && qpcPos != 0 && !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR);
@@ -698,7 +706,8 @@ void AudioCapture::Run() {
           stampQpc = int64_t(double(qpcPos) * double(freq) / 1e7);
           target = (stampQpc - startQpc_) * kAudioRate / freq - swrDelay;
         } else if (firstInBatch) {
-          target = nowFrames - packetOut - swrDelay;
+          // Si la cola no se pudo leer, al menos lo que dura este paquete.
+          target = (queued ? batchFrames : nowFrames - packetOut) - swrDelay;
         } else {
           target = framesWritten_;
         }
