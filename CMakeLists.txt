@@ -36,6 +36,11 @@ target_link_libraries(ffmpeg INTERFACE
   ${SPECTRE_FFMPEG_DIR}/lib/swresample.lib)
 
 set(SPECTRE_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Versión que muestra la app (CI pone la de la release)")
+# "Buscar actualizaciones" compara esta versión con la etiqueta de la release:
+# mejor fallar aquí que publicar un exe con una versión rota.
+if(NOT SPECTRE_BUILD_VERSION MATCHES "^[0-9]+(\\.[0-9]+)+$")
+  message(FATAL_ERROR "SPECTRE_BUILD_VERSION no válida: '${SPECTRE_BUILD_VERSION}'")
+endif()
 file(GLOB_RECURSE SPECTRE_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_executable(spectre WIN32 ${SPECTRE_SOURCES} res/spectre.rc)
 target_include_directories(spectre PRIVATE src)

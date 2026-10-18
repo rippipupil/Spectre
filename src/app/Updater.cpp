@@ -58,7 +58,7 @@ std::string NetworkError(DWORD code) {
 // sink con cada trozo; si sink devuelve false, se aborta sin error.
 bool HttpGet(const std::wstring& url, const wchar_t* accept, const std::function<bool()>& cancelled,
              const std::function<void(uint64_t)>& onLength, const std::function<bool(const char*, size_t)>& sink,
-             std::string* error) {
+             std::string* error, DWORD* httpStatus = nullptr) {
   URL_COMPONENTS parts{};
   parts.dwStructSize = sizeof(parts);
   wchar_t host[256]{}, path[2048]{};
@@ -100,13 +100,14 @@ bool HttpGet(const std::wstring& url, const wchar_t* accept, const std::function
   DWORD status = 0, size = sizeof(status);
   WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
                       &status, &size, WINHTTP_NO_HEADER_INDEX);
+  if (httpStatus) *httpStatus = status;
   if (status != 200) {
     Log("Actualizaciones: HTTP %lu", status);
     char buf[160];
     if (status == 403 || status == 429)
       snprintf(buf, sizeof(buf), "GitHub ha limitado las consultas desde tu red. Prueba de nuevo dentro de un rato.");
     else if (status == 404)
-      snprintf(buf, sizeof(buf), "No hay ninguna versión publicada todavía.");
+      snprintf(buf, sizeof(buf), "GitHub no encontró el archivo (código 404). Vuelve a buscar actualizaciones.");
     else
       snprintf(buf, sizeof(buf), "GitHub respondió con un error (código %lu). Prueba de nuevo más tarde.", status);
     *error = buf;
@@ -253,13 +254,15 @@ void Updater::Check() {
     InstallThreadCrashHandler();
     RemoveOldDownloads();
     std::string body, error;
+    DWORD status = 0;
     bool ok = HttpGet(
         kLatestApi, L"application/vnd.github+json", cancelled, nullptr,
         [&](const char* data, size_t size) {
           body.append(data, size);
           return body.size() <= kMaxApiBytes;
         },
-        &error);
+        &error, &status);
+    if (!ok && status == 404) error = "No hay ninguna versión publicada todavía.";
     if (cancelled()) return;
     if (!ok) {
       shared->Fail(error.empty() ? "GitHub envió una respuesta demasiado grande." : error);
@@ -287,6 +290,10 @@ void Updater::Check() {
       std::lock_guard lock(shared->mutex);
       shared->url = Widen(url);
       shared->sha256 = digest.rfind("sha256:", 0) == 0 ? digest.substr(7) : "";
+      // Sin huella no hay forma de saber que el archivo es el publicado: no se
+      // instala en silencio, se ofrece la página de descarga.
+      shared->status.unverified = newer && shared->sha256.empty();
+      if (shared->status.unverified) Log("Actualizaciones: la release %s no publica SHA-256", latest.c_str());
       shared->status.latest = latest;
       shared->status.sizeBytes = size;
       shared->status.state = newer ? UpdateStatus::State::Available : UpdateStatus::State::UpToDate;
@@ -303,7 +310,8 @@ void Updater::Download(HWND hwnd) {
   uint64_t expected = 0;
   {
     std::lock_guard lock(shared_->mutex);
-    if (shared_->status.state != UpdateStatus::State::Available || shared_->url.empty()) return;
+    if (shared_->status.state != UpdateStatus::State::Available || shared_->url.empty() || shared_->sha256.empty())
+      return;
     url = shared_->url;
     latest = shared_->status.latest;
     sha256 = shared_->sha256;
@@ -342,13 +350,15 @@ void Updater::Download(HWND hwnd) {
             hash.Update(data, size);
             if (total > 0) {
               double progress = double(received) / double(total);
-              shared->Set([&](UpdateStatus& s) { s.downloaded = progress; });
+              std::lock_guard lock(shared->mutex);
+              if (!cancelled()) shared->status.downloaded = progress;
             }
             return bool(file);
           },
           &error);
       file.close();
-      if (ok && !file) {
+      // Un fallo de escritura corta la descarga desde el sink sin mensaje de red.
+      if (!file) {
         ok = false;
         error = "No se pudo guardar la descarga: ¿queda espacio en el disco?";
       }
@@ -362,7 +372,7 @@ void Updater::Download(HWND hwnd) {
       ok = false;
       error = "La descarga llegó incompleta. Vuelve a probar.";
     }
-    if (ok && !sha256.empty() && hash.Hex() != sha256) {
+    if (ok && hash.Hex() != sha256) {
       Log("Actualizaciones: SHA-256 no coincide (esperado %s)", sha256.c_str());
       ok = false;
       error = "El instalador descargado no coincide con el publicado. Vuelve a probar.";
@@ -398,10 +408,12 @@ void Updater::Cancel() {
   shared_->status.state = UpdateStatus::State::Available; // se puede reintentar al momento
 }
 
-bool Updater::LaunchInstaller(const std::wstring& path) {
-  // /SILENT muestra solo la barra de progreso; /RELAUNCH=1 hace que el
+bool Updater::LaunchInstaller(const std::wstring& path, bool relaunch) {
+  // /VERYSILENT no abre ninguna ventana: la actualización suele llegar al
+  // parar una grabación, con el juego delante. /RELAUNCH=1 hace que el
   // instalador vuelva a abrir Spectre al terminar (ver installer/spectre.iss).
-  std::wstring cmd = L"\"" + path + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RELAUNCH=1";
+  std::wstring cmd = L"\"" + path + L"\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
+  if (relaunch) cmd += L" /RELAUNCH=1";
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};

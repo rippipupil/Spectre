@@ -39,6 +39,8 @@ private:
   void CloseMenu();
   void ApplyConfig(const Config& next, bool quiet = false);
   void Quit();
+  // Hay una actualización descargada esperando a que acabe la grabación.
+  void InstallPendingUpdate();
 
   // Estado
   bool WantPipeline() const;
@@ -98,6 +100,7 @@ private:
   ULONGLONG lastStats_ = 0;
   Updater updater_;
   std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
+  bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
 };
 
 } // namespace spectre

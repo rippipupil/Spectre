@@ -181,13 +181,16 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   menu_.Hide();
   toast_.Hide();
   pipeline_.Stop();
-  WaitForPendingWrites(5000); // clips o recortes que se están escribiendo
+  // Clips o recortes que se están escribiendo. Antes de actualizar se espera
+  // lo que haga falta: el instalador no debe encontrar un MP4 a medias.
+  WaitForPendingWrites(installerPath_.empty() ? 5000 : 10 * 60 * 1000);
   UnregisterHotkeys();
   RemoveTrayIcon();
   if (hwnd_) DestroyWindow(hwnd_);
   // Spectre ya soltó la captura y terminó de escribir: el instalador puede
   // reemplazar los archivos y vuelve a abrir la app al acabar.
-  if (!installerPath_.empty() && !Updater::LaunchInstaller(installerPath_)) {
+  // Con "Salir de Spectre" se instala igualmente, pero sin volver a abrir la app.
+  if (!installerPath_.empty() && !Updater::LaunchInstaller(installerPath_, relaunchAfterUpdate_)) {
     std::wstring text = L"No se pudo abrir el instalador de la actualización. Puedes abrirlo a mano desde:\n" +
                         installerPath_;
     MessageBoxW(nullptr, text.c_str(), L"Spectre", MB_OK | MB_ICONWARNING);
@@ -233,6 +236,7 @@ void App::ToggleRecording() {
     pipeline_.StopRecording();
     Toast("Grabación guardada: " + Narrow(std::filesystem::path(Widen(path)).filename().wstring()));
     UpdatePipeline(std::exchange(restartPending_, false));
+    InstallPendingUpdate();
     return;
   }
   if (!pipeline_.Running() && !StartPipeline()) {
@@ -424,6 +428,12 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   if (!hotkeysOk) Toast(menuModel_.hotkeyError, true);
   else if (deferred) Toast("Se aplicará al terminar la grabación");
   else if (!quiet) Toast("Cambios aplicados");
+}
+
+void App::InstallPendingUpdate() {
+  if (installerPath_.empty() || pipeline_.Recording()) return;
+  relaunchAfterUpdate_ = true;
+  Quit();
 }
 
 void App::Quit() {
@@ -724,6 +734,8 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return 0;
   case WM_TIMER:
+    // La grabación pudo acabar sola (error de disco, etc.): la actualización pendiente no se queda colgada.
+    if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerGame) {
       CheckGame();
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
@@ -734,6 +746,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       restartPending_ = false;
       if (wasRecording) Toast("La ventana capturada se cerró; la grabación se guardó");
       UpdatePipeline();
+      InstallPendingUpdate();
     }
     return 0;
   case WM_SPECTRE_NOTIFY: {
@@ -749,7 +762,9 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_UPDATE_READY: {
     std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
     installerPath_ = *path;
-    Quit();
+    // Nunca cerrar Spectre a mitad de una grabación: espera a que se detenga.
+    if (pipeline_.Recording()) Toast("La actualización se instalará al terminar la grabación");
+    else InstallPendingUpdate();
     return 0;
   }
   case WM_SPECTRE_CLOSE_MENU:
@@ -785,6 +800,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // Apagado, cierre de sesión o el instalador actualizando Spectre: se cierra
     // bien el archivo de una grabación en curso y se sale.
     if (wp) {
+      installerPath_.clear(); // nunca instalar mientras Windows cierra la sesión
       pipeline_.Stop();
       WaitForPendingWrites(3000);
       Quit();

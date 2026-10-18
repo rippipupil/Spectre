@@ -16,6 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Versión
+        shell: pwsh
+        run: |
+          # Una sola versión para el exe, el instalador y la etiqueta de la
+          # release: "Buscar actualizaciones" compara la del exe con la etiqueta.
+          $version = "0.1.$env:GITHUB_RUN_NUMBER"
+          if ($env:GITHUB_REF -like 'refs/tags/v*') { $version = $env:GITHUB_REF_NAME.Substring(1) }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Versión: $version"
+
       - name: Descargar FFmpeg (LGPL, shared)
         shell: pwsh
         env:
@@ -43,7 +53,9 @@ jobs:
           arch: x64
 
       - name: Configurar
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg -DSPECTRE_BUILD_VERSION=0.1.${{ github.run_number }}
+        # Entre comillas: PowerShell parte en el primer punto los argumentos que
+        # empiezan por "-" y CMake recibía la versión "0".
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg" "-DSPECTRE_BUILD_VERSION=${{ env.APP_VERSION }}"
 
       - name: Compilar
         run: cmake --build build
@@ -70,9 +82,7 @@ jobs:
             choco install innosetup --no-progress -y
             $env:Path += ";${env:ProgramFiles(x86)}\Inno Setup 6"
           }
-          $version = "0.1.$env:GITHUB_RUN_NUMBER"
-          if ($env:GITHUB_REF -like 'refs/tags/v*') { $version = $env:GITHUB_REF_NAME.Substring(1) }
-          iscc /DAppVersion=$version /DSourceDir=..\dist installer\spectre.iss
+          iscc /DAppVersion=$env:APP_VERSION /DSourceDir=..\dist installer\spectre.iss
           Compress-Archive dist\* installer\output\Spectre-Portable.zip
 
       - uses: actions/upload-artifact@v4
@@ -93,7 +103,7 @@ jobs:
         run: |
           # Cada cambio en main (o etiqueta vX.Y.Z) publica una release con
           # enlace directo a Spectre-Setup.exe.
-          $tag = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME } else { "v0.1.$env:GITHUB_RUN_NUMBER" }
+          $tag = "v$env:APP_VERSION"
           gh release create $tag installer/output/Spectre-Setup.exe installer/output/Spectre-Portable.zip `
             --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Spectre $tag" --latest `
             --notes "Descarga **Spectre-Setup.exe** y ábrelo. Incluye todo lo necesario y no pide permisos de administrador. Si ya tienes Spectre, se actualiza conservando tus ajustes. Atajos: Alt+Z abre el panel, Alt+F10 guarda un clip y Alt+F9 empieza o detiene una grabación."

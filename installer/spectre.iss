@@ -70,10 +70,32 @@ begin
   Result := RegValueExists(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'UninstallString');
 end;
 
+var
+  InstallFinished: Boolean;
+
 // Spectre lanza el instalador con /SILENT /RELAUNCH=1 al actualizarse desde la app.
 function RelaunchAfterUpdate(): Boolean;
 begin
   Result := WizardSilent and (ExpandConstant('{param:relaunch|0}') = '1');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssDone then InstallFinished := True;
+end;
+
+// Si la actualización silenciosa falla o se cancela, [Run] no llega a
+// ejecutarse: se vuelve a abrir la versión que haya quedado instalada para
+// que el usuario no se quede sin Spectre.
+procedure DeinitializeSetup();
+var
+  Dir: String;
+  Code: Integer;
+begin
+  if RelaunchAfterUpdate() and not InstallFinished and
+     RegQueryStringValue(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'InstallLocation', Dir) and
+     FileExists(AddBackslash(Dir) + 'spectre.exe') then
+    Exec(AddBackslash(Dir) + 'spectre.exe', '', Dir, SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
 // Las ediciones N/KN de Windows no traen Media Foundation. Spectre funciona
@@ -81,6 +103,7 @@ end;
 function InitializeSetup(): Boolean;
 begin
   Result := True;
-  if not FileExists(ExpandConstant('{sys}\mfplat.dll')) then
+  // En una actualización silenciosa no se pregunta nada (ya se avisó al instalar).
+  if not WizardSilent and not FileExists(ExpandConstant('{sys}\mfplat.dll')) then
     MsgBox('Tu Windows no incluye Media Foundation (ediciones N). Spectre funcionará, pero sin webcam. Para usarla, instala el "Paquete de características multimedia" desde Configuración > Aplicaciones > Características opcionales.', mbInformation, MB_OK);
 end;
