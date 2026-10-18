@@ -275,11 +275,16 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
     std::lock_guard lock(statsMutex_);
     Log("Clip: %.0f s pedidos, el frame de vídeo llega al encoder con %.1f ms de media", seconds, frameAgeMs_);
   }
+  // El audio se codifica con un margen (100 ms, hasta 1 s si una fuente llega
+  // tarde): se espera ese margen y un poco más para que el final del clip
+  // tenga audio hasta el último frame.
+  double latency = streams.size() > 1 ? audio_.LatencySeconds() : 0.0;
+  DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, streams, notify, path, seconds, pending] {
+  std::thread([buffer, streams, notify, path, seconds, pending, waitMs] {
     InstallThreadCrashHandler();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    Sleep(300); // deja que llegue el audio de los últimos milisegundos
+    Sleep(waitMs);
     bool ok = false;
     try {
       auto packets = buffer->Snapshot(seconds);
