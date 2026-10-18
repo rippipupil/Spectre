@@ -39,6 +39,8 @@ private:
   void CloseMenu();
   void ApplyConfig(const Config& next, bool quiet = false);
   void Quit();
+  // Hay una actualización descargada esperando a que acabe la grabación.
+  void InstallPendingUpdate();
 
   // Estado
   bool WantPipeline() const;

@@ -181,7 +181,9 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   menu_.Hide();
   toast_.Hide();
   pipeline_.Stop();
-  WaitForPendingWrites(5000); // clips o recortes que se están escribiendo
+  // Clips o recortes que se están escribiendo. Antes de actualizar se espera
+  // lo que haga falta: el instalador no debe encontrar un MP4 a medias.
+  WaitForPendingWrites(installerPath_.empty() ? 5000 : 10 * 60 * 1000);
   UnregisterHotkeys();
   RemoveTrayIcon();
   if (hwnd_) DestroyWindow(hwnd_);
@@ -233,6 +235,7 @@ void App::ToggleRecording() {
     pipeline_.StopRecording();
     Toast("Grabación guardada: " + Narrow(std::filesystem::path(Widen(path)).filename().wstring()));
     UpdatePipeline(std::exchange(restartPending_, false));
+    InstallPendingUpdate();
     return;
   }
   if (!pipeline_.Running() && !StartPipeline()) {
@@ -424,6 +427,10 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   if (!hotkeysOk) Toast(menuModel_.hotkeyError, true);
   else if (deferred) Toast("Se aplicará al terminar la grabación");
   else if (!quiet) Toast("Cambios aplicados");
+}
+
+void App::InstallPendingUpdate() {
+  if (!installerPath_.empty() && !pipeline_.Recording()) Quit();
 }
 
 void App::Quit() {
@@ -724,6 +731,8 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return 0;
   case WM_TIMER:
+    // La grabación pudo acabar sola (error de disco, etc.): la actualización pendiente no se queda colgada.
+    if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerGame) {
       CheckGame();
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
@@ -734,6 +743,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       restartPending_ = false;
       if (wasRecording) Toast("La ventana capturada se cerró; la grabación se guardó");
       UpdatePipeline();
+      InstallPendingUpdate();
     }
     return 0;
   case WM_SPECTRE_NOTIFY: {
@@ -749,7 +759,9 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_UPDATE_READY: {
     std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
     installerPath_ = *path;
-    Quit();
+    // Nunca cerrar Spectre a mitad de una grabación: espera a que se detenga.
+    if (pipeline_.Recording()) Toast("La actualización se instalará al terminar la grabación");
+    else Quit();
     return 0;
   }
   case WM_SPECTRE_CLOSE_MENU:

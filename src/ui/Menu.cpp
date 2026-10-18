@@ -977,9 +977,13 @@ void UpdatesSection(MenuModel& m, const MenuActions& a) {
   case S::Available:
     snprintf(buf, sizeof(buf), "Versión nueva disponible: %s", u.latest.c_str());
     UpdateStatusLine(col::Accent, false, buf, true);
-    if (u.portable) {
-      Help("Esta es la copia portable de Spectre: descarga el zip nuevo y reemplaza la carpeta. Si usas el "
-           "instalador, Spectre se actualiza solo desde aquí.");
+    if (u.portable || u.unverified) {
+      if (u.portable)
+        Help("Esta es la copia portable de Spectre: descarga el zip nuevo y reemplaza la carpeta. Si usas el "
+             "instalador, Spectre se actualiza solo desde aquí.");
+      else
+        Help("GitHub no ha publicado la huella de este instalador, así que Spectre no puede comprobarlo y no lo "
+             "instala solo. Descárgalo desde la página de la versión.");
       Gap(4);
       if (SoftButton("update-page", Icon::Folder, "Abrir página de descarga", bw, Tone::Primary))
         a.openPath(Updater::ReleasePage());
@@ -987,7 +991,7 @@ void UpdatesSection(MenuModel& m, const MenuActions& a) {
       std::string help = "Se descarga el instalador";
       if (u.sizeBytes > 0) help += " (" + FormatBytes(u.sizeBytes) + ")";
       help += ", Spectre se cierra, se actualiza conservando tus ajustes y se vuelve a abrir solo.";
-      if (m.stats.recording) help += " La grabación en curso se guardará antes de cerrar.";
+      if (m.stats.recording) help += " Si sigues grabando, se instalará cuando detengas la grabación.";
       Help(help.c_str());
       Gap(4);
       if (SoftButton("update-install", Icon::Play, "Actualizar ahora", bw, Tone::Primary)) a.installUpdate();
@@ -1008,7 +1012,10 @@ void UpdatesSection(MenuModel& m, const MenuActions& a) {
     break;
   }
   case S::Launching:
-    UpdateStatusLine(col::Accent, true, "Abriendo el instalador. Spectre se cerrará y volverá a abrirse al terminar.");
+    if (m.stats.recording)
+      UpdateStatusLine(col::Accent, false, "Actualización lista: se instalará cuando detengas la grabación.");
+    else
+      UpdateStatusLine(col::Accent, true, "Abriendo el instalador. Spectre se cerrará y volverá a abrirse al terminar.");
     break;
   case S::Error:
     UpdateStatusLine(col::Red, false, u.message);
