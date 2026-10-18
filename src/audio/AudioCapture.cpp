@@ -311,6 +311,9 @@ struct AudioCapture::Client {
   std::vector<float> conv;
   std::vector<uint8_t> silence; // entrada a cero para los paquetes SILENT
   bool firstPacket = true;
+  // Línea de tiempo (muestras a 48 kHz) de la última vez que la cola de
+  // WASAPI quedó vacía; -1 con el cliente recién abierto.
+  int64_t emptyAt = -1;
 
   ~Client() {
     if (client) client->Stop();
@@ -674,12 +677,6 @@ void AudioCapture::Run() {
       UINT32 packetSize = 0;
       HRESULT hr;
       bool firstInBatch = true;
-      // Sin marca fiable, lo que hay en cola lleva esperando: la primera
-      // muestra del lote se capturó hace "lo que hay en cola" (no hace un
-      // paquete), así que tras un parón el atasco no se coloca tarde.
-      UINT32 queued = 0;
-      if (FAILED(c.client->GetCurrentPadding(&queued))) queued = 0;
-      const int64_t batchFrames = (QpcNow() - startQpc_) * kAudioRate / freq - int64_t(queued) * kAudioRate / c.rate;
       while (SUCCEEDED(hr = c.capture->GetNextPacketSize(&packetSize)) && packetSize > 0) {
         BYTE* data = nullptr;
         UINT32 frames = 0;
@@ -695,9 +692,9 @@ void AudioCapture::Run() {
         // Posición en la línea de tiempo de la primera muestra que sale.
         // Loopback (dispositivo o proceso): la marca de WASAPI (100 ns, mismo
         // origen que QueryPerformanceCounter), como hace OBS. Micrófono, o
-        // marca no fiable: la hora de llegada menos lo que había en cola
-        // (porque muchos drivers de micrófono dan marcas erróneas); los demás
-        // paquetes del mismo lote van seguidos.
+        // marca no fiable: la hora de llegada menos un paquete, o antes si la
+        // cola quedó vacía antes (porque muchos drivers de micrófono dan
+        // marcas erróneas); los demás paquetes del mismo lote van seguidos.
         const bool deviceTiming =
             kind_ != AudioSourceKind::Microphone && qpcPos != 0 && !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR);
         int64_t stampQpc = 0;
@@ -706,8 +703,13 @@ void AudioCapture::Run() {
           stampQpc = int64_t(double(qpcPos) * double(freq) / 1e7);
           target = (stampQpc - startQpc_) * kAudioRate / freq - swrDelay;
         } else if (firstInBatch) {
-          // Si la cola no se pudo leer, al menos lo que dura este paquete.
-          target = (queued ? batchFrames : nowFrames - packetOut) - swrDelay;
+          // Lo capturado desde que la cola quedó vacía la última vez está todo
+          // en este lote, así que su primera muestra no es posterior a ese
+          // momento: tras un parón del hilo el atasco va a su sitio y no a
+          // "ahora menos un paquete".
+          int64_t first = nowFrames - packetOut;
+          if (c.emptyAt >= 0) first = std::min(first, c.emptyAt);
+          target = first - swrDelay;
         } else {
           target = framesWritten_;
         }
@@ -761,6 +763,8 @@ void AudioCapture::Run() {
         if (skip < outFrames) Write(c.conv.data() + skip * kAudioChannels, outFrames - skip);
         gotData = true;
       }
+      // El bucle sale con GetNextPacketSize = 0: la cola está vacía ahora.
+      if (SUCCEEDED(hr)) c.emptyAt = (QpcNow() - startQpc_) * kAudioRate / freq;
       if (FAILED(hr)) {
         // Dispositivo desconectado, servicio de audio reiniciado al instalar
         // un driver... Cualquier error deja el cliente muerto: se reabre.
