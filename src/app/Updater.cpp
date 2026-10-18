@@ -408,10 +408,12 @@ void Updater::Cancel() {
   shared_->status.state = UpdateStatus::State::Available; // se puede reintentar al momento
 }
 
-bool Updater::LaunchInstaller(const std::wstring& path) {
-  // /SILENT muestra solo la barra de progreso; /RELAUNCH=1 hace que el
+bool Updater::LaunchInstaller(const std::wstring& path, bool relaunch) {
+  // /VERYSILENT no abre ninguna ventana: la actualización suele llegar al
+  // parar una grabación, con el juego delante. /RELAUNCH=1 hace que el
   // instalador vuelva a abrir Spectre al terminar (ver installer/spectre.iss).
-  std::wstring cmd = L"\"" + path + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RELAUNCH=1";
+  std::wstring cmd = L"\"" + path + L"\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
+  if (relaunch) cmd += L" /RELAUNCH=1";
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};

@@ -36,8 +36,8 @@ public:
   void Download(HWND hwnd);
   void Cancel();
 
-  // Lanza el instalador en modo silencioso; vuelve a abrir Spectre al acabar.
-  static bool LaunchInstaller(const std::wstring& path);
+  // Lanza el instalador en modo silencioso; con relaunch vuelve a abrir Spectre al acabar.
+  static bool LaunchInstaller(const std::wstring& path, bool relaunch);
   // Página de la release (copia portable o instalador sin huella).
   static std::string ReleasePage();
 

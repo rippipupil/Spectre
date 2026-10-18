@@ -189,7 +189,8 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   if (hwnd_) DestroyWindow(hwnd_);
   // Spectre ya soltó la captura y terminó de escribir: el instalador puede
   // reemplazar los archivos y vuelve a abrir la app al acabar.
-  if (!installerPath_.empty() && !Updater::LaunchInstaller(installerPath_)) {
+  // Con "Salir de Spectre" se instala igualmente, pero sin volver a abrir la app.
+  if (!installerPath_.empty() && !Updater::LaunchInstaller(installerPath_, relaunchAfterUpdate_)) {
     std::wstring text = L"No se pudo abrir el instalador de la actualización. Puedes abrirlo a mano desde:\n" +
                         installerPath_;
     MessageBoxW(nullptr, text.c_str(), L"Spectre", MB_OK | MB_ICONWARNING);
@@ -430,7 +431,9 @@ void App::ApplyConfig(const Config& next, bool quiet) {
 }
 
 void App::InstallPendingUpdate() {
-  if (!installerPath_.empty() && !pipeline_.Recording()) Quit();
+  if (installerPath_.empty() || pipeline_.Recording()) return;
+  relaunchAfterUpdate_ = true;
+  Quit();
 }
 
 void App::Quit() {
@@ -761,7 +764,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     installerPath_ = *path;
     // Nunca cerrar Spectre a mitad de una grabación: espera a que se detenga.
     if (pipeline_.Recording()) Toast("La actualización se instalará al terminar la grabación");
-    else Quit();
+    else InstallPendingUpdate();
     return 0;
   }
   case WM_SPECTRE_CLOSE_MENU:
@@ -797,6 +800,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // Apagado, cierre de sesión o el instalador actualizando Spectre: se cierra
     // bien el archivo de una grabación en curso y se sale.
     if (wp) {
+      installerPath_.clear(); // nunca instalar mientras Windows cierra la sesión
       pipeline_.Stop();
       WaitForPendingWrites(3000);
       Quit();

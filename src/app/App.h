@@ -100,6 +100,7 @@ private:
   ULONGLONG lastStats_ = 0;
   Updater updater_;
   std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
+  bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
 };
 
 } // namespace spectre
