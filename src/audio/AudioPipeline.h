@@ -46,6 +46,10 @@ public:
   std::string MicDescription() const { return mic_ ? mic_->Description() : std::string(); }
   // Silencia el micrófono sin reiniciar la captura (el buffer de replay no se pierde).
   void SetMicMuted(bool muted) { micMuted_ = muted; }
+  // Cuánto va el audio codificado por detrás del reloj (normalmente 0,1 s; más
+  // si una fuente entrega tarde). Al guardar un clip, esperar esto basta para
+  // que llegue el audio de los últimos instantes.
+  double LatencySeconds() const { return double(margin_.load()) / kAudioRate; }
 
 private:
   struct Track {
@@ -74,6 +78,8 @@ private:
   int64_t startedAt_ = 0;
   std::thread thread_;
   int64_t produced_ = 0;
+  std::atomic<int64_t> margin_{0};
+  int64_t loggedMargin_ = 0;
   AVFrame* frame_ = nullptr;
   AVPacket* packet_ = nullptr;
   std::vector<float> sysBuf_, micBuf_;

@@ -12,7 +12,17 @@ namespace spectre {
 
 namespace {
 constexpr int kFrameSize = 1024;            // muestras por frame AAC
-constexpr int64_t kLatencyFrames = 4800;    // 100 ms de margen para que lleguen las fuentes
+constexpr int64_t kLatencyFrames = 4800;    // 100 ms de margen mínimo para que lleguen las fuentes
+constexpr int64_t kMaxLatencyFrames = kAudioRate; // con más de 1 s de retraso se pierde audio antes que esperar
+constexpr int64_t kLatencySlack = kFrameSize + kAudioRate / 50; // un frame AAC + 20 ms
+
+// Retraso con el que se codifica: lo que tarde la fuente más lenta en
+// entregar más un margen. No afecta a la sincronía (cada muestra va a su
+// posición), solo evita codificar silencio en lugar de audio que aún viene.
+int64_t ReadMargin(const AudioCapture* system, const AudioCapture* mic) {
+  int64_t lag = std::max(system ? system->LagFrames() : 0, mic ? mic->LagFrames() : 0);
+  return std::clamp(lag + kLatencySlack, kLatencyFrames, kMaxLatencyFrames);
+}
 } // namespace
 
 bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int firstStream, PacketSink sink) {
@@ -21,25 +31,33 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
   startQpc_ = startQpc;
   sink_ = std::move(sink);
   produced_ = 0;
+  margin_ = kLatencyFrames;
+  loggedMargin_ = kLatencyFrames;
   micMuted_ = false;
 
+  // Las dos fuentes se abren a la vez: un auricular Bluetooth lento ya no
+  // suma su espera a la del otro dispositivo.
+  const bool processOnly = settings.processOnly && settings.processId;
   if (settings.system) {
     system_ = std::make_unique<AudioCapture>();
-    bool ok = false;
-    if (settings.processOnly && settings.processId)
-      ok = system_->Start(AudioSourceKind::ProcessLoopback, {}, settings.processId, startQpc);
-    if (!ok) ok = system_->Start(AudioSourceKind::SystemLoopback, settings.outputDeviceId, 0, startQpc);
+    if (processOnly) system_->Begin(AudioSourceKind::ProcessLoopback, {}, settings.processId, startQpc);
+    else system_->Begin(AudioSourceKind::SystemLoopback, settings.outputDeviceId, 0, startQpc);
+  }
+  if (settings.mic) {
+    mic_ = std::make_unique<AudioCapture>();
+    mic_->Begin(AudioSourceKind::Microphone, settings.micDeviceId, 0, startQpc);
+  }
+  if (system_) {
+    bool ok = system_->WaitStarted();
+    if (!ok && processOnly) ok = system_->Start(AudioSourceKind::SystemLoopback, settings.outputDeviceId, 0, startQpc);
     if (!ok) {
       Log("Audio del sistema no disponible");
       system_.reset();
     }
   }
-  if (settings.mic) {
-    mic_ = std::make_unique<AudioCapture>();
-    if (!mic_->Start(AudioSourceKind::Microphone, settings.micDeviceId, 0, startQpc)) {
-      Log("Micrófono no disponible");
-      mic_.reset();
-    }
+  if (mic_ && !mic_->WaitStarted()) {
+    Log("Micrófono no disponible");
+    mic_.reset();
   }
   if (!system_ && !mic_) return false;
 
@@ -125,7 +143,13 @@ void AudioPipeline::Run() {
   const int64_t freq = QpcFrequency();
   while (running_) {
     Sleep(10);
-    int64_t target = (QpcNow() - startQpc_) * kAudioRate / freq - kLatencyFrames;
+    int64_t margin = ReadMargin(system_.get(), mic_.get());
+    margin_ = margin;
+    if (margin > loggedMargin_ + kAudioRate / 50) {
+      loggedMargin_ = margin;
+      Log("Audio: una fuente entrega con retraso, se codifica %.0f ms por detrás", double(margin) * 1000.0 / kAudioRate);
+    }
+    int64_t target = (QpcNow() - startQpc_) * kAudioRate / freq - margin;
     while (running_ && target - produced_ >= kFrameSize) EncodeChunk();
     // Nivel de cada fuente: el medidor lo lee en cada frame y el log lo
     // registra cada 10 s el primer minuto y luego cada 5 min, para no llenarlo.
@@ -150,11 +174,13 @@ void AudioPipeline::Run() {
 }
 
 void AudioPipeline::EncodeChunk() {
-  // Si una fuente va retrasada se rellena con silencio: el reloj manda.
+  // Cada fuente entrega exactamente las muestras de [produced_, produced_ +
+  // kFrameSize) en la línea de tiempo común; lo que no llegó es silencio, así
+  // que el pts y el contenido siempre coinciden.
   std::fill(sysBuf_.begin(), sysBuf_.end(), 0.0f);
   std::fill(micBuf_.begin(), micBuf_.end(), 0.0f);
-  if (system_) system_->Read(sysBuf_.data(), kFrameSize);
-  if (mic_) mic_->Read(micBuf_.data(), kFrameSize);
+  if (system_) system_->ReadAt(produced_, sysBuf_.data(), kFrameSize);
+  if (mic_) mic_->ReadAt(produced_, micBuf_.data(), kFrameSize);
 
   const float micGain = micMuted_ ? 0.0f : settings_.micVolume;
   for (auto& t : tracks_) {

@@ -37,15 +37,26 @@ const GUID kSubtypeFloat = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa,
 constexpr size_t kFifoFrames = kAudioRate * 4;
 constexpr REFERENCE_TIME kBufferDuration = 2'000'000; // 200 ms
 // Un paquete puede llegar hasta 20 ms antes o después de donde el reloj dice
-// sin que se toque nada; más allá se rellena con silencio (por detrás) o se
-// saltan las muestras que sobran (por delante), así el desfase con el vídeo
-// se queda en ±20 ms.
+// sin saltos: dentro de ese margen el resampler estira o encoge el audio un
+// 0,2 % como mucho (inaudible) hasta volver a cuadrar. Más allá se rellena con
+// silencio (por detrás) o se saltan las muestras que sobran (por delante),
+// así el desfase con el vídeo se queda en ±20 ms y normalmente en ±2 ms.
 constexpr int64_t kAlignTolerance = kAudioRate / 50;
+constexpr int64_t kCompensateDeadband = kAudioRate / 500; // 2 ms
+constexpr int kCompensateSlowdown = 500;                  // 1 muestra de ajuste cada 500
 
 // Handler mínimo para ActivateAudioInterfaceAsync (debe ser agile).
+// Es dueño de su evento: si la activación tarda más que la espera, la
+// llamada asíncrona conserva una referencia y el evento sigue vivo hasta que
+// llegue ActivateCompleted (antes se cerraba y SetEvent caía en un handle
+// cerrado o reutilizado).
 class ActivationHandler final : public IActivateAudioInterfaceCompletionHandler {
 public:
-  explicit ActivationHandler(HANDLE done) : done_(done) {}
+  ActivationHandler() : done_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+  ~ActivationHandler() {
+    if (done_) CloseHandle(done_);
+  }
+  HANDLE Event() const { return done_; }
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
     if (riid == __uuidof(IUnknown) || riid == __uuidof(IActivateAudioInterfaceCompletionHandler) ||
         riid == kIID_IAgileObject) {
@@ -83,13 +94,13 @@ ComPtr<IAudioClient> ActivateProcessLoopback(DWORD pid) {
   pv.blob.cbSize = sizeof(params);
   pv.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
 
-  HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  auto* handler = new ActivationHandler(done);
+  auto* handler = new ActivationHandler();
   ComPtr<IActivateAudioInterfaceAsyncOperation> op;
-  HRESULT hr = ActivateAudioInterfaceAsync(interop::kVirtualProcessLoopbackDevice, __uuidof(IAudioClient), &pv,
-                                           handler, &op);
+  HRESULT hr = handler->Event() ? ActivateAudioInterfaceAsync(interop::kVirtualProcessLoopbackDevice,
+                                                              __uuidof(IAudioClient), &pv, handler, &op)
+                                : E_OUTOFMEMORY;
   ComPtr<IAudioClient> client;
-  if (SUCCEEDED(hr) && WaitForSingleObject(done, 5000) == WAIT_OBJECT_0) {
+  if (SUCCEEDED(hr) && WaitForSingleObject(handler->Event(), 5000) == WAIT_OBJECT_0) {
     HRESULT activateHr = E_FAIL;
     ComPtr<IUnknown> unk;
     if (SUCCEEDED(op->GetActivateResult(&activateHr, &unk)) && SUCCEEDED(activateHr) && unk) unk.As(&client);
@@ -98,7 +109,6 @@ ComPtr<IAudioClient> ActivateProcessLoopback(DWORD pid) {
     Log("Audio por proceso: ActivateAudioInterfaceAsync falló 0x%08X", unsigned(hr));
   }
   handler->Release();
-  CloseHandle(done);
   return client;
 }
 
@@ -225,6 +235,63 @@ const char* KindName(AudioSourceKind kind) {
   }
 }
 
+// Avisa cuando Windows cambia el dispositivo predeterminado. Solo levanta
+// una bandera: el hilo de captura compara y reabre. Así no hay que enumerar
+// dispositivos cada segundo (una llamada COM que a veces tarda).
+class DefaultDeviceWatcher final : public IMMNotificationClient {
+public:
+  explicit DefaultDeviceWatcher(EDataFlow flow) : flow_(flow) {}
+  bool TakeChanged() { return changed_.exchange(false); }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient)) {
+      *out = static_cast<IMMNotificationClient*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *out = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+  ULONG STDMETHODCALLTYPE Release() override {
+    ULONG r = InterlockedDecrement(&refs_);
+    if (r == 0) delete this;
+    return r;
+  }
+  HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
+    if (flow == flow_ && role == eConsole) changed_ = true;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+
+private:
+  LONG refs_ = 1;
+  EDataFlow flow_;
+  std::atomic<bool> changed_{false};
+};
+
+// Prepara la conversión a float 48 kHz estéreo desde el formato del cliente.
+// SWR_FLAG_RESAMPLE deja el resampler activo aunque la frecuencia coincida,
+// para poder usar swr_set_compensation.
+SwrContext* MakeResampler(AVSampleFormat fmt, int rate, int channels, uint64_t mask, int* errOut) {
+  SwrContext* swr = nullptr;
+  AVChannelLayout in{}, out{};
+  if (mask && av_popcount64(mask) == channels) av_channel_layout_from_mask(&in, mask);
+  else av_channel_layout_default(&in, channels);
+  av_channel_layout_default(&out, kAudioChannels);
+  int err = swr_alloc_set_opts2(&swr, &out, AV_SAMPLE_FMT_FLT, kAudioRate, &in, fmt, rate, 0, nullptr);
+  if (err >= 0) err = av_opt_set_int(swr, "flags", SWR_FLAG_RESAMPLE, 0);
+  if (err >= 0) err = swr_init(swr);
+  av_channel_layout_uninit(&in);
+  av_channel_layout_uninit(&out);
+  if (err < 0) swr_free(&swr);
+  *errOut = err;
+  return swr;
+}
+
 } // namespace
 
 // Todo lo que vive mientras el cliente WASAPI está abierto.
@@ -232,11 +299,16 @@ struct AudioCapture::Client {
   ComPtr<IAudioClient> client;
   ComPtr<IAudioCaptureClient> capture;
   HANDLE packetEvent = nullptr; // solo en audio por proceso (modo evento)
-  SwrContext* swr = nullptr;    // nullptr = ya llega en float 48 kHz estéreo
+  // Siempre hay resampler, aunque llegue ya en float 48 kHz estéreo: es lo
+  // que corrige poco a poco la deriva del reloj del dispositivo.
+  SwrContext* swr = nullptr;
   int channels = kAudioChannels;
   int rate = kAudioRate;
   AVSampleFormat sampleFormat = AV_SAMPLE_FMT_FLT;
+  uint64_t channelMask = 0;
   std::vector<float> conv;
+  std::vector<uint8_t> silence; // entrada a cero para los paquetes SILENT
+  bool firstPacket = true;
 
   ~Client() {
     if (client) client->Stop();
@@ -268,7 +340,7 @@ std::vector<AudioDevice> EnumerateAudioDevices(bool capture) {
   return list;
 }
 
-bool AudioCapture::Start(AudioSourceKind kind, const std::string& deviceId, DWORD processId, int64_t startQpc) {
+void AudioCapture::Begin(AudioSourceKind kind, const std::string& deviceId, DWORD processId, int64_t startQpc) {
   Stop();
   kind_ = kind;
   deviceId_ = Widen(deviceId);
@@ -277,7 +349,10 @@ bool AudioCapture::Start(AudioSourceKind kind, const std::string& deviceId, DWOR
   fifo_.assign(kFifoFrames * kAudioChannels, 0.0f);
   readPos_ = count_ = 0;
   framesWritten_ = 0;
+  missingFrames_ = lateFrames_ = jumpFrames_ = silentTail_ = maxStall_ = 0;
+  discontinuities_ = stalls_ = 0;
   peak_ = 0.0f;
+  lag_ = 0;
   stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   readyEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   startOk_ = false;
@@ -292,9 +367,13 @@ bool AudioCapture::Start(AudioSourceKind kind, const std::string& deviceId, DWOR
       SetEvent(readyEvent_);
     }
   });
+}
+
+bool AudioCapture::WaitStarted(DWORD timeoutMs) {
+  if (!thread_.joinable()) return false;
   // Si el dispositivo tarda demasiado (Bluetooth, activación del audio de un
   // proceso) se da por fallido aunque el hilo termine abriéndolo después.
-  bool ok = WaitForSingleObject(readyEvent_, 6000) == WAIT_OBJECT_0 && startOk_;
+  bool ok = WaitForSingleObject(readyEvent_, timeoutMs) == WAIT_OBJECT_0 && startOk_;
   if (!ok) Stop();
   return ok;
 }
@@ -315,21 +394,34 @@ std::string AudioCapture::Description() {
   return description_;
 }
 
-size_t AudioCapture::Available() {
+size_t AudioCapture::ReadAt(int64_t pos, float* dst, size_t frames) {
+  std::fill(dst, dst + frames * kAudioChannels, 0.0f);
   std::lock_guard lock(mutex_);
-  return count_;
-}
-
-size_t AudioCapture::Read(float* dst, size_t frames) {
-  std::lock_guard lock(mutex_);
-  size_t n = std::min(frames, count_);
+  // Muestras anteriores a pos: llegaron tarde (el lector ya pasó por ahí) y
+  // ya se rellenaron con silencio, así que se descartan. Nunca se desplazan.
+  int64_t head = framesWritten_ - int64_t(count_);
+  if (head < pos && count_ > 0) {
+    int64_t drop = std::min<int64_t>(pos - head, int64_t(count_));
+    readPos_ = (readPos_ + size_t(drop)) % kFifoFrames;
+    count_ -= size_t(drop);
+    head += drop;
+    lateFrames_ += drop;
+  }
+  // Huecos al principio (anterior a lo que guarda el anillo) se quedan en
+  // silencio; luego se copia lo que haya de [pos, pos + frames).
+  int64_t lead = std::clamp<int64_t>(head - pos, 0, int64_t(frames));
+  size_t offset = size_t(lead);
+  size_t n = std::min(frames - offset, count_);
   for (size_t i = 0; i < n; ++i) {
-    size_t pos = (readPos_ + i) % kFifoFrames;
-    dst[i * 2] = fifo_[pos * 2];
-    dst[i * 2 + 1] = fifo_[pos * 2 + 1];
+    size_t at = (readPos_ + i) % kFifoFrames;
+    dst[(offset + i) * 2] = fifo_[at * 2];
+    dst[(offset + i) * 2 + 1] = fifo_[at * 2 + 1];
   }
   readPos_ = (readPos_ + n) % kFifoFrames;
   count_ -= n;
+  // Lo que falta al final aún no había llegado cuando se leyó.
+  int64_t end = pos + int64_t(frames);
+  if (end > framesWritten_) missingFrames_ += std::min<int64_t>(end - std::max(framesWritten_, pos), int64_t(frames));
   return n;
 }
 
@@ -353,7 +445,7 @@ void AudioCapture::Write(const float* data, size_t frames) {
       peak = std::max({peak, std::fabs(l), std::fabs(r)});
       count_++;
     }
-    framesWritten_ += frames;
+    framesWritten_ += int64_t(frames);
   }
   float previous = peak_.load();
   while (peak > previous && !peak_.compare_exchange_weak(previous, peak)) {
@@ -365,14 +457,54 @@ void AudioCapture::WriteSilence(size_t frames) { Write(nullptr, frames); }
 // Coloca la escritura en targetFrames (posición en la línea de tiempo): si
 // vamos por detrás más de la tolerancia se rellena con silencio. Devuelve
 // cuántas muestras del paquete hay que saltar si vamos por delante.
-size_t AudioCapture::AlignTo(int64_t targetFrames, size_t packetFrames) {
-  int64_t behind = targetFrames - int64_t(framesWritten_);
-  if (behind > kAlignTolerance) {
+size_t AudioCapture::AlignTo(int64_t targetFrames, size_t packetFrames, int64_t tolerance) {
+  int64_t behind = targetFrames - framesWritten_;
+  // Vuelve el sonido después de un rato en silencio: no hay nada audible que
+  // cortar, así que se coloca exacto en vez de tolerar hasta 20 ms. Si el
+  // relleno de silencio se pasó, se retira la parte aún no leída.
+  if (silentTail_ > 0) {
+    if (behind < 0) {
+      std::lock_guard lock(mutex_);
+      int64_t rewind = std::min({-behind, silentTail_, int64_t(count_)});
+      count_ -= size_t(rewind);
+      framesWritten_ -= rewind;
+      behind += rewind;
+    }
+    silentTail_ = 0;
+    tolerance = 0;
+  }
+  if (behind > tolerance) {
+    jumpFrames_ += behind;
     WriteSilence(size_t(behind));
     return 0;
   }
-  if (-behind > kAlignTolerance) return size_t(std::min<int64_t>(-behind, int64_t(packetFrames)));
+  if (-behind > tolerance) {
+    int64_t skip = std::min<int64_t>(-behind, int64_t(packetFrames));
+    jumpFrames_ += skip;
+    return size_t(skip);
+  }
   return 0;
+}
+
+// Dentro de la tolerancia, el resampler absorbe la diferencia sin saltos:
+// genera una muestra de más (o de menos) cada kCompensateSlowdown hasta que
+// la escritura vuelve a cuadrar con la marca de tiempo. Se recalcula en cada
+// paquete con el error actual, así que converge y no se pasa.
+void AudioCapture::Compensate(int64_t targetFrames, int64_t deadband, int64_t tolerance) {
+  if (!client_ || !client_->swr) return;
+  int64_t error = targetFrames - framesWritten_; // > 0: vamos por detrás, estirar
+  if (std::abs(error) <= deadband || std::abs(error) > tolerance) error = 0;
+  swr_set_compensation(client_->swr, int(error), int(std::abs(error) * kCompensateSlowdown));
+}
+
+// Con qué retraso entrega el dispositivo: lo vieja que es la última muestra
+// del paquete cuando llega. Se guarda el máximo y baja despacio (5 muestras
+// por paquete, ~10 ms/s), para que el lector se mantenga detrás aunque un
+// dispositivo (Bluetooth) entregue siempre tarde.
+void AudioCapture::UpdateLag(int64_t packetEndFrames, int64_t nowFrames) {
+  int64_t lag = std::clamp<int64_t>(nowFrames - packetEndFrames, 0, kAudioRate);
+  int64_t decayed = std::max<int64_t>(lag_.load() - 5, 0);
+  lag_ = std::max(lag, decayed);
 }
 
 void AudioCapture::CloseClient() {
@@ -453,23 +585,7 @@ bool AudioCapture::Open() {
           c->channels = mix->nChannels;
           c->rate = int(mix->nSamplesPerSec);
           c->sampleFormat = fmt;
-          if (c->channels != kAudioChannels || c->rate != kAudioRate || fmt != AV_SAMPLE_FMT_FLT) {
-            AVChannelLayout in{}, out{};
-            uint64_t mask = ChannelMaskOf(mix);
-            if (mask && av_popcount64(mask) == c->channels) av_channel_layout_from_mask(&in, mask);
-            else av_channel_layout_default(&in, c->channels);
-            av_channel_layout_default(&out, kAudioChannels);
-            int err = swr_alloc_set_opts2(&c->swr, &out, AV_SAMPLE_FMT_FLT, kAudioRate, &in, fmt, c->rate, 0,
-                                          nullptr);
-            if (err >= 0) err = swr_init(c->swr);
-            av_channel_layout_uninit(&in);
-            av_channel_layout_uninit(&out);
-            if (err < 0) {
-              Log("Audio (%s): no se pudo preparar la conversión: %s", KindName(kind_), AvError(err).c_str());
-              CoTaskMemFree(mix);
-              return false;
-            }
-          }
+          c->channelMask = ChannelMaskOf(mix);
         }
       }
       CoTaskMemFree(mix);
@@ -480,6 +596,12 @@ bool AudioCapture::Open() {
     Log("Audio (%s, %s): Initialize falló 0x%08X", KindName(kind_), deviceLabel.c_str(), unsigned(hr));
     return false;
   }
+  int err = 0;
+  c->swr = MakeResampler(c->sampleFormat, c->rate, c->channels, c->channelMask, &err);
+  if (!c->swr) {
+    Log("Audio (%s): no se pudo preparar la conversión: %s", KindName(kind_), AvError(err).c_str());
+    return false;
+  }
   if (FAILED(hr = c->client->GetService(IID_PPV_ARGS(&c->capture))) || FAILED(hr = c->client->Start())) {
     Log("Audio (%s, %s): no se pudo arrancar el cliente 0x%08X", KindName(kind_), deviceLabel.c_str(), unsigned(hr));
     return false;
@@ -488,8 +610,12 @@ bool AudioCapture::Open() {
     std::lock_guard lock(mutex_);
     description_ = deviceLabel + " (" + formatLabel + ")";
   }
-  Log("Audio (%s): %s, %s%s", KindName(kind_), deviceLabel.c_str(), formatLabel.c_str(),
-      followDefault_ && kind_ != AudioSourceKind::ProcessLoopback ? ", sigue al predeterminado" : "");
+  REFERENCE_TIME period = 0, latency = 0;
+  c->client->GetDevicePeriod(&period, nullptr);
+  c->client->GetStreamLatency(&latency);
+  Log("Audio (%s): %s, %s%s, periodo %.1f ms, latencia %.1f ms", KindName(kind_), deviceLabel.c_str(),
+      formatLabel.c_str(), followDefault_ && kind_ != AudioSourceKind::ProcessLoopback ? ", sigue al predeterminado" : "",
+      double(period) / 10'000.0, double(latency) / 10'000.0);
   client_ = c.release();
   return true;
 }
@@ -505,60 +631,125 @@ void AudioCapture::Run() {
   const int64_t freq = QpcFrequency();
   int64_t lastData = QpcNow();
   int64_t lastRetry = 0;
+  // Si no se eligió un dispositivo concreto, se sigue al predeterminado de
+  // Windows: el aviso llega por IMMNotificationClient.
+  auto enumerator = Enumerator();
+  DefaultDeviceWatcher* watcher = nullptr;
+  if (enumerator && kind_ != AudioSourceKind::ProcessLoopback) {
+    watcher = new DefaultDeviceWatcher(kind_ == AudioSourceKind::Microphone ? eCapture : eRender);
+    if (FAILED(enumerator->RegisterEndpointNotificationCallback(watcher))) {
+      watcher->Release();
+      watcher = nullptr;
+    }
+  }
   int64_t lastDefaultCheck = QpcNow();
-  int64_t lastClockLog = 0;
-  std::vector<uint8_t> raw;
+  int64_t lastLoop = QpcNow();
+  int64_t lastClockLog = QpcNow();
+  int clockLogs = 0;
 
   while (startOk_) {
     HANDLE packetEvent = client_ ? client_->packetEvent : nullptr;
     HANDLE handles[2] = {stopEvent_, packetEvent};
     DWORD r = packetEvent ? WaitForMultipleObjects(2, handles, FALSE, 10) : WaitForSingleObject(stopEvent_, 10);
     if (r == WAIT_OBJECT_0) break;
+    // Vueltas del bucle que tardan mucho (reabrir el dispositivo, el sistema
+    // ocupado cargando un juego...): el audio de ese rato se pierde, ya no se
+    // desplaza, pero conviene verlo en el log.
+    {
+      int64_t start = QpcNow();
+      int64_t loop = start - lastLoop;
+      lastLoop = start;
+      if (loop > freq / 20) {
+        std::lock_guard lock(mutex_);
+        stalls_++;
+        maxStall_ = std::max(maxStall_, loop);
+      }
+    }
 
     bool gotData = false;
     if (client_) {
       Client& c = *client_;
       UINT32 packetSize = 0;
       HRESULT hr;
+      bool firstInBatch = true;
       while (SUCCEEDED(hr = c.capture->GetNextPacketSize(&packetSize)) && packetSize > 0) {
         BYTE* data = nullptr;
         UINT32 frames = 0;
         DWORD flags = 0;
         UINT64 qpcPos = 0;
         if (FAILED(hr = c.capture->GetBuffer(&data, &frames, &flags, nullptr, &qpcPos))) break;
-        // Posición en la línea de tiempo: la marca de WASAPI (100 ns, mismo
-        // origen que QueryPerformanceCounter) si es fiable; si no, la hora de llegada.
+        const int64_t arrival = QpcNow();
+        const int64_t nowFrames = (arrival - startQpc_) * kAudioRate / freq;
+        const int64_t packetOut = int64_t(frames) * kAudioRate / c.rate;
+        // Muestras de salida que el resampler aún retiene: la primera que
+        // saque ahora es así de anterior a la primera del paquete.
+        const int64_t swrDelay = swr_get_delay(c.swr, kAudioRate);
+        // Posición en la línea de tiempo de la primera muestra que sale.
+        // Loopback (dispositivo o proceso): la marca de WASAPI (100 ns, mismo
+        // origen que QueryPerformanceCounter), como hace OBS. Micrófono, o
+        // marca no fiable: la hora de llegada menos lo que dura el paquete,
+        // porque muchos drivers de micrófono dan marcas erróneas; los demás
+        // paquetes del mismo lote van seguidos.
+        const bool deviceTiming =
+            kind_ != AudioSourceKind::Microphone && qpcPos != 0 && !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR);
+        int64_t stampQpc = 0;
         int64_t target;
-        if (qpcPos != 0 && !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)) {
-          double ticks = double(qpcPos) * double(freq) / 1e7;
-          target = int64_t((ticks - double(startQpc_)) * kAudioRate / double(freq));
+        if (deviceTiming) {
+          stampQpc = int64_t(double(qpcPos) * double(freq) / 1e7);
+          target = (stampQpc - startQpc_) * kAudioRate / freq - swrDelay;
+        } else if (firstInBatch) {
+          target = nowFrames - packetOut - swrDelay;
         } else {
-          target = (QpcNow() - startQpc_) * kAudioRate / freq - kAudioRate / 50;
+          target = framesWritten_;
         }
-        // Muestras ya en float 48 kHz estéreo (convertidas si hace falta).
-        const float* samples = nullptr;
-        size_t outFrames = frames;
+        // La hora de llegada tiembla lo que tarde en despertar el hilo, así
+        // que con ella se toleran más diferencias antes de corregir.
+        const int64_t tolerance = deviceTiming ? kAlignTolerance : kAlignTolerance * 2;
+        const int64_t deadband = deviceTiming ? kCompensateDeadband : kAudioRate / 100;
+        if (deviceTiming || firstInBatch) Compensate(target, deadband, tolerance);
+        firstInBatch = false;
+
+        if (c.firstPacket) {
+          c.firstPacket = false;
+          if (deviceTiming)
+            Log("Audio (%s): primer paquete de %u muestras, marca del dispositivo, llega %.1f ms después de "
+                "capturarse, resampler %.2f ms",
+                KindName(kind_), frames, QpcToSeconds(arrival - stampQpc) * 1000.0,
+                double(swrDelay) * 1000.0 / kAudioRate);
+          else
+            Log("Audio (%s): primer paquete de %u muestras, hora de llegada%s, resampler %.2f ms", KindName(kind_),
+                frames, kind_ == AudioSourceKind::Microphone ? "" : " (marca no fiable)",
+                double(swrDelay) * 1000.0 / kAudioRate);
+        } else if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
+          std::lock_guard lock(mutex_);
+          discontinuities_++;
+        }
+
+        // Todo pasa por el resampler (también el silencio), así su retardo y
+        // la compensación de deriva son siempre los mismos.
+        const uint8_t* input = data;
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-          if (c.swr) outFrames = size_t((int64_t(frames) * kAudioRate + c.rate - 1) / c.rate);
-        } else if (!c.swr) {
-          samples = reinterpret_cast<const float*>(data);
-        } else {
-          int cap = std::max(swr_get_out_samples(c.swr, int(frames)), int(frames) * kAudioRate / c.rate + 64);
-          c.conv.resize(size_t(cap) * kAudioChannels);
-          uint8_t* out[1] = {reinterpret_cast<uint8_t*>(c.conv.data())};
-          const uint8_t* in[1] = {data};
-          int n = swr_convert(c.swr, out, cap, in, int(frames));
-          outFrames = size_t(std::max(n, 0));
-          samples = c.conv.data();
+          int bytes = av_samples_get_buffer_size(nullptr, c.channels, int(frames), c.sampleFormat, 1);
+          if (bytes > 0) {
+            if (c.silence.size() < size_t(bytes)) c.silence.resize(size_t(bytes));
+            uint8_t* planes[1] = {c.silence.data()};
+            av_samples_set_silence(planes, 0, int(frames), c.channels, c.sampleFormat);
+            input = c.silence.data();
+          }
         }
+        int cap = std::max(swr_get_out_samples(c.swr, int(frames)), int(packetOut) + 64);
+        c.conv.resize(size_t(cap) * kAudioChannels);
+        uint8_t* out[1] = {reinterpret_cast<uint8_t*>(c.conv.data())};
+        const uint8_t* in[1] = {input};
+        int n = swr_convert(c.swr, out, cap, in, int(frames));
+        size_t outFrames = size_t(std::max(n, 0));
+        c.capture->ReleaseBuffer(frames);
+
+        UpdateLag(target + int64_t(outFrames), nowFrames);
         // Reloj del dispositivo adelantado: se saltan las muestras que sobran
         // (o el paquete entero); atrasado: se rellena con silencio.
-        size_t skip = AlignTo(target, outFrames);
-        if (skip < outFrames) {
-          if (samples) Write(samples + skip * kAudioChannels, outFrames - skip);
-          else WriteSilence(outFrames - skip);
-        }
-        c.capture->ReleaseBuffer(frames);
+        size_t skip = AlignTo(target, outFrames, tolerance);
+        if (skip < outFrames) Write(c.conv.data() + skip * kAudioChannels, outFrames - skip);
         gotData = true;
       }
       if (FAILED(hr)) {
@@ -578,11 +769,17 @@ void AudioCapture::Run() {
     // Nada sonando: WASAPI loopback no entrega paquetes, así que rellenamos
     // con silencio para mantener la línea de tiempo.
     int64_t expected = (now - startQpc_) * kAudioRate / freq;
-    int64_t fill = expected - int64_t(framesWritten_) - kAudioRate / 40; // hasta 25 ms antes de "ahora"
-    if (!gotData && now - lastData > freq / 20 && fill > 0) WriteSilence(size_t(fill));
+    int64_t fill = expected - framesWritten_ - kAudioRate / 40; // hasta 25 ms antes de "ahora"
+    if (!gotData && now - lastData > freq / 20 && fill > 0) {
+      WriteSilence(size_t(fill));
+      silentTail_ += fill;
+    }
 
-    // Si no se eligió un dispositivo concreto, se sigue al predeterminado de Windows.
-    if (followDefault_ && client_ && now - lastDefaultCheck > freq) {
+    // El aviso de cambio se confirma comparando ids (también llega cuando
+    // cambia el de comunicaciones o vuelve a ser el mismo). Sin aviso
+    // registrado se comprueba cada 5 s.
+    bool check = watcher ? watcher->TakeChanged() : now - lastDefaultCheck > freq * 5;
+    if (followDefault_ && client_ && check) {
       lastDefaultCheck = now;
       std::wstring current = DefaultDeviceId(kind_ == AudioSourceKind::Microphone);
       if (!current.empty() && current != openedId_) {
@@ -591,14 +788,37 @@ void AudioCapture::Run() {
         lastRetry = 0;
       }
     }
-    if (now - lastClockLog > freq * 300) {
+    // Estado del reloj a los 10 s y luego cada 5 min: desfase de la escritura
+    // con "ahora", cuánto va por detrás como mucho, lo que el lector no
+    // encontró a tiempo o llegó tarde y los saltos de reloj.
+    if (now - lastClockLog > (clockLogs == 0 ? freq * 10 : freq * 300)) {
       lastClockLog = now;
-      Log("Audio (%s): reloj %+.0f ms, %s", KindName(kind_), double(int64_t(framesWritten_) - expected) * 1000.0 / kAudioRate,
-          client_ ? "capturando" : "sin dispositivo");
+      clockLogs++;
+      int64_t missing, late, jumps, maxStall;
+      int disc, stalls;
+      {
+        std::lock_guard lock(mutex_);
+        missing = missingFrames_;
+        late = lateFrames_;
+        jumps = jumpFrames_;
+        disc = discontinuities_;
+        stalls = stalls_;
+        maxStall = maxStall_;
+      }
+      auto ms = [](int64_t f) { return double(f) * 1000.0 / kAudioRate; };
+      Log("Audio (%s): reloj %+.0f ms, retraso máx %.0f ms, sin llegar a tiempo %.0f ms, tarde %.0f ms, saltos %.0f "
+          "ms, discontinuidades %d, parones %d (máx %.0f ms), %s",
+          KindName(kind_), ms(framesWritten_ - expected), ms(lag_.load()), ms(missing), ms(late), ms(jumps), disc,
+          stalls, QpcToSeconds(maxStall) * 1000.0, client_ ? "capturando" : "sin dispositivo");
     }
   }
 
   CloseClient();
+  if (watcher) {
+    enumerator->UnregisterEndpointNotificationCallback(watcher);
+    watcher->Release();
+  }
+  enumerator.Reset();
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
   CoUninitialize();
 }
