@@ -2,6 +2,7 @@
 
 #include "app/Config.h"
 #include "app/System.h"
+#include "app/Updater.h"
 #include "audio/AudioCapture.h"
 #include "capture/Camera.h"
 #include "capture/CaptureSource.h"
@@ -38,6 +39,7 @@ struct MenuModel {
   std::vector<EncoderInfo> encoders;
   std::vector<ClipFile> clips;
   std::string outputDir;
+  UpdateStatus update; // se refresca en cada frame de los ajustes
 
   // Estado de la interfaz
   unsigned long long openedAt = 0; // GetTickCount64 al abrir (animación de entrada)
@@ -68,6 +70,10 @@ struct MenuActions {
   std::function<void(const std::string&)> showInFolder;
   std::function<void(const std::string&, double, double)> trim;
   std::function<double(const std::string&)> probeDuration;
+  // Buscar actualizaciones: solo hay red cuando el usuario pulsa.
+  std::function<void()> checkUpdates;
+  std::function<void()> installUpdate;
+  std::function<void()> cancelUpdate;
 };
 
 // Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).

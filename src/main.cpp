@@ -48,13 +48,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
 
   std::wstring args = cmdLine ? cmdLine : L"";
   bool tray = args.find(L"--tray") != std::wstring::npos;
+  bool updated = args.find(L"--updated") != std::wstring::npos; // lo pasa el instalador tras actualizar
   Log("Spectre %s iniciado", SPECTRE_VERSION);
 
   int code;
   {
     App app;
     try {
-      code = app.Run(instance, tray);
+      code = app.Run(instance, tray, updated);
     } catch (const std::exception& e) {
       Log("CRASH: excepción C++ en el hilo principal: %s", e.what());
       throw; // std::terminate -> volcado
