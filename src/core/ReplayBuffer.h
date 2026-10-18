@@ -3,6 +3,7 @@
 #include "encode/Media.h"
 
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -17,9 +18,11 @@ public:
 
   void Push(const AVPacket* packet, int stream);
 
-  // Copia de los paquetes de los últimos `seconds` segundos, empezando en un
-  // keyframe de vídeo para poder escribir el MP4 sin recodificar.
-  std::vector<std::pair<PacketPtr, int>> Snapshot(double seconds);
+  // Copia de los paquetes de los `seconds` segundos que terminan en `end`
+  // (segundos en la línea de tiempo del pipeline: el instante en que se pidió
+  // el clip), empezando en un keyframe de vídeo para poder escribir el MP4 sin
+  // recodificar. Vídeo y audio se cortan en el mismo `end`.
+  std::vector<std::pair<PacketPtr, int>> Snapshot(double seconds, double end);
 
   // Envía a `live` los paquetes desde el último keyframe y, a partir de ese
   // momento, cada paquete nuevo (todo bajo el mismo lock: no se pierde nada).
@@ -38,8 +41,8 @@ private:
   };
   double TimeOf(const AVPacket* p, int stream) const;
   void Trim();
-  // Paquetes del clip que empieza en el keyframe entries_[first], en orden de tiempo.
-  std::vector<size_t> ClipEntries(size_t first) const;
+  // Paquetes desde el keyframe entries_[first] hasta `end`, en orden de tiempo.
+  std::vector<size_t> ClipEntries(size_t first, double end) const;
 
   std::mutex mutex_;
   StreamList streams_;

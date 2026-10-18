@@ -271,23 +271,26 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto buffer = buffer_;
   auto streams = streams_;
   auto notify = notify_;
+  // El clip termina en el instante de la tecla, el mismo para vídeo y audio.
+  double end = QpcToSeconds(QpcNow() - startQpc_);
+  double age;
   {
     std::lock_guard lock(statsMutex_);
-    Log("Clip: %.0f s pedidos, el frame de vídeo llega al encoder con %.1f ms de media", seconds, frameAgeMs_);
+    age = frameAgeMs_;
   }
+  Log("Clip: %.0f s pedidos, el frame de vídeo llega al encoder con %.1f ms de media", seconds, age);
   // El audio se codifica con un margen (100 ms, hasta 1 s si una fuente llega
-  // tarde): se espera ese margen y un poco más para que el final del clip
-  // tenga audio hasta el último frame.
+  // tarde): se espera ese margen y un poco más para que haya audio hasta `end`.
   double latency = streams.size() > 1 ? audio_.LatencySeconds() : 0.0;
   DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, streams, notify, path, seconds, pending, waitMs] {
+  std::thread([buffer, streams, notify, path, seconds, end, pending, waitMs] {
     InstallThreadCrashHandler();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     Sleep(waitMs);
     bool ok = false;
     try {
-      auto packets = buffer->Snapshot(seconds);
+      auto packets = buffer->Snapshot(seconds, end);
       ok = WriteClip(path, streams, packets);
     } catch (const std::exception& e) {
       Log("Clip: excepción al guardar: %s", e.what());
