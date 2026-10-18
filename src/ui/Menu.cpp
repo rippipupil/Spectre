@@ -924,6 +924,100 @@ void PageHotkeys(MenuModel& m) {
   }
 }
 
+// Estado de la actualización: punto de color (o ruedita si está trabajando) y texto.
+void UpdateStatusLine(ImU32 color, bool busy, const std::string& text, bool bold = false) {
+  float rowH = ImGui::GetFrameHeight();
+  ImVec2 p = ImGui::GetCursorScreenPos();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  ImVec2 c(p.x + 6 * s_, p.y + rowH * 0.5f);
+  if (busy) {
+    float t = float(ImGui::GetTime()) * 5.0f;
+    dl->PathArcTo(c, 5.5f * s_, t, t + kPi * 1.4f, 16);
+    dl->PathStroke(C(color), 0, 1.8f * s_);
+  } else {
+    dl->AddCircleFilled(c, 4 * s_, C(color), 16);
+  }
+  ImFont* font = bold ? bold_ : ImGui::GetFont();
+  float fs = ImGui::GetFontSize();
+  float wrap = std::min(ImGui::GetContentRegionAvail().x, 560 * s_) - 20 * s_;
+  ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrap, text.c_str());
+  dl->AddText(font, fs, ImVec2(p.x + 20 * s_, p.y + (rowH - fs) * 0.5f), C(col::Text), text.c_str(), nullptr, wrap);
+  ImGui::Dummy(ImVec2(0, std::max(rowH, ts.y + (rowH - fs))));
+}
+
+void UpdatesSection(MenuModel& m, const MenuActions& a) {
+  using S = UpdateStatus::State;
+  const UpdateStatus& u = m.update;
+  Heading("Actualizaciones");
+  ImGui::PushStyleColor(ImGuiCol_Text, V(col::Muted));
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted("Versión instalada");
+  ImGui::PopStyleColor();
+  ImGui::SameLine(kLabelColumn * s_);
+  ImGui::TextUnformatted(SPECTRE_VERSION);
+  Gap(2);
+
+  const float bw = 230 * s_;
+  char buf[256];
+  switch (u.state) {
+  case S::Idle:
+    Help("Spectre solo se conecta a GitHub cuando pulsas el botón: no comprueba nada en segundo plano.");
+    Gap(4);
+    if (SoftButton("update-check", Icon::Replay, "Buscar actualizaciones", bw)) a.checkUpdates();
+    break;
+  case S::Checking:
+    UpdateStatusLine(col::Muted, true, "Buscando actualizaciones...");
+    break;
+  case S::UpToDate:
+    snprintf(buf, sizeof(buf), "Tienes la última versión (%s).", SPECTRE_VERSION);
+    UpdateStatusLine(col::Green, false, buf);
+    Gap(4);
+    if (SoftButton("update-check", Icon::Replay, "Volver a buscar", bw)) a.checkUpdates();
+    break;
+  case S::Available:
+    snprintf(buf, sizeof(buf), "Versión nueva disponible: %s", u.latest.c_str());
+    UpdateStatusLine(col::Accent, false, buf, true);
+    if (u.portable) {
+      Help("Esta es la copia portable de Spectre: descarga el zip nuevo y reemplaza la carpeta. Si usas el "
+           "instalador, Spectre se actualiza solo desde aquí.");
+      Gap(4);
+      if (SoftButton("update-page", Icon::Folder, "Abrir página de descarga", bw, Tone::Primary))
+        a.openPath(Updater::ReleasePage());
+    } else {
+      std::string help = "Se descarga el instalador";
+      if (u.sizeBytes > 0) help += " (" + FormatBytes(u.sizeBytes) + ")";
+      help += ", Spectre se cierra, se actualiza conservando tus ajustes y se vuelve a abrir solo.";
+      if (m.stats.recording) help += " La grabación en curso se guardará antes de cerrar.";
+      Help(help.c_str());
+      Gap(4);
+      if (SoftButton("update-install", Icon::Play, "Actualizar ahora", bw, Tone::Primary)) a.installUpdate();
+    }
+    break;
+  case S::Downloading: {
+    int pct = int(std::clamp(u.downloaded, 0.0, 1.0) * 100.0 + 0.5);
+    snprintf(buf, sizeof(buf), "Descargando la versión %s... %d %%", u.latest.c_str(), pct);
+    UpdateStatusLine(col::Accent, true, buf);
+    float w = std::min(ImGui::GetContentRegionAvail().x, 340 * s_), h = 6 * s_;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), C(col::Surface), h * 0.5f);
+    if (pct > 0) dl->AddRectFilled(p, ImVec2(p.x + w * float(pct) / 100.0f, p.y + h), C(col::Accent), h * 0.5f);
+    ImGui::Dummy(ImVec2(w, h));
+    Gap(8);
+    if (SoftButton("update-cancel", Icon::Close, "Cancelar", 150 * s_)) a.cancelUpdate();
+    break;
+  }
+  case S::Launching:
+    UpdateStatusLine(col::Accent, true, "Abriendo el instalador. Spectre se cerrará y volverá a abrirse al terminar.");
+    break;
+  case S::Error:
+    UpdateStatusLine(col::Red, false, u.message);
+    Gap(4);
+    if (SoftButton("update-check", Icon::Replay, "Reintentar", bw)) a.checkUpdates();
+    break;
+  }
+}
+
 void PageGeneral(MenuModel& m, const MenuActions& a) {
   auto& c = m.config;
   Heading("Archivos");
@@ -940,6 +1034,8 @@ void PageGeneral(MenuModel& m, const MenuActions& a) {
   FieldLabel("Límite del replay");
   m.dirty |= ImGui::SliderInt("##mem", &c.maxBufferMB, 64, 4096, "%d MB");
   Help("Tope de RAM para el replay. Si la duración y la calidad elegidas no caben, se guardan menos segundos.");
+
+  UpdatesSection(m, a);
 
   Heading("Spectre");
   Help("Cerrar el panel no cierra Spectre: sigue en la bandeja del sistema, junto al reloj.");

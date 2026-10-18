@@ -2,6 +2,7 @@
 
 #include "app/Config.h"
 #include "app/System.h"
+#include "app/Updater.h"
 #include "core/Pipeline.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
@@ -18,7 +19,7 @@ namespace spectre {
 
 class App {
 public:
-  int Run(HINSTANCE instance, bool startInTray);
+  int Run(HINSTANCE instance, bool startInTray, bool updated);
 
 private:
   static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -95,6 +96,8 @@ private:
   bool toastError_ = false;
   ULONGLONG toastUntil_ = 0;
   ULONGLONG lastStats_ = 0;
+  Updater updater_;
+  std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
 };
 
 } // namespace spectre

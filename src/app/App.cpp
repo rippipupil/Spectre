@@ -12,6 +12,10 @@
 #include <thread>
 #include <utility>
 
+#ifndef SPECTRE_VERSION
+#define SPECTRE_VERSION "0.1.0"
+#endif
+
 namespace spectre {
 
 namespace {
@@ -58,7 +62,7 @@ bool SameCaptureSettings(const Config& a, const Config& b) {
 }
 } // namespace
 
-int App::Run(HINSTANCE instance, bool startInTray) {
+int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   instance_ = instance;
   config_ = LoadConfig();
   // El instalador puede haber activado el inicio con Windows: el registro manda.
@@ -107,6 +111,9 @@ int App::Run(HINSTANCE instance, bool startInTray) {
     double seconds = 0;
     return ProbeDuration(path, &seconds) ? seconds : 0.0;
   };
+  menuActions_.checkUpdates = [this] { updater_.Check(); };
+  menuActions_.installUpdate = [this] { updater_.Download(hwnd_); };
+  menuActions_.cancelUpdate = [this] { updater_.Cancel(); };
   menuActions_.trim = [this](const std::string& path, double start, double end) {
     HWND hwnd = hwnd_;
     auto pending = std::make_shared<PendingWrite>();
@@ -138,7 +145,9 @@ int App::Run(HINSTANCE instance, bool startInTray) {
   SetTimer(hwnd_, kTimerHealth, 1000, nullptr);
   CheckGame();
   UpdatePipeline();
-  if (!startInTray)
+  if (updated)
+    Toast("Spectre se ha actualizado a la versión " SPECTRE_VERSION ". Tus ajustes se conservan.");
+  else if (!startInTray)
     Toast("Spectre está en la bandeja del sistema. Pulsa " + config_.hotkeys.overlay + " para abrir el panel.");
 
   // Bucle de mensajes: bloqueante cuando no hay nada en pantalla (0 % CPU),
@@ -176,6 +185,13 @@ int App::Run(HINSTANCE instance, bool startInTray) {
   UnregisterHotkeys();
   RemoveTrayIcon();
   if (hwnd_) DestroyWindow(hwnd_);
+  // Spectre ya soltó la captura y terminó de escribir: el instalador puede
+  // reemplazar los archivos y vuelve a abrir la app al acabar.
+  if (!installerPath_.empty() && !Updater::LaunchInstaller(installerPath_)) {
+    std::wstring text = L"No se pudo abrir el instalador de la actualización. Puedes abrirlo a mano desde:\n" +
+                        installerPath_;
+    MessageBoxW(nullptr, text.c_str(), L"Spectre", MB_OK | MB_ICONWARNING);
+  }
   return 0;
 }
 
@@ -615,6 +631,7 @@ void App::RenderOverlays() {
         menu_.SetHitRegion(&hit);
       }
     } else {
+      menuModel_.update = updater_.Status();
       menu_.Render([this] { DrawSettings(menu_, menuModel_, menuActions_); });
     }
   }
@@ -727,6 +744,12 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                    menuMode_ == MenuMode::Panel ? kPanelClips : kSettingsClips);
       menuModel_.selectedClip = -1;
     }
+    return 0;
+  }
+  case WM_SPECTRE_UPDATE_READY: {
+    std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
+    installerPath_ = *path;
+    Quit();
     return 0;
   }
   case WM_SPECTRE_CLOSE_MENU:

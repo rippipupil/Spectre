@@ -54,6 +54,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\spectre.exe"; Description: "Abrir Spectre"; Flags: nowait postinstall skipifsilent
+; Actualización lanzada desde Spectre (Ajustes > General): se instala en silencio
+; y la app vuelve a abrirse sola al terminar.
+Filename: "{app}\spectre.exe"; Parameters: "--updated"; Flags: nowait; Check: RelaunchAfterUpdate
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM spectre.exe /F"; Flags: runhidden; RunOnceId: "KillSpectre"
@@ -65,6 +68,12 @@ Type: filesandordirs; Name: "{userappdata}\Spectre"
 function IsUpgrade(): Boolean;
 begin
   Result := RegValueExists(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'UninstallString');
+end;
+
+// Spectre lanza el instalador con /SILENT /RELAUNCH=1 al actualizarse desde la app.
+function RelaunchAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:relaunch|0}') = '1');
 end;
 
 // Las ediciones N/KN de Windows no traen Media Foundation. Spectre funciona
