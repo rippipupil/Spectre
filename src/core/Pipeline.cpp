@@ -167,7 +167,7 @@ void Pipeline::Stop() {
   streams_.clear();
   gpu_.Reset();
   framesEncoded_ = framesSkipped_ = 0;
-  encodeMs_ = 0;
+  encodeMs_ = frameAgeMs_ = 0;
 }
 
 RECT Pipeline::CameraRect(UINT camWidth, UINT camHeight) const {
@@ -204,6 +204,7 @@ void Pipeline::VideoLoop() {
   const int64_t freq = QpcFrequency();
   const int fps = settings_.fps;
   int64_t lastIndex = -1;
+  uint64_t lastSequence = 0;
   int consecutiveFailures = 0;
   auto sink = [this](const AVPacket* pkt, int stream) {
     if (acceptPackets_) buffer_->Push(pkt, stream);
@@ -216,12 +217,19 @@ void Pipeline::VideoLoop() {
       CapturedFrame frame = capture_->Latest();
       if (frame.texture) {
         int64_t t0 = QpcNow();
+        // El pts es el instante de la ranura, no el de la imagen: un frame
+        // que llegó hace X ms se muestra X ms tarde respecto al audio. Se mide
+        // solo con frames nuevos (uno repetido en una escena quieta no cuenta).
+        bool fresh = frame.sequence != lastSequence;
+        lastSequence = frame.sequence;
+        double ageMs = QpcToSeconds(t0 - frame.qpc) * 1000.0;
         bool ok = encoder_.Encode(
             index, [&](ID3D11Texture2D* dst, UINT slice) { return Render(dst, slice, frame); }, sink);
         double ms = QpcToSeconds(QpcNow() - t0) * 1000.0;
         {
           std::lock_guard lock(statsMutex_);
           encodeMs_ = encodeMs_ * 0.95 + ms * 0.05;
+          if (fresh && ageMs >= 0 && ageMs < 1000) frameAgeMs_ = frameAgeMs_ * 0.95 + ageMs * 0.05;
           if (ok) framesEncoded_++;
           if (lastIndex >= 0 && index > lastIndex + 1) framesSkipped_ += uint64_t(index - lastIndex - 1);
         }
@@ -263,14 +271,26 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto buffer = buffer_;
   auto streams = streams_;
   auto notify = notify_;
+  // El clip termina en el instante de la tecla, el mismo para vídeo y audio.
+  double end = QpcToSeconds(QpcNow() - startQpc_);
+  double age;
+  {
+    std::lock_guard lock(statsMutex_);
+    age = frameAgeMs_;
+  }
+  Log("Clip: %.0f s pedidos, el frame de vídeo llega al encoder con %.1f ms de media", seconds, age);
+  // El audio se codifica con un margen (100 ms, hasta 1 s si una fuente llega
+  // tarde): se espera ese margen y un poco más para que haya audio hasta `end`.
+  double latency = streams.size() > 1 ? audio_.LatencySeconds() : 0.0;
+  DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, streams, notify, path, seconds, pending] {
+  std::thread([buffer, streams, notify, path, seconds, end, pending, waitMs] {
     InstallThreadCrashHandler();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    Sleep(300); // deja que llegue el audio de los últimos milisegundos
+    Sleep(waitMs);
     bool ok = false;
     try {
-      auto packets = buffer->Snapshot(seconds);
+      auto packets = buffer->Snapshot(seconds, end);
       ok = WriteClip(path, streams, packets);
     } catch (const std::exception& e) {
       Log("Clip: excepción al guardar: %s", e.what());

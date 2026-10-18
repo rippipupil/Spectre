@@ -124,6 +124,7 @@ private:
 
   std::mutex statsMutex_;
   double encodeMs_ = 0;
+  double frameAgeMs_ = 0; // cuánto lleva capturado cada frame nuevo al codificarlo
   uint64_t framesEncoded_ = 0;
   uint64_t framesSkipped_ = 0;
 };

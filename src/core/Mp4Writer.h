@@ -22,12 +22,19 @@ public:
   bool Write(const AVPacket* packet, int stream);
   bool Close();
   double WrittenSeconds() const { return writtenSeconds_; }
+  // Primer y último instante escrito de cada pista (s, respecto al keyframe
+  // inicial) y paquetes descartados, para el log: si el audio empieza tarde
+  // respecto al vídeo se ve aquí.
+  std::string Summary() const;
 
 private:
   AVFormatContext* fmt_ = nullptr;
   StreamList streams_;
   std::vector<int64_t> offsets_;
   std::vector<int64_t> lastDts_;
+  std::vector<int64_t> firstPts_;
+  std::vector<int64_t> lastPts_;
+  std::vector<int> dropped_;
   bool haveOrigin_ = false;
   bool headerWritten_ = false;
   double writtenSeconds_ = 0;
