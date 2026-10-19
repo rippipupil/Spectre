@@ -1,9 +1,12 @@
+// Antes de cualquier cabecera que incluya imgui.h (ui/Theme.h lo hace).
+#define IMGUI_DEFINE_MATH_OPERATORS
+
 #include "ui/Menu.h"
 
 #include "common/Util.h"
 #include "ui/OverlayWindow.h"
+#include "ui/Theme.h"
 
-#define IMGUI_DEFINE_MATH_OPERATORS
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -20,40 +23,35 @@ namespace spectre {
 
 namespace {
 
-// ------------------------------------------------------------------ tema
-// Una sola paleta para panel, ajustes y avisos. Los colores pasan por
-// ImGui::GetColorU32 para respetar la transparencia de la animación.
-namespace col {
-constexpr ImU32 Bg = IM_COL32(17, 17, 21, 246);
-constexpr ImU32 Surface = IM_COL32(29, 29, 36, 255);
-constexpr ImU32 SurfaceHover = IM_COL32(37, 37, 46, 255);
-constexpr ImU32 SurfaceActive = IM_COL32(46, 46, 57, 255);
-constexpr ImU32 Line = IM_COL32(255, 255, 255, 16);
-constexpr ImU32 Text = IM_COL32(236, 236, 241, 255);
-constexpr ImU32 Muted = IM_COL32(150, 150, 162, 255);
-constexpr ImU32 Faint = IM_COL32(104, 104, 116, 255);
-constexpr ImU32 Accent = IM_COL32(139, 92, 246, 255);
-constexpr ImU32 AccentHover = IM_COL32(153, 112, 250, 255);
-constexpr ImU32 AccentActive = IM_COL32(122, 76, 228, 255);
-constexpr ImU32 Red = IM_COL32(229, 72, 77, 255);
-constexpr ImU32 RedHover = IM_COL32(239, 92, 96, 255);
-constexpr ImU32 RedActive = IM_COL32(204, 58, 63, 255);
-constexpr ImU32 Green = IM_COL32(52, 199, 112, 255);
-constexpr ImU32 Amber = IM_COL32(232, 170, 60, 255);
-} // namespace col
+// ------------------------------------------------------------------ estilo
+// Reglas del rediseño (docs: investigacion/diseno-interfaz.md): sin esquinas
+// redondeadas, sin degradados ni sombras, superficies planas con líneas de
+// 1 px, un solo acento por tema y el rojo únicamente para grabar y errores.
+// Los colores vienen de ui/Theme.h y pasan por ImGui::GetColorU32 para
+// respetar la transparencia de la animación de entrada.
 
 constexpr float kPi = 3.14159265358979f;
+
+// Tamaños de texto en píxeles lógicos (se multiplican por la escala DPI).
+constexpr float kBody = 15.0f;  // texto del panel y de los formularios
+constexpr float kSmall = 13.0f; // filas de clips, estado, keycaps
+constexpr float kHint = 12.0f;  // ayudas y enlaces
+constexpr float kLabel = 11.0f; // títulos de sección en mayúsculas
+constexpr float kTitle = 22.0f; // título de la página de Ajustes
 
 // Estado del frame actual (fuentes y escala de la ventana que se dibuja).
 float s_ = 1.0f;
 ImFont* bold_ = nullptr;
 ImFont* big_ = nullptr;
 
-void BeginFrameStyle(OverlayWindow& w) {
+void BeginFrameStyle(OverlayWindow& w, const Config& config) {
   s_ = w.Scale();
   bold_ = w.BoldFont();
   big_ = w.BigFont();
+  BeginThemeFrame(config);
 }
+
+float Px(float logical) { return logical * s_; }
 
 ImU32 C(ImU32 color, float alpha = 1.0f) { return ImGui::GetColorU32(color, alpha); }
 ImVec4 V(ImU32 color) { return ImGui::ColorConvertU32ToFloat4(color); }
@@ -66,10 +64,39 @@ ImU32 Mix(ImU32 a, ImU32 b, float t) {
   return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | ch(IM_COL32_A_SHIFT);
 }
 
-float SmallSize() { return ImGui::GetFontSize() * 0.84f; }
-
 ImVec2 TextSize(ImFont* font, float size, const char* text) {
   return font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+}
+
+void Text(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text) {
+  dl->AddText(font, size, pos, color, text);
+}
+
+// Texto con espaciado entre letras (marca y títulos de sección). Se dibuja
+// glifo a glifo respetando UTF-8; tracking en píxeles.
+float TrackedWidth(ImFont* font, float size, const char* text, float tracking) {
+  float w = 0;
+  int glyphs = 0;
+  for (const char* c = text; *c;) {
+    const char* next = c + 1;
+    while (*next && (static_cast<unsigned char>(*next) & 0xC0) == 0x80) ++next;
+    w += font->CalcTextSizeA(size, FLT_MAX, 0.0f, c, next).x;
+    ++glyphs;
+    c = next;
+  }
+  return glyphs > 0 ? w + tracking * float(glyphs - 1) : 0.0f;
+}
+
+void TrackedText(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text,
+                 float tracking) {
+  float x = pos.x;
+  for (const char* c = text; *c;) {
+    const char* next = c + 1;
+    while (*next && (static_cast<unsigned char>(*next) & 0xC0) == 0x80) ++next;
+    dl->AddText(font, size, ImVec2(x, pos.y), color, c, next);
+    x += font->CalcTextSizeA(size, FLT_MAX, 0.0f, c, next).x + tracking;
+    c = next;
+  }
 }
 
 // Recorta el texto con "..." para que quepa en maxWidth (respeta UTF-8).
@@ -101,12 +128,11 @@ std::string FormatClipLength(int seconds) {
 }
 
 // ----------------------------------------------------------------- iconos
-// Dibujados con primitivas para que tengan el mismo trazo a cualquier escala
-// y no dependan de fuentes de iconos.
-enum class Icon { Replay, Record, Stop, Mic, Camera, Folder, Gear, Close, Back, Play, Monitor, Keyboard, Chart, Power };
+// Trazo fino y constante a cualquier escala, sin fondos ni círculos detrás.
+enum class Icon { Replay, Mic, Camera, Close, Back, Play };
 
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
-  const float t = std::max(1.4f, r * 0.17f);
+  const float t = std::max(1.2f, r * 0.17f);
   auto P = [&](float x, float y) { return ImVec2(c.x + x * r, c.y + y * r); };
   switch (icon) {
   case Icon::Replay: {
@@ -116,40 +142,20 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     ImVec2 p(c.x + std::cos(a1) * rr, c.y + std::sin(a1) * rr);
     ImVec2 tan(-std::sin(a1), std::cos(a1)), nor(std::cos(a1), std::sin(a1));
     dl->AddTriangleFilled(p + tan * (r * 0.42f), p + nor * (r * 0.30f), p - nor * (r * 0.30f), color);
-    dl->AddCircleFilled(c, r * 0.20f, color);
     break;
   }
-  case Icon::Record:
-    dl->AddCircleFilled(c, r * 0.58f, color);
-    break;
-  case Icon::Stop:
-    dl->AddRectFilled(P(-0.48f, -0.48f), P(0.48f, 0.48f), color, r * 0.14f);
-    break;
   case Icon::Mic:
-    dl->AddRectFilled(P(-0.24f, -0.86f), P(0.24f, 0.18f), color, r * 0.24f);
+    dl->AddRect(P(-0.26f, -0.86f), P(0.26f, 0.18f), color, r * 0.26f, 0, t);
     dl->PathArcTo(P(0, -0.08f), r * 0.50f, 0.0f, kPi, 14);
     dl->PathStroke(color, 0, t);
     dl->AddLine(P(0, 0.42f), P(0, 0.80f), color, t);
     dl->AddLine(P(-0.30f, 0.80f), P(0.30f, 0.80f), color, t);
     break;
   case Icon::Camera:
-    dl->AddRect(P(-0.85f, -0.48f), P(0.32f, 0.48f), color, r * 0.16f, 0, t);
-    dl->AddTriangleFilled(P(0.40f, 0.0f), P(0.88f, -0.40f), P(0.88f, 0.40f), color);
-    break;
-  case Icon::Folder: {
-    const ImVec2 pts[] = {P(-0.85f, -0.62f), P(-0.28f, -0.62f), P(-0.12f, -0.44f), P(0.85f, -0.44f),
-                          P(0.85f, 0.62f),   P(-0.85f, 0.62f)};
-    dl->AddPolyline(pts, 6, color, ImDrawFlags_Closed, t);
-    break;
-  }
-  case Icon::Gear:
-    for (int i = 0; i < 8; ++i) {
-      float a = kPi * 2.0f * float(i) / 8.0f;
-      ImVec2 d(std::cos(a), std::sin(a));
-      dl->AddLine(c + d * (r * 0.50f), c + d * (r * 0.86f), color, t * 1.7f);
-    }
-    dl->AddCircle(c, r * 0.52f, color, 20, t * 1.2f);
-    dl->AddCircleFilled(c, r * 0.18f, color);
+    dl->AddRect(P(-0.85f, -0.48f), P(0.32f, 0.48f), color, 0, 0, t);
+    dl->AddLine(P(0.32f, -0.10f), P(0.88f, -0.40f), color, t);
+    dl->AddLine(P(0.88f, -0.40f), P(0.88f, 0.40f), color, t);
+    dl->AddLine(P(0.88f, 0.40f), P(0.32f, 0.10f), color, t);
     break;
   case Icon::Close:
     dl->AddLine(P(-0.45f, -0.45f), P(0.45f, 0.45f), color, t);
@@ -159,54 +165,126 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     dl->AddLine(P(0.22f, -0.55f), P(-0.30f, 0.0f), color, t);
     dl->AddLine(P(-0.30f, 0.0f), P(0.22f, 0.55f), color, t);
     break;
-  case Icon::Play:
-    dl->AddTriangleFilled(P(-0.36f, -0.52f), P(0.52f, 0.0f), P(-0.36f, 0.52f), color);
-    break;
-  case Icon::Monitor:
-    dl->AddRect(P(-0.85f, -0.62f), P(0.85f, 0.38f), color, r * 0.12f, 0, t);
-    dl->AddLine(P(0, 0.40f), P(0, 0.72f), color, t);
-    dl->AddLine(P(-0.40f, 0.74f), P(0.40f, 0.74f), color, t);
-    break;
-  case Icon::Keyboard:
-    dl->AddRect(P(-0.90f, -0.52f), P(0.90f, 0.52f), color, r * 0.14f, 0, t);
-    for (int row = 0; row < 2; ++row)
-      for (int k = 0; k < 4; ++k)
-        dl->AddRectFilled(P(-0.62f + k * 0.38f, -0.26f + row * 0.30f),
-                          P(-0.46f + k * 0.38f, -0.12f + row * 0.30f), color);
-    dl->AddLine(P(-0.38f, 0.30f), P(0.38f, 0.30f), color, t);
-    break;
-  case Icon::Chart:
-    dl->AddRectFilled(P(-0.70f, 0.10f), P(-0.36f, 0.70f), color, r * 0.06f);
-    dl->AddRectFilled(P(-0.17f, -0.30f), P(0.17f, 0.70f), color, r * 0.06f);
-    dl->AddRectFilled(P(0.36f, -0.70f), P(0.70f, 0.70f), color, r * 0.06f);
-    break;
-  case Icon::Power:
-    dl->PathArcTo(c, r * 0.66f, -kPi * 0.30f, kPi * 1.30f, 24);
-    dl->PathStroke(color, 0, t);
-    dl->AddLine(P(0, -0.86f), P(0, -0.10f), color, t);
+  case Icon::Play: {
+    const ImVec2 pts[] = {P(-0.40f, -0.60f), P(0.52f, 0.0f), P(-0.40f, 0.60f)};
+    dl->AddPolyline(pts, 3, color, ImDrawFlags_Closed, t);
     break;
   }
+  }
+}
+
+// Marca de estado: cuadrado en Negro, rombo en Psíquico. Nunca un círculo
+// de color: la marca va siempre acompañada del texto que explica el estado.
+void DrawMark(ImDrawList* dl, ImVec2 c, float half, ImU32 color, bool filled) {
+  if (CurrentTheme().psychic) {
+    const float d = half * 1.3f;
+    const ImVec2 pts[] = {ImVec2(c.x, c.y - d), ImVec2(c.x + d, c.y), ImVec2(c.x, c.y + d), ImVec2(c.x - d, c.y)};
+    if (filled) dl->AddConvexPolyFilled(pts, 4, color);
+    else dl->AddPolyline(pts, 4, color, ImDrawFlags_Closed, 1.0f * s_);
+  } else {
+    ImVec2 a(c.x - half, c.y - half), b(c.x + half, c.y + half);
+    if (filled) dl->AddRectFilled(a, b, color);
+    else dl->AddRect(a, b, color, 0, 0, 1.0f * s_);
+  }
+}
+
+// ------------------------------------------------------- movimiento del tema
+// Animaciones del tema Psíquico. Todas son primitivas de ImGui (unas decenas
+// de vértices) y solo se dibujan con el panel abierto y las animaciones
+// activadas en Ajustes; con el panel cerrado no existe ni el contexto.
+
+// Sombra psíquica: al cambiar la fila sobre la que está el ratón, la anterior
+// se desvanece en 200 ms.
+struct HoverTrail {
+  ImGuiID current = 0;
+  ImVec2 a, b;        // rectángulo actual
+  ImVec2 ghostA, ghostB;
+  double ghostSince = -10.0;
+  unsigned long long openedAt = 0; // apertura del panel a la que pertenece
+} trail_;
+
+void TrackHover(ImGuiID id, ImVec2 a, ImVec2 b, bool hovered) {
+  if (!hovered) {
+    if (trail_.current == id) {
+      trail_.ghostA = trail_.a;
+      trail_.ghostB = trail_.b;
+      trail_.ghostSince = ImGui::GetTime();
+      trail_.current = 0;
+    }
+    return;
+  }
+  if (trail_.current != id) {
+    if (trail_.current != 0) {
+      trail_.ghostA = trail_.a;
+      trail_.ghostB = trail_.b;
+      trail_.ghostSince = ImGui::GetTime();
+    }
+    trail_.current = id;
+  }
+  trail_.a = a;
+  trail_.b = b;
+}
+
+void DrawHoverTrail(ImDrawList* dl) {
+  if (!ThemeMotion()) return;
+  float t = float(ImGui::GetTime() - trail_.ghostSince) / 0.2f;
+  if (t < 0 || t >= 1) return;
+  dl->AddRectFilled(trail_.ghostA, trail_.ghostB, C(Colors().accent, 0.12f * (1.0f - t)));
+}
+
+// Estela: un segmento de 2 px recorre el borde inferior de un rectángulo
+// cada 2,8 s.
+void DrawTrace(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color) {
+  if (!ThemeMotion()) return;
+  const float period = 2.8f, len = Px(34);
+  float phase = float(std::fmod(ImGui::GetTime(), double(period))) / period;
+  float alpha = phase < 0.1f ? phase / 0.1f : phase > 0.9f ? (1.0f - phase) / 0.1f : 1.0f;
+  float x = a.x + (b.x - a.x - len) * phase;
+  dl->AddRectFilled(ImVec2(x, b.y - Px(2)), ImVec2(x + len, b.y), C(color, alpha));
+}
+
+// Respiración de la marca de estado (2,6 s).
+float Breathe() {
+  if (!ThemeMotion()) return 1.0f;
+  return 0.35f + 0.65f * (0.5f + 0.5f * std::sin(float(ImGui::GetTime()) * 2.0f * kPi / 2.6f));
 }
 
 // ----------------------------------------------------------------- widgets
 
-void Gap(float px) { ImGui::Dummy(ImVec2(0, px * s_)); }
+void Gap(float px) { ImGui::Dummy(ImVec2(0, Px(px))); }
 
+void Divider(float above = 10, float below = 10) {
+  Gap(above);
+  ImVec2 p = ImGui::GetCursorScreenPos();
+  float w = ImGui::GetContentRegionAvail().x;
+  ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + w, p.y + 1.0f * s_), C(Colors().line));
+  ImGui::Dummy(ImVec2(0, 1.0f * s_));
+  Gap(below);
+}
+
+void Wordmark(ImDrawList* dl, ImVec2 pos, const char* text, ImU32 color) {
+  TrackedText(dl, bold_, Px(kSmall), pos, color, text, Px(3.2f));
+}
+
+// Título de sección en mayúsculas espaciadas; opcionalmente un enlace a la
+// derecha (p. ej. "Ver todos").
 void SectionLabel(const char* text, const char* link = nullptr, bool* linkClicked = nullptr) {
-  Gap(6);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 p = ImGui::GetCursorScreenPos();
-  float size = SmallSize();
-  dl->AddText(ImGui::GetFont(), size, p, C(col::Faint), text);
-  float h = size + 4 * s_;
+  float size = Px(kLabel);
+  float h = Px(kHint) + Px(4);
+  TrackedText(dl, bold_, size, ImVec2(p.x, p.y + (h - size) * 0.5f), C(Colors().textMuted), text, Px(1.5f));
   if (link) {
-    ImVec2 ls = TextSize(ImGui::GetFont(), size, link);
-    float x = ImGui::GetContentRegionAvail().x - ls.x;
+    float ls = Px(kHint);
+    ImVec2 ts = TextSize(ImGui::GetFont(), ls, link);
+    float x = ImGui::GetContentRegionAvail().x - ts.x;
     ImGui::SetCursorScreenPos(ImVec2(p.x + x, p.y));
-    bool clicked = ImGui::InvisibleButton(link, ImVec2(ls.x, h));
+    bool clicked = ImGui::InvisibleButton(link, ImVec2(ts.x, h));
     bool hov = ImGui::IsItemHovered();
     if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    dl->AddText(ImGui::GetFont(), size, ImVec2(p.x + x, p.y), C(hov ? col::AccentHover : col::Muted), link);
+    Text(dl, ImGui::GetFont(), ls, ImVec2(p.x + x, p.y + (h - ts.y) * 0.5f),
+         C(hov ? Colors().text : Colors().textMuted), link);
+    if (hov) dl->AddRectFilled(ImVec2(p.x + x, p.y + h - 1.0f * s_), ImVec2(p.x + x + ts.x, p.y + h), C(Colors().text));
     if (linkClicked) *linkClicked = clicked;
     ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h));
   } else {
@@ -214,26 +292,31 @@ void SectionLabel(const char* text, const char* link = nullptr, bool* linkClicke
   }
 }
 
-// Tecla dibujada como una "keycap" pequeña alineada a la derecha.
-void DrawKeycap(ImDrawList* dl, ImVec2 rightMid, const std::string& key, bool onColor, float alpha) {
+// Tecla dibujada como texto con un borde de 1 px, alineada a la derecha.
+void DrawKeycap(ImDrawList* dl, ImVec2 rightMid, const std::string& key, ImU32 border, ImU32 fg, float alpha) {
   if (key.empty()) return;
-  float size = SmallSize() * 0.95f;
+  float size = Px(kHint);
   ImVec2 ts = TextSize(ImGui::GetFont(), size, key.c_str());
-  ImVec2 pad(7 * s_, 3 * s_);
+  ImVec2 pad(Px(7), Px(3));
   ImVec2 b(rightMid.x, rightMid.y + ts.y * 0.5f + pad.y);
   ImVec2 a(b.x - ts.x - pad.x * 2, rightMid.y - ts.y * 0.5f - pad.y);
-  ImU32 bg = onColor ? IM_COL32(255, 255, 255, 34) : IM_COL32(255, 255, 255, 12);
-  ImU32 fg = onColor ? IM_COL32(255, 255, 255, 230) : col::Muted;
-  dl->AddRectFilled(a, b, C(bg, alpha), 5 * s_);
-  dl->AddText(ImGui::GetFont(), size, a + pad, C(fg, alpha), key.c_str());
+  dl->AddRect(a, b, C(border, alpha), 0, 0, 1.0f * s_);
+  Text(dl, ImGui::GetFont(), size, a + pad, C(fg, alpha), key.c_str());
+}
+
+float KeycapWidth(const std::string& key) {
+  if (key.empty()) return 0;
+  return TextSize(ImGui::GetFont(), Px(kHint), key.c_str()).x + Px(14);
 }
 
 enum class Tone { Normal, Primary, Danger };
 
-// Botón grande del panel: icono, título, subtítulo y atajo.
-bool ActionButton(const char* id, Icon icon, const char* title, const std::string& subtitle, const std::string& key,
-                  Tone tone, bool enabled) {
-  const float h = 58 * s_;
+// Botón grande del panel: título, atajo y, si se pide, una marca a la
+// izquierda (el cuadrado rojo de "Grabar pantalla").
+bool ActionButton(const char* id, const char* title, const std::string& key, Tone tone, bool enabled,
+                  bool recordMark = false) {
+  const Palette& p = Colors();
+  const float h = Px(44);
   ImVec2 size(ImGui::GetContentRegionAvail().x, h);
   ImGui::BeginDisabled(!enabled);
   bool pressed = ImGui::InvisibleButton(id, size);
@@ -243,107 +326,112 @@ bool ActionButton(const char* id, Icon icon, const char* title, const std::strin
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  float alpha = enabled ? 1.0f : 0.45f;
 
-  ImU32 bg, chip;
+  ImU32 bg, fg, keyBorder;
   switch (tone) {
   case Tone::Primary:
-    bg = held ? col::AccentActive : hov ? col::AccentHover : col::Accent;
-    chip = IM_COL32(255, 255, 255, 38);
+    bg = held ? p.accentActive : hov ? p.accentHover : p.accent;
+    fg = p.onAccent;
+    keyBorder = Mix(p.onAccent, bg, 0.45f);
     break;
   case Tone::Danger:
-    bg = held ? col::RedActive : hov ? col::RedHover : col::Red;
-    chip = IM_COL32(255, 255, 255, 38);
+    bg = held ? p.dangerActive : hov ? p.dangerHover : p.danger;
+    fg = IM_COL32(255, 255, 255, 255);
+    keyBorder = IM_COL32(255, 255, 255, 120);
     break;
   default:
-    bg = held ? col::SurfaceActive : hov ? col::SurfaceHover : col::Surface;
-    chip = IM_COL32(255, 255, 255, 12);
+    bg = held ? p.surfaceActive : hov ? p.surfaceHover : p.surface;
+    fg = p.text;
+    keyBorder = p.lineStrong;
     break;
   }
-  if (!enabled) bg = col::Surface;
-  bool onColor = enabled && tone != Tone::Normal;
-  dl->AddRectFilled(a, b, C(bg, alpha), 11 * s_);
+  if (!enabled) {
+    bg = p.surface;
+    fg = p.textFaint;
+    keyBorder = p.line;
+  }
+  dl->AddRectFilled(a, b, C(bg));
+  if (tone == Tone::Primary && enabled) DrawTrace(dl, a, b, p.text);
 
-  ImVec2 ic(a.x + h * 0.5f, (a.y + b.y) * 0.5f);
-  dl->AddCircleFilled(ic, h * 0.31f, C(chip, alpha), 32);
-  ImU32 iconColor = tone == Tone::Normal && icon == Icon::Record ? col::Red : col::Text;
-  DrawIcon(dl, icon, ic, h * 0.17f, C(iconColor, alpha));
-
-  float x = a.x + h * 0.98f;
-  float fs = ImGui::GetFontSize(), ss = SmallSize();
   float mid = (a.y + b.y) * 0.5f;
-  ImU32 subColor = onColor ? IM_COL32(255, 255, 255, 190) : col::Muted;
-  float keyW = key.empty() ? 0 : TextSize(ImGui::GetFont(), ss * 0.95f, key.c_str()).x + 26 * s_;
-  float textW = b.x - x - keyW - 8 * s_;
-  dl->AddText(bold_, fs, ImVec2(x, mid - fs + 1 * s_), C(col::Text, alpha), title);
-  std::string sub = Ellipsize(ImGui::GetFont(), ss, subtitle, textW);
-  dl->AddText(ImGui::GetFont(), ss, ImVec2(x, mid + 2 * s_), C(subColor, alpha), sub.c_str());
-  DrawKeycap(dl, ImVec2(b.x - 12 * s_, mid), key, onColor, alpha);
+  float x = a.x + Px(14);
+  if (recordMark) {
+    DrawMark(dl, ImVec2(x + Px(4), mid), Px(4), C(enabled ? p.danger : p.textFaint), true);
+    x += Px(18);
+  }
+  float fs = Px(kBody);
+  float textW = b.x - x - KeycapWidth(key) - Px(20);
+  std::string t = Ellipsize(bold_, fs, title, textW);
+  Text(dl, bold_, fs, ImVec2(x, mid - fs * 0.5f), C(fg), t.c_str());
+  ImU32 keyFg = tone == Tone::Normal ? (enabled ? p.textMuted : p.textFaint) : fg;
+  DrawKeycap(dl, ImVec2(b.x - Px(12), mid), key, keyBorder, keyFg, 1.0f);
   return pressed && enabled;
 }
 
-// Interruptor animado (la animación se guarda en el storage de ImGui).
+// Interruptor rectangular: apagado, pista gris y mando apagado; encendido,
+// pista del acento y mando del color del texto sobre el acento.
 void DrawSwitch(ImDrawList* dl, ImVec2 rightMid, bool on, ImGuiID animId, float alpha) {
+  const Palette& p = Colors();
   float& t = *ImGui::GetStateStorage()->GetFloatRef(animId, on ? 1.0f : 0.0f);
   float target = on ? 1.0f : 0.0f;
-  t += (target - t) * std::min(1.0f, ImGui::GetIO().DeltaTime * 16.0f);
+  t += (target - t) * std::min(1.0f, ImGui::GetIO().DeltaTime * 18.0f);
   if (std::fabs(t - target) < 0.01f) t = target;
-  const float w = 36 * s_, h = 20 * s_, r = h * 0.5f;
-  ImVec2 a(rightMid.x - w, rightMid.y - r), b(rightMid.x, rightMid.y + r);
-  dl->AddRectFilled(a, b, C(Mix(col::SurfaceActive, col::Accent, t), alpha), r);
-  float knobX = a.x + r + (w - h) * t;
-  dl->AddCircleFilled(ImVec2(knobX, rightMid.y), r - 3 * s_, C(IM_COL32(255, 255, 255, 255), alpha), 24);
+  const float w = Px(32), h = Px(16), knob = Px(10), pad = Px(3);
+  ImVec2 a(rightMid.x - w, rightMid.y - h * 0.5f), b(rightMid.x, rightMid.y + h * 0.5f);
+  dl->AddRectFilled(a, b, C(Mix(p.surfaceActive, p.accent, t), alpha));
+  float knobX = a.x + pad + (w - knob - pad * 2) * t;
+  dl->AddRectFilled(ImVec2(knobX, a.y + pad), ImVec2(knobX + knob, a.y + pad + knob),
+                    C(Mix(p.textMuted, p.onAccent, t), alpha));
 }
 
 // Fila con icono, texto y un interruptor; toda la fila es clicable.
-bool ToggleRow(const char* id, Icon icon, const char* label, const char* detail, bool on) {
-  const float h = 40 * s_;
+bool ToggleRow(const char* id, Icon icon, const char* label, bool on) {
+  const Palette& p = Colors();
+  const float h = Px(36);
   ImVec2 size(ImGui::GetContentRegionAvail().x, h);
   bool pressed = ImGui::InvisibleButton(id, size);
   bool hov = ImGui::IsItemHovered();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  if (hov) dl->AddRectFilled(a, b, C(IM_COL32(255, 255, 255, 9)), 9 * s_);
+  ImVec2 rowA(a.x - Px(8), a.y), rowB(b.x + Px(8), b.y);
+  TrackHover(ImGui::GetItemID(), rowA, rowB, hov);
+  if (hov) dl->AddRectFilled(rowA, rowB, C(p.surface));
   float mid = (a.y + b.y) * 0.5f;
-  DrawIcon(dl, icon, ImVec2(a.x + 18 * s_, mid), 8.5f * s_, C(on ? col::Text : col::Muted));
-  float fs = ImGui::GetFontSize();
-  dl->AddText(ImGui::GetFont(), fs, ImVec2(a.x + 38 * s_, mid - fs * 0.5f), C(col::Text), label);
-  if (detail && *detail) {
-    float lw = TextSize(ImGui::GetFont(), fs, label).x;
-    float ss = SmallSize();
-    dl->AddText(ImGui::GetFont(), ss, ImVec2(a.x + 38 * s_ + lw + 8 * s_, mid - ss * 0.5f + 1 * s_), C(col::Faint),
-                detail);
-  }
-  DrawSwitch(dl, ImVec2(b.x - 8 * s_, mid), on, ImGui::GetItemID() ^ 0x5157u, 1.0f);
+  DrawIcon(dl, icon, ImVec2(a.x + Px(8), mid), Px(8), C(on ? p.text : p.textMuted));
+  float fs = Px(kBody);
+  Text(dl, ImGui::GetFont(), fs, ImVec2(a.x + Px(26), mid - fs * 0.5f), C(p.text), label);
+  DrawSwitch(dl, ImVec2(b.x, mid), on, ImGui::GetItemID() ^ 0x5157u, 1.0f);
   return pressed;
 }
 
-// Control segmentado (p. ej. duración del replay). Devuelve el valor pulsado o -1.
+// Control segmentado (duración del replay). Devuelve el valor pulsado o -1.
 int Segmented(const char* id, const std::vector<std::pair<int, std::string>>& options, int current) {
+  const Palette& p = Colors();
   ImGui::PushID(id);
-  const float h = 34 * s_, pad = 3 * s_;
+  const float h = Px(32);
   ImVec2 a = ImGui::GetCursorScreenPos();
   float w = ImGui::GetContentRegionAvail().x;
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), C(col::Surface), 9 * s_);
-  float segW = (w - pad * 2) / float(options.size());
+  dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), C(p.surface));
+  float segW = w / float(options.size());
   int clicked = -1;
   for (size_t i = 0; i < options.size(); ++i) {
-    ImVec2 p(a.x + pad + segW * float(i), a.y + pad);
-    ImGui::SetCursorScreenPos(p);
+    ImVec2 q(a.x + segW * float(i), a.y);
+    ImGui::SetCursorScreenPos(q);
     ImGui::PushID(int(i));
-    if (ImGui::InvisibleButton("seg", ImVec2(segW, h - pad * 2))) clicked = options[i].first;
+    if (ImGui::InvisibleButton("seg", ImVec2(segW, h))) clicked = options[i].first;
     bool hov = ImGui::IsItemHovered();
     ImGui::PopID();
     if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     bool sel = options[i].first == current;
-    if (sel) dl->AddRectFilled(p, ImVec2(p.x + segW, p.y + h - pad * 2), C(col::SurfaceActive), 7 * s_);
-    float ss = SmallSize();
-    ImVec2 ts = TextSize(sel ? bold_ : ImGui::GetFont(), ss, options[i].second.c_str());
-    dl->AddText(sel ? bold_ : ImGui::GetFont(), ss,
-                ImVec2(p.x + (segW - ts.x) * 0.5f, p.y + (h - pad * 2 - ts.y) * 0.5f),
-                C(sel ? col::Text : hov ? col::Text : col::Muted), options[i].second.c_str());
+    if (sel) dl->AddRectFilled(q, ImVec2(q.x + segW, q.y + h), C(p.accent));
+    else if (hov) dl->AddRectFilled(q, ImVec2(q.x + segW, q.y + h), C(p.surfaceHover));
+    float ss = Px(kSmall);
+    ImFont* font = sel ? bold_ : ImGui::GetFont();
+    ImVec2 ts = TextSize(font, ss, options[i].second.c_str());
+    Text(dl, font, ss, ImVec2(q.x + (segW - ts.x) * 0.5f, q.y + (h - ts.y) * 0.5f),
+         C(sel ? p.onAccent : hov ? p.text : p.textMuted), options[i].second.c_str());
   }
   ImGui::SetCursorScreenPos(a);
   ImGui::Dummy(ImVec2(w, h));
@@ -351,12 +439,14 @@ int Segmented(const char* id, const std::vector<std::pair<int, std::string>>& op
   return clicked;
 }
 
-bool ClipRow(int index, const ClipFile& clip) {
+bool ClipRow(int index, const ClipFile& clip, bool selected = false) {
+  const Palette& p = Colors();
   ImGui::PushID(index);
-  const float h = 34 * s_;
+  const float h = Px(30);
   ImVec2 size(ImGui::GetContentRegionAvail().x, h);
   bool pressed = ImGui::InvisibleButton("clip", size);
   bool hov = ImGui::IsItemHovered();
+  ImGuiID id = ImGui::GetItemID();
   ImGui::PopID();
   if (hov) {
     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -364,131 +454,158 @@ bool ClipRow(int index, const ClipFile& clip) {
   }
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  if (hov) dl->AddRectFilled(a, b, C(IM_COL32(255, 255, 255, 9)), 8 * s_);
+  ImVec2 rowA(a.x - Px(8), a.y), rowB(b.x + Px(8), b.y);
+  TrackHover(id, rowA, rowB, hov);
+  if (hov || selected) dl->AddRectFilled(rowA, rowB, C(selected ? p.surfaceActive : p.surface));
+  if (selected) dl->AddRectFilled(rowA, ImVec2(rowA.x + Px(2), rowB.y), C(p.accent));
   float mid = (a.y + b.y) * 0.5f;
-  DrawIcon(dl, Icon::Play, ImVec2(a.x + 16 * s_, mid), 6 * s_, C(hov ? col::AccentHover : col::Muted));
-  float ss = SmallSize();
+  DrawIcon(dl, Icon::Play, ImVec2(a.x + Px(5), mid), Px(5), C(hov || selected ? p.text : p.textMuted));
+  float ss = Px(kSmall);
   float timeW = TextSize(ImGui::GetFont(), ss, clip.when.c_str()).x;
-  std::string name = Ellipsize(ImGui::GetFont(), ss, clip.name, b.x - a.x - timeW - 54 * s_);
-  dl->AddText(ImGui::GetFont(), ss, ImVec2(a.x + 32 * s_, mid - ss * 0.5f), C(col::Text), name.c_str());
-  dl->AddText(ImGui::GetFont(), ss, ImVec2(b.x - timeW - 8 * s_, mid - ss * 0.5f), C(col::Faint), clip.when.c_str());
+  std::string name = Ellipsize(ImGui::GetFont(), ss, clip.name, b.x - a.x - timeW - Px(30));
+  Text(dl, ImGui::GetFont(), ss, ImVec2(a.x + Px(20), mid - ss * 0.5f), C(p.text), name.c_str());
+  Text(dl, ImGui::GetFont(), ss, ImVec2(b.x - timeW, mid - ss * 0.5f), C(p.textFaint), clip.when.c_str());
   return pressed;
 }
 
 bool IconButton(const char* id, Icon icon, float size, const char* tooltip) {
+  const Palette& p = Colors();
   bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
   bool hov = ImGui::IsItemHovered();
   ImVec2 c = (ImGui::GetItemRectMin() + ImGui::GetItemRectMax()) * 0.5f;
   ImDrawList* dl = ImGui::GetWindowDrawList();
   if (hov) {
     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    dl->AddCircleFilled(c, size * 0.5f, C(IM_COL32(255, 255, 255, 16)), 24);
+    dl->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), C(p.surface));
     if (tooltip) ImGui::SetTooltip("%s", tooltip);
   }
-  DrawIcon(dl, icon, c, size * 0.24f, C(hov ? col::Text : col::Muted));
+  DrawIcon(dl, icon, c, size * 0.25f, C(hov ? p.text : p.textMuted));
   return pressed;
 }
 
-// Botón secundario con icono (pie del panel, barra de ajustes).
-bool SoftButton(const char* id, Icon icon, const char* label, float width, Tone tone = Tone::Normal) {
-  const float h = 36 * s_;
-  bool pressed = ImGui::InvisibleButton(id, ImVec2(width, h));
+// Botón con borde de 1 px y fondo transparente (acciones secundarias).
+bool GhostButton(const char* id, const char* label, float width, Tone tone = Tone::Normal, float height = 32) {
+  const Palette& p = Colors();
+  bool pressed = ImGui::InvisibleButton(id, ImVec2(width, Px(height)));
   bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImU32 bg = tone == Tone::Primary ? (held ? col::AccentActive : hov ? col::AccentHover : col::Accent)
-                                   : (held ? col::SurfaceActive : hov ? col::SurfaceHover : col::Surface);
-  dl->AddRectFilled(a, b, C(bg), 9 * s_);
-  float fs = ImGui::GetFontSize() * 0.94f;
+  ImU32 fg = tone == Tone::Danger ? p.danger : p.text;
+  if (hov || held) dl->AddRectFilled(a, b, C(held ? p.surfaceActive : p.surface));
+  dl->AddRect(a, b, C(tone == Tone::Danger && hov ? p.danger : hov ? p.lineStrong : p.line), 0, 0, 1.0f * s_);
+  float fs = Px(kSmall);
   ImVec2 ts = TextSize(ImGui::GetFont(), fs, label);
-  float iconW = 18 * s_;
-  float x = a.x + (b.x - a.x - ts.x - iconW) * 0.5f;
-  float mid = (a.y + b.y) * 0.5f;
-  ImU32 fg = tone == Tone::Danger ? col::Red : col::Text;
-  DrawIcon(dl, icon, ImVec2(x + 6 * s_, mid), 6.5f * s_, C(tone == Tone::Primary ? col::Text : hov ? fg : col::Muted));
-  dl->AddText(ImGui::GetFont(), fs, ImVec2(x + iconW, mid - ts.y * 0.5f), C(fg), label);
+  Text(dl, ImGui::GetFont(), fs, ImVec2(a.x + (b.x - a.x - ts.x) * 0.5f, a.y + (b.y - a.y - ts.y) * 0.5f), C(fg),
+       label);
   return pressed;
 }
 
-void Divider() {
-  Gap(4);
-  ImVec2 p = ImGui::GetCursorScreenPos();
-  float w = ImGui::GetContentRegionAvail().x;
-  ImGui::GetWindowDrawList()->AddLine(p, ImVec2(p.x + w, p.y), C(col::Line), 1.0f);
-  Gap(5);
+// Botón relleno con el acento (la acción principal de un formulario).
+bool SolidButton(const char* id, const char* label, float width, float height = 32) {
+  const Palette& p = Colors();
+  bool pressed = ImGui::InvisibleButton(id, ImVec2(width, Px(height)));
+  bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(a, b, C(held ? p.accentActive : hov ? p.accentHover : p.accent));
+  float fs = Px(kSmall);
+  ImVec2 ts = TextSize(bold_, fs, label);
+  Text(dl, bold_, fs, ImVec2(a.x + (b.x - a.x - ts.x) * 0.5f, a.y + (b.y - a.y - ts.y) * 0.5f), C(p.onAccent),
+       label);
+  return pressed;
 }
 
-void BrandMark(ImDrawList* dl, ImVec2 c, float r) {
-  dl->AddRectFilled(c - ImVec2(r, r), c + ImVec2(r, r), C(col::Accent), r * 0.42f);
-  // Fantasma minimalista: cúpula + base ondulada, con el punto de grabación.
-  ImVec2 g = c + ImVec2(0, r * 0.06f);
-  float gr = r * 0.52f;
-  dl->PathArcTo(ImVec2(g.x, g.y - gr * 0.10f), gr, kPi, kPi * 2.0f, 16);
-  dl->PathLineTo(ImVec2(g.x + gr, g.y + gr * 0.78f));
-  dl->PathLineTo(ImVec2(g.x + gr * 0.5f, g.y + gr * 0.50f));
-  dl->PathLineTo(ImVec2(g.x, g.y + gr * 0.78f));
-  dl->PathLineTo(ImVec2(g.x - gr * 0.5f, g.y + gr * 0.50f));
-  dl->PathLineTo(ImVec2(g.x - gr, g.y + gr * 0.78f));
-  dl->PathFillConvex(C(IM_COL32(255, 255, 255, 240)));
-  dl->AddCircleFilled(ImVec2(g.x, g.y - gr * 0.12f), gr * 0.26f, C(col::Red), 12);
-}
-
-// Animación de entrada: 0 -> 1 en ~160 ms con easing.
+// Animación de entrada: 0 -> 1 en ~120 ms, sin rebote.
 float OpenProgress(const MenuModel& m) {
-  float t = float(GetTickCount64() - m.openedAt) / 160.0f;
+  float t = float(GetTickCount64() - m.openedAt) / 120.0f;
   t = std::clamp(t, 0.0f, 1.0f);
-  return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+  return 1.0f - (1.0f - t) * (1.0f - t);
 }
 
 // --------------------------------------------------------------- panel rápido
 
 void PanelStatus(const MenuModel& m) {
+  const Palette& p = Colors();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 p = ImGui::GetCursorScreenPos();
-  float ss = SmallSize();
-  ImU32 dot;
+  ImVec2 q = ImGui::GetCursorScreenPos();
+  float ss = Px(kSmall);
+  ImU32 mark;
+  bool filled = true;
+  float alpha = 1.0f;
   std::string text;
   if (m.stats.recording) {
-    dot = col::Red;
-    text = "Grabando  " + FormatDuration(m.stats.recordSeconds);
+    mark = p.danger;
+    text = "Grabando " + FormatDuration(m.stats.recordSeconds);
+    // La marca late mientras se graba (en los dos temas: es el estado, no adorno).
+    alpha = 0.55f + 0.45f * std::cos(float(GetTickCount64() % 1600) / 1600.0f * kPi * 2);
   } else if (m.replayActive) {
-    dot = col::Green;
+    mark = p.accent;
     text = "Replay activo, guarda los últimos " + FormatClipLength(m.config.clipSeconds);
+    alpha = Breathe();
   } else if (m.config.replayEnabled && m.config.onlyInGames) {
-    dot = col::Amber;
+    mark = p.textMuted;
+    filled = false;
     text = "Replay esperando a un juego";
   } else {
-    dot = col::Faint;
+    mark = p.lineStrong;
     text = "Replay apagado";
   }
-  // El punto parpadea suavemente mientras se graba.
-  float pulse = m.stats.recording ? 0.55f + 0.45f * std::cos(float(GetTickCount64() % 1600) / 1600.0f * kPi * 2) : 1.0f;
-  dl->AddCircleFilled(ImVec2(p.x + 4 * s_, p.y + ss * 0.55f), 3.5f * s_, C(dot, pulse), 12);
-  dl->AddText(ImGui::GetFont(), ss, ImVec2(p.x + 14 * s_, p.y), C(col::Muted), text.c_str());
-  float h = ss + 2 * s_;
+  float h = ss + Px(2);
+  DrawMark(dl, ImVec2(q.x + Px(4), q.y + h * 0.5f), Px(3.5f), C(mark, alpha), filled);
+  Text(dl, ImGui::GetFont(), ss, ImVec2(q.x + Px(16), q.y + (h - ss) * 0.5f),
+       C(m.stats.recording ? p.text : p.textMuted), text.c_str());
   if (m.gameDetected && !m.gameName.empty()) {
-    std::string game = Ellipsize(ImGui::GetFont(), ss, m.gameName, ImGui::GetContentRegionAvail().x - 14 * s_);
-    dl->AddText(ImGui::GetFont(), ss, ImVec2(p.x + 14 * s_, p.y + h), C(col::Faint), game.c_str());
-    h += ss + 2 * s_;
+    std::string game = Ellipsize(ImGui::GetFont(), ss, m.gameName, ImGui::GetContentRegionAvail().x - Px(16));
+    Text(dl, ImGui::GetFont(), ss, ImVec2(q.x + Px(16), q.y + h + Px(2)), C(p.textFaint), game.c_str());
+    h += ss + Px(4);
   }
   ImGui::Dummy(ImVec2(0, h));
+}
+
+// Rastro fantasma del tema Psíquico: un segundo contorno aparece 10 px por
+// dentro del panel y se funde en 240 ms mientras llega al borde. Va por encima
+// del panel y dentro de su rectángulo: el panel es opaco y la ventana recorta
+// lo que quede fuera de la zona de clic, así que fuera no se vería. Usa el
+// tamaño del frame anterior.
+void DrawOpenGhost(const MenuModel& m, float width) {
+  if (!ThemeMotion() || m.panelHeight <= 0) return;
+  float t = float(GetTickCount64() - m.openedAt) / 240.0f;
+  if (t >= 1.0f) return;
+  t = std::clamp(t, 0.0f, 1.0f);
+  float ease = 1.0f - (1.0f - t) * (1.0f - t);
+  float inset = Px(10) * (1.0f - ease);
+  float top = ImGui::GetIO().DisplaySize.y * 0.5f - m.panelHeight * 0.5f;
+  ImGui::GetForegroundDrawList()->AddRect(ImVec2(inset, top + inset),
+                                          ImVec2(width - inset, top + m.panelHeight - inset),
+                                          ImGui::GetColorU32(Colors().accent, 0.55f * (1.0f - ease)), 0, 0,
+                                          1.0f * s_);
 }
 
 } // namespace
 
 void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
-  BeginFrameStyle(w);
+  BeginFrameStyle(w, m.config);
+  // La sombra de fila no sobrevive a una reapertura: el reloj de ImGui vuelve
+  // a cero con cada contexto nuevo y un resto antiguo parpadearía.
+  if (trail_.openedAt != m.openedAt) {
+    trail_ = HoverTrail{};
+    trail_.openedAt = m.openedAt;
+  }
+  const Palette& p = Colors();
   const float appear = OpenProgress(m);
   const float width = kPanelWidth * s_;
 
+  DrawOpenGhost(m, width);
+
   ImGui::PushStyleVar(ImGuiStyleVar_Alpha, appear);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * s_, 14 * s_));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16 * s_);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(16), Px(16)));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8 * s_, 6 * s_));
-  ImGui::PushStyleColor(ImGuiCol_WindowBg, V(col::Bg));
-  ImGui::PushStyleColor(ImGuiCol_Border, V(col::Line));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(Px(8), Px(4)));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, V(p.bg));
+  ImGui::PushStyleColor(ImGuiCol_Border, V(p.line));
   // Centrado en vertical dentro de la franja; App calcula la zona de clic igual.
   ImGui::SetNextWindowPos(ImVec2(0, ImGui::GetIO().DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0, 0.5f));
   ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, FLT_MAX));
@@ -497,57 +614,52 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const auto& c = m.config;
+  DrawHoverTrail(dl);
 
-  // Cabecera: marca, nombre y cerrar.
+  // Cabecera: marca, cerrar y estado.
   {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float rowH = 30 * s_;
-    BrandMark(dl, ImVec2(p.x + 13 * s_, p.y + rowH * 0.5f), 13 * s_);
-    float fs = ImGui::GetFontSize() * 1.08f;
-    dl->AddText(bold_, fs, ImVec2(p.x + 34 * s_, p.y + (rowH - fs) * 0.5f), C(col::Text), "Spectre");
-    ImGui::SetCursorScreenPos(ImVec2(p.x + ImGui::GetContentRegionAvail().x - rowH, p.y));
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    float rowH = Px(28);
+    Wordmark(dl, ImVec2(q.x, q.y + (rowH - Px(kSmall)) * 0.5f), "SPECTRE", C(p.text));
+    ImGui::SetCursorScreenPos(ImVec2(q.x + ImGui::GetContentRegionAvail().x - rowH, q.y));
     if (IconButton("close", Icon::Close, rowH, "Cerrar (Esc)")) a.close();
-    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH + 6 * s_));
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(6)));
     PanelStatus(m);
   }
-  Gap(4);
+  Divider(12, 12);
 
-  std::string clipSub = m.replayActive ? "Los últimos " + FormatClipLength(c.clipSeconds)
-                        : c.replayEnabled ? "El replay arranca con el próximo juego"
-                                          : "Activa el replay para poder guardar clips";
-  if (ActionButton("clip", Icon::Replay, "Guardar clip", clipSub, c.hotkeys.saveClip, Tone::Primary, m.replayActive))
-    a.saveClip();
+  if (ActionButton("clip", "Guardar clip", c.hotkeys.saveClip, Tone::Primary, m.replayActive)) a.saveClip();
 
+  Gap(10);
   SectionLabel("DURACIÓN DEL CLIP");
+  Gap(2);
   std::vector<std::pair<int, std::string>> lengths;
   for (int sec : {15, 30, 60, 120, 300}) lengths.emplace_back(sec, FormatClipLength(sec));
   if (int v = Segmented("len", lengths, c.clipSeconds); v > 0 && v != c.clipSeconds) a.setClipSeconds(v);
 
   Gap(6);
   if (m.stats.recording) {
-    if (ActionButton("rec", Icon::Stop, "Detener grabación", "Grabando " + FormatDuration(m.stats.recordSeconds),
-                     c.hotkeys.toggleRecording, Tone::Danger, true))
-      a.toggleRecording();
+    if (ActionButton("rec", "Detener grabación", c.hotkeys.toggleRecording, Tone::Danger, true)) a.toggleRecording();
   } else {
-    if (ActionButton("rec", Icon::Record, "Grabar pantalla", "Graba hasta que la detengas", c.hotkeys.toggleRecording,
-                     Tone::Normal, true))
+    if (ActionButton("rec", "Grabar pantalla", c.hotkeys.toggleRecording, Tone::Normal, true, true))
       a.toggleRecording();
   }
 
+  Divider(12, 6);
   SectionLabel("CAPTURA");
-  if (ToggleRow("replay", Icon::Replay, "Replay", nullptr, c.replayEnabled)) a.toggleReplay();
-  if (ToggleRow("mic", Icon::Mic, "Micrófono", nullptr, c.captureMic)) a.toggleMic();
-  if (ToggleRow("cam", Icon::Camera, "Cámara", nullptr, c.cameraEnabled)) a.toggleCamera();
+  if (ToggleRow("replay", Icon::Replay, "Replay", c.replayEnabled)) a.toggleReplay();
+  if (ToggleRow("mic", Icon::Mic, "Micrófono", c.captureMic)) a.toggleMic();
+  if (ToggleRow("cam", Icon::Camera, "Cámara", c.cameraEnabled)) a.toggleCamera();
 
+  Divider(6, 6);
   bool viewAll = false;
   SectionLabel("RECIENTES", "Ver todos", &viewAll);
   if (viewAll) a.openPath(m.outputDir);
   if (m.clips.empty()) {
-    ImGui::PushStyleColor(ImGuiCol_Text, V(col::Faint));
-    ImGui::SetWindowFontScale(0.84f);
-    ImGui::TextUnformatted("  Aún no hay clips ni grabaciones.");
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::PopStyleColor();
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    float ss = Px(kSmall);
+    Text(dl, ImGui::GetFont(), ss, ImVec2(q.x, q.y + Px(6)), C(p.textFaint), "Aún no hay clips ni grabaciones.");
+    ImGui::Dummy(ImVec2(0, ss + Px(12)));
   }
   for (int i = 0; i < int(std::min<size_t>(m.clips.size(), 3)); ++i) {
     const auto& clip = m.clips[size_t(i)];
@@ -555,11 +667,11 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) a.showInFolder(clip.path);
   }
 
-  Divider();
-  float half = (ImGui::GetContentRegionAvail().x - 8 * s_) * 0.5f;
-  if (SoftButton("settings", Icon::Gear, "Ajustes", half)) a.openSettings();
-  ImGui::SameLine(0, 8 * s_);
-  if (SoftButton("folder", Icon::Folder, "Carpeta", half)) a.openPath(m.outputDir);
+  Divider(6, 8);
+  float half = (ImGui::GetContentRegionAvail().x - Px(8)) * 0.5f;
+  if (GhostButton("settings", "Ajustes", half, Tone::Normal, 34)) a.openSettings();
+  ImGui::SameLine(0, Px(8));
+  if (GhostButton("folder", "Carpeta", half, Tone::Normal, 34)) a.openPath(m.outputDir);
 
   m.panelWidth = ImGui::GetWindowWidth();
   m.panelHeight = ImGui::GetWindowHeight();
@@ -575,47 +687,67 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
 namespace {
 
 constexpr float kLabelColumn = 230.0f;
+constexpr float kControlWidth = 340.0f;
+
+float ControlWidth() { return std::min(ImGui::GetContentRegionAvail().x, Px(kControlWidth)); }
 
 // Fila de formulario: etiqueta (y ayuda) a la izquierda, control a la derecha.
 void FieldLabel(const char* label, const char* help = nullptr) {
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted(label);
-  if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
-  ImGui::SameLine(kLabelColumn * s_);
-  ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x, 340 * s_));
+  if (help && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", help);
+  ImGui::SameLine(Px(kLabelColumn));
+  ImGui::SetNextItemWidth(ControlWidth());
 }
 
 void Help(const char* text) {
-  ImGui::PushStyleColor(ImGuiCol_Text, V(col::Faint));
-  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, 560 * s_));
+  ImGui::PushStyleColor(ImGuiCol_Text, V(Colors().textFaint));
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, Px(560)));
   ImGui::TextWrapped("%s", text);
   ImGui::PopTextWrapPos();
   ImGui::PopStyleColor();
 }
 
+void Warning(const char* text) {
+  ImGui::PushStyleColor(ImGuiCol_Text, V(Colors().warning));
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, Px(560)));
+  ImGui::TextWrapped("%s", text);
+  ImGui::PopTextWrapPos();
+  ImGui::PopStyleColor();
+}
+
+// Título de sección: mayúsculas espaciadas y una línea hasta el borde.
 void Heading(const char* text) {
-  Gap(10);
-  ImGui::PushFont(bold_);
-  ImGui::TextUnformatted(text);
-  ImGui::PopFont();
-  Gap(2);
+  Gap(14);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  ImVec2 q = ImGui::GetCursorScreenPos();
+  float size = Px(kLabel), h = Px(kHint) + Px(2);
+  float w = TrackedWidth(bold_, size, text, Px(1.5f));
+  TrackedText(dl, bold_, size, ImVec2(q.x, q.y + (h - size) * 0.5f), C(Colors().textMuted), text, Px(1.5f));
+  float avail = ImGui::GetContentRegionAvail().x;
+  if (avail - w > Px(24))
+    dl->AddRectFilled(ImVec2(q.x + w + Px(12), q.y + h * 0.5f), ImVec2(q.x + avail, q.y + h * 0.5f + 1.0f * s_),
+                      C(Colors().line));
+  ImGui::Dummy(ImVec2(0, h));
+  Gap(6);
 }
 
 // Interruptor de ajustes: etiqueta a la izquierda, switch en la columna de controles.
 bool SwitchField(const char* label, bool* value, const char* help = nullptr) {
   ImGui::PushID(label);
   float rowH = ImGui::GetFrameHeight();
-  ImVec2 p = ImGui::GetCursorScreenPos();
+  ImVec2 q = ImGui::GetCursorScreenPos();
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted(label);
-  if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
-  ImGui::SameLine(kLabelColumn * s_);
-  bool pressed = ImGui::InvisibleButton("switch", ImVec2(40 * s_, rowH));
+  if (help && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", help);
+  ImGui::SameLine(Px(kLabelColumn));
+  bool pressed = ImGui::InvisibleButton("switch", ImVec2(Px(32), rowH));
   if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   if (pressed) *value = !*value;
   ImVec2 b = ImGui::GetItemRectMax();
-  DrawSwitch(ImGui::GetWindowDrawList(), ImVec2(b.x - 2 * s_, (p.y + b.y) * 0.5f), *value, ImGui::GetItemID() ^ 0x5157u,
-             ImGui::GetStyle().Alpha);
+  // Alfa 1: C() ya aplica style.Alpha, así dentro de BeginDisabled no se atenúa dos veces.
+  DrawSwitch(ImGui::GetWindowDrawList(), ImVec2(b.x, (q.y + b.y) * 0.5f), *value, ImGui::GetItemID() ^ 0x5157u,
+             1.0f);
   ImGui::PopID();
   return pressed;
 }
@@ -672,20 +804,21 @@ int EstimatedKbps(const MenuModel& m) {
 // formato reales debajo. Si la barra no se mueve con el juego sonando, se
 // está escuchando el dispositivo equivocado.
 void LevelMeter(const char* label, float level, bool active, const std::string& description) {
+  const Palette& p = Colors();
   FieldLabel(label);
-  float w = std::min(ImGui::GetContentRegionAvail().x, 340 * s_);
-  float h = 8 * s_;
-  ImVec2 p = ImGui::GetCursorScreenPos();
+  float w = ControlWidth();
+  float h = Px(6);
+  ImVec2 q = ImGui::GetCursorScreenPos();
   float rowH = ImGui::GetFrameHeight();
-  ImVec2 a(p.x, p.y + (rowH - h) * 0.5f), b(p.x + w, a.y + h);
+  ImVec2 a(q.x, q.y + (rowH - h) * 0.5f), b(q.x + w, a.y + h);
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(a, b, C(col::Surface), h * 0.5f);
+  dl->AddRectFilled(a, b, C(p.surface));
   if (active) {
     // Escala en dB: -60 dB a la izquierda, 0 dB a la derecha.
     float db = level > 1e-5f ? 20.0f * std::log10(level) : -100.0f;
     float t = std::clamp(1.0f + db / 60.0f, 0.0f, 1.0f);
-    ImU32 color = db > -3.0f ? C(col::Red) : db > -12.0f ? C(col::Amber) : C(col::Green);
-    if (t > 0) dl->AddRectFilled(a, ImVec2(a.x + w * t, b.y), color, h * 0.5f);
+    ImU32 color = db > -3.0f ? C(p.danger) : db > -12.0f ? C(p.warning) : C(p.accent);
+    if (t > 0) dl->AddRectFilled(a, ImVec2(a.x + w * t, b.y), color);
   }
   ImGui::Dummy(ImVec2(w, rowH));
   if (!active) {
@@ -697,8 +830,9 @@ void LevelMeter(const char* label, float level, bool active, const std::string& 
 }
 
 void PageClips(MenuModel& m, const MenuActions& a) {
+  const Palette& p = Colors();
   auto& c = m.config;
-  Heading("Replay");
+  Heading("REPLAY");
   m.dirty |= SwitchField("Replay activado", &c.replayEnabled,
                          "Guarda continuamente los últimos segundos para poder crear un clip en cualquier momento.");
   m.dirty |= SwitchField("Solo con un juego abierto", &c.onlyInGames,
@@ -715,64 +849,60 @@ void PageClips(MenuModel& m, const MenuActions& a) {
              "Con esta calidad y duración el replay puede necesitar hasta %s de RAM, más que el tope de %d MB de "
              "Ajustes > General. En escenas de mucho movimiento el clip saldría más corto: sube el tope o baja la calidad.",
              FormatBytes(uint64_t(estimate)).c_str(), c.maxBufferMB);
-    ImGui::PushStyleColor(ImGuiCol_Text, V(col::Amber));
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, 560 * s_));
-    ImGui::TextWrapped("%s", hint);
-    ImGui::PopTextWrapPos();
-    ImGui::PopStyleColor();
+    Warning(hint);
   } else {
     snprintf(hint, sizeof(hint), "El replay guarda vídeo ya comprimido. Con esta calidad ocupa como mucho unos %s de RAM.",
              FormatBytes(uint64_t(estimate)).c_str());
     Help(hint);
   }
 
-  Heading("Clips recientes");
-  ImGui::PushStyleColor(ImGuiCol_Text, V(col::Muted));
+  Heading("CLIPS RECIENTES");
+  ImGui::PushStyleColor(ImGuiCol_Text, V(p.textMuted));
+  ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted(m.outputDir.c_str());
   ImGui::PopStyleColor();
-  ImGui::SameLine();
-  if (ImGui::SmallButton("Abrir carpeta")) a.openPath(m.outputDir);
-  ImGui::SameLine();
-  if (ImGui::SmallButton("Actualizar")) a.refreshClips();
+  ImGui::SameLine(0, Px(12));
+  if (GhostButton("open-dir", "Abrir carpeta", Px(110), Tone::Normal, 26)) a.openPath(m.outputDir);
+  ImGui::SameLine(0, Px(6));
+  if (GhostButton("refresh", "Actualizar", Px(90), Tone::Normal, 26)) a.refreshClips();
 
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, V(col::Surface));
-  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10 * s_);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6 * s_, 6 * s_));
-  if (ImGui::BeginChild("clips", ImVec2(0, 190 * s_), ImGuiChildFlags_AlwaysUseWindowPadding)) {
+  Gap(4);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, V(p.bgAlt));
+  ImGui::PushStyleColor(ImGuiCol_Border, V(p.line));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(10), Px(6)));
+  if (ImGui::BeginChild("clips", ImVec2(0, Px(190)), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding)) {
     if (m.clips.empty()) Help("Todavía no hay clips. Pulsa el atajo de guardar clip durante una partida.");
     for (int i = 0; i < int(m.clips.size()); ++i) {
       const auto& clip = m.clips[size_t(i)];
-      if (ClipRow(i, clip)) {
+      if (ClipRow(i, clip, m.selectedClip == i)) {
         m.selectedClip = i;
         m.clipDuration = a.probeDuration ? a.probeDuration(clip.path) : 0;
         m.trimStart = 0;
         m.trimEnd = float(m.clipDuration);
       }
       if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) a.showInFolder(clip.path);
-      if (m.selectedClip == i)
-        ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), C(col::Accent), 8 * s_);
     }
   }
   ImGui::EndChild();
-  ImGui::PopStyleVar(2);
-  ImGui::PopStyleColor();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(2);
 
   if (m.selectedClip >= 0 && m.selectedClip < int(m.clips.size())) {
     const auto& clip = m.clips[size_t(m.selectedClip)];
-    Heading("Recortar");
+    Heading("RECORTAR");
     if (m.clipDuration <= 0) {
       Help("No se pudo leer la duración de este archivo.");
     } else {
       FieldLabel("Inicio y fin");
       ImGui::DragFloatRange2("##trim", &m.trimStart, &m.trimEnd, 0.1f, 0.0f, float(m.clipDuration), "%.1f s",
                              "%.1f s", ImGuiSliderFlags_AlwaysClamp);
-      ImGui::Dummy(ImVec2(kLabelColumn * s_ - ImGui::GetStyle().ItemSpacing.x, 0));
+      ImGui::Dummy(ImVec2(Px(kLabelColumn) - ImGui::GetStyle().ItemSpacing.x, 0));
       ImGui::SameLine();
       ImGui::BeginDisabled(m.trimEnd - m.trimStart < 0.5f);
-      if (ImGui::Button("Guardar recorte")) a.trim(clip.path, m.trimStart, m.trimEnd);
+      if (SolidButton("trim", "Guardar recorte", Px(140))) a.trim(clip.path, m.trimStart, m.trimEnd);
       ImGui::EndDisabled();
-      ImGui::SameLine();
-      if (ImGui::Button("Reproducir")) a.openPath(clip.path);
+      ImGui::SameLine(0, Px(6));
+      if (GhostButton("play", "Reproducir", Px(110))) a.openPath(clip.path);
       Help("El recorte no recodifica: es instantáneo y sin pérdida. El inicio se ajusta al fotograma clave anterior "
            "(como mucho 2 segundos antes).");
     }
@@ -781,7 +911,7 @@ void PageClips(MenuModel& m, const MenuActions& a) {
 
 void PageVideo(MenuModel& m) {
   auto& c = m.config;
-  Heading("Qué capturar");
+  Heading("QUÉ CAPTURAR");
   FieldLabel("Fuente");
   m.dirty |= ChoiceCombo<std::string>("##src", c.captureMode,
                                       {{"monitor", "Pantalla completa"}, {"game", "Ventana del juego"}});
@@ -795,7 +925,7 @@ void PageVideo(MenuModel& m) {
   }
   m.dirty |= SwitchField("Mostrar el cursor", &c.captureCursor);
 
-  Heading("Calidad");
+  Heading("CALIDAD");
   FieldLabel("Resolución");
   m.dirty |= ChoiceCombo<int>("##res", c.outputHeight,
                               {{0, "Nativa"}, {2160, "2160p (4K)"}, {1440, "1440p"}, {1080, "1080p"},
@@ -822,7 +952,7 @@ void PageVideo(MenuModel& m) {
     Help(hint);
   }
 
-  Heading("Codificación");
+  Heading("CODIFICACIÓN");
   FieldLabel("Códec");
   if (ChoiceCombo<std::string>("##codec", c.codec,
                                {{"h264", "H.264, se reproduce en todas partes"},
@@ -847,7 +977,7 @@ void PageVideo(MenuModel& m) {
 
 void PageAudio(MenuModel& m) {
   auto& c = m.config;
-  Heading("Sonido del PC");
+  Heading("SONIDO DEL PC");
   m.dirty |= SwitchField("Grabar el sonido del PC", &c.captureSystemAudio);
   ImGui::BeginDisabled(!c.captureSystemAudio);
   FieldLabel("Dispositivo de salida");
@@ -860,7 +990,7 @@ void PageAudio(MenuModel& m) {
   m.dirty |= ImGui::SliderFloat("##sysvol", &c.systemVolume, 0.0f, 2.0f, "x%.2f");
   ImGui::EndDisabled();
 
-  Heading("Micrófono");
+  Heading("MICRÓFONO");
   m.dirty |= SwitchField("Grabar el micrófono", &c.captureMic);
   ImGui::BeginDisabled(!c.captureMic);
   FieldLabel("Dispositivo de entrada");
@@ -870,7 +1000,7 @@ void PageAudio(MenuModel& m) {
   m.dirty |= ImGui::SliderFloat("##micvol", &c.micVolume, 0.0f, 2.0f, "x%.2f");
   ImGui::EndDisabled();
 
-  Heading("Pistas");
+  Heading("PISTAS");
   m.dirty |= SwitchField("Pistas separadas", &c.separateTracks,
                          "Además de la mezcla, guarda el PC y el micrófono en pistas aparte para editarlas por "
                          "separado.");
@@ -878,7 +1008,7 @@ void PageAudio(MenuModel& m) {
 
 void PageCamera(MenuModel& m) {
   auto& c = m.config;
-  Heading("Cámara");
+  Heading("CÁMARA");
   m.dirty |= SwitchField("Incluir la webcam", &c.cameraEnabled);
   ImGui::BeginDisabled(!c.cameraEnabled);
   std::vector<std::pair<std::string, const char*>> cams = {{"", "La primera que encuentre"}};
@@ -899,17 +1029,17 @@ void PageCamera(MenuModel& m) {
 
 void PageHotkeys(MenuModel& m) {
   auto& h = m.config.hotkeys;
-  Heading("Atajos de teclado");
+  Heading("ATAJOS DE TECLADO");
   Help("Escribe la combinación, por ejemplo Alt+Z, Ctrl+Shift+F10 o Alt+Num5. Déjalo vacío para desactivarlo.");
   Gap(4);
   auto field = [&](const char* label, const char* id, std::string& value) {
     FieldLabel(label);
-    ImGui::SetNextItemWidth(200 * s_);
+    ImGui::SetNextItemWidth(Px(200));
     if (ImGui::InputText(id, &value)) m.dirty = true;
     UINT mods = 0, vk = 0;
     if (!value.empty() && !ParseHotkey(value, &mods, &vk)) {
       ImGui::SameLine();
-      ImGui::TextColored(V(col::Red), "No es una combinación válida");
+      ImGui::TextColored(V(Colors().danger), "No es una combinación válida");
     }
   };
   field("Abrir el panel", "##hk1", h.overlay);
@@ -918,65 +1048,120 @@ void PageHotkeys(MenuModel& m) {
   field("Activar o pausar el replay", "##hk4", h.toggleReplay);
   if (!m.hotkeyError.empty()) {
     Gap(4);
-    ImGui::PushStyleColor(ImGuiCol_Text, V(col::Red));
+    ImGui::PushStyleColor(ImGuiCol_Text, V(Colors().danger));
     ImGui::TextWrapped("%s", m.hotkeyError.c_str());
     ImGui::PopStyleColor();
   }
 }
 
-// Estado de la actualización: punto de color (o ruedita si está trabajando) y texto.
+// Tarjeta del selector de temas: se pinta con los colores del tema que
+// representa, con su nombre y tres muestras (fondo, superficie y acento).
+bool ThemeCard(const Theme& t, bool selected) {
+  const Palette& p = Colors();
+  ImGui::PushID(t.id);
+  bool pressed = ImGui::InvisibleButton("theme", ImVec2(Px(170), Px(52)));
+  bool hov = ImGui::IsItemHovered();
+  ImGui::PopID();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(a, b, C(t.colors.bg));
+  dl->AddRect(a, b, C(selected ? p.accent : hov ? p.lineStrong : p.line), 0, 0, 1.0f * s_);
+  float mid = (a.y + b.y) * 0.5f, fs = Px(kSmall);
+  Text(dl, selected ? bold_ : ImGui::GetFont(), fs, ImVec2(a.x + Px(12), mid - fs * 0.5f),
+       C(selected ? t.colors.text : t.colors.textMuted), t.name);
+  const float sw = Px(12), gap = Px(3);
+  float x = b.x - Px(12) - sw * 3 - gap * 2;
+  ImVec2 s0(x, mid - sw * 0.5f);
+  dl->AddRectFilled(s0, s0 + ImVec2(sw, sw), C(t.colors.bg));
+  dl->AddRect(s0, s0 + ImVec2(sw, sw), C(t.colors.lineStrong), 0, 0, 1.0f * s_);
+  ImVec2 s1 = s0 + ImVec2(sw + gap, 0);
+  dl->AddRectFilled(s1, s1 + ImVec2(sw, sw), C(t.colors.surface));
+  ImVec2 s2 = s1 + ImVec2(sw + gap, 0);
+  dl->AddRectFilled(s2, s2 + ImVec2(sw, sw), C(t.colors.accent));
+  return pressed;
+}
+
+void AppearanceSection(MenuModel& m) {
+  auto& c = m.config;
+  Heading("APARIENCIA");
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted("Tema");
+  ImGui::SameLine(Px(kLabelColumn));
+  bool first = true;
+  for (const Theme* t : Themes()) {
+    if (!first) ImGui::SameLine(0, Px(8));
+    first = false;
+    if (ThemeCard(*t, c.theme == t->id) && c.theme != t->id) {
+      c.theme = t->id;
+      m.dirty = true;
+    }
+  }
+  Gap(2);
+  // Solo el tema Psíquico tiene animaciones: con Negro el interruptor se ve apagado.
+  ImGui::BeginDisabled(!FindTheme(c.theme).psychic);
+  m.dirty |= SwitchField("Animaciones del tema", &c.themeMotion,
+                         "Movimiento propio del tema Psíquico: rastro al abrir el panel, estela en el botón "
+                         "principal y marca de estado que respira. El tema Negro no tiene animaciones.");
+  ImGui::EndDisabled();
+  Help("Los cambios se ven al momento; pulsa Aplicar para conservarlos.");
+}
+
+// Estado de la actualización: marca de color (o ruedita si está trabajando) y texto.
 void UpdateStatusLine(ImU32 color, bool busy, const std::string& text, bool bold = false) {
   float rowH = ImGui::GetFrameHeight();
-  ImVec2 p = ImGui::GetCursorScreenPos();
+  ImVec2 q = ImGui::GetCursorScreenPos();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 c(p.x + 6 * s_, p.y + rowH * 0.5f);
+  ImVec2 c(q.x + Px(6), q.y + rowH * 0.5f);
   if (busy) {
     float t = float(ImGui::GetTime()) * 5.0f;
-    dl->PathArcTo(c, 5.5f * s_, t, t + kPi * 1.4f, 16);
-    dl->PathStroke(C(color), 0, 1.8f * s_);
+    dl->PathArcTo(c, Px(5), t, t + kPi * 1.4f, 16);
+    dl->PathStroke(C(color), 0, 1.5f * s_);
   } else {
-    dl->AddCircleFilled(c, 4 * s_, C(color), 16);
+    DrawMark(dl, c, Px(3.5f), C(color), true);
   }
   ImFont* font = bold ? bold_ : ImGui::GetFont();
   float fs = ImGui::GetFontSize();
-  float wrap = std::min(ImGui::GetContentRegionAvail().x, 560 * s_) - 20 * s_;
+  float wrap = std::min(ImGui::GetContentRegionAvail().x, Px(560)) - Px(20);
   ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrap, text.c_str());
-  dl->AddText(font, fs, ImVec2(p.x + 20 * s_, p.y + (rowH - fs) * 0.5f), C(col::Text), text.c_str(), nullptr, wrap);
+  dl->AddText(font, fs, ImVec2(q.x + Px(20), q.y + (rowH - fs) * 0.5f), C(Colors().text), text.c_str(), nullptr,
+              wrap);
   ImGui::Dummy(ImVec2(0, std::max(rowH, ts.y + (rowH - fs))));
 }
 
 void UpdatesSection(MenuModel& m, const MenuActions& a) {
   using S = UpdateStatus::State;
+  const Palette& p = Colors();
   const UpdateStatus& u = m.update;
-  Heading("Actualizaciones");
-  ImGui::PushStyleColor(ImGuiCol_Text, V(col::Muted));
+  Heading("ACTUALIZACIONES");
+  ImGui::PushStyleColor(ImGuiCol_Text, V(p.textMuted));
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted("Versión instalada");
   ImGui::PopStyleColor();
-  ImGui::SameLine(kLabelColumn * s_);
+  ImGui::SameLine(Px(kLabelColumn));
   ImGui::TextUnformatted(SPECTRE_VERSION);
   Gap(2);
 
-  const float bw = 230 * s_;
+  const float bw = Px(210);
   char buf[256];
   switch (u.state) {
   case S::Idle:
     Help("Spectre solo se conecta a GitHub cuando pulsas el botón: no comprueba nada en segundo plano.");
     Gap(4);
-    if (SoftButton("update-check", Icon::Replay, "Buscar actualizaciones", bw)) a.checkUpdates();
+    if (GhostButton("update-check", "Buscar actualizaciones", bw)) a.checkUpdates();
     break;
   case S::Checking:
-    UpdateStatusLine(col::Muted, true, "Buscando actualizaciones...");
+    UpdateStatusLine(p.textMuted, true, "Buscando actualizaciones...");
     break;
   case S::UpToDate:
     snprintf(buf, sizeof(buf), "Tienes la última versión (%s).", SPECTRE_VERSION);
-    UpdateStatusLine(col::Green, false, buf);
+    UpdateStatusLine(p.accent, false, buf);
     Gap(4);
-    if (SoftButton("update-check", Icon::Replay, "Volver a buscar", bw)) a.checkUpdates();
+    if (GhostButton("update-check", "Volver a buscar", bw)) a.checkUpdates();
     break;
   case S::Available:
     snprintf(buf, sizeof(buf), "Versión nueva disponible: %s", u.latest.c_str());
-    UpdateStatusLine(col::Accent, false, buf, true);
+    UpdateStatusLine(p.accent, false, buf, true);
     if (u.portable || u.unverified) {
       if (u.portable)
         Help("Esta es la copia portable de Spectre: descarga el zip nuevo y reemplaza la carpeta. Si usas el "
@@ -985,8 +1170,7 @@ void UpdatesSection(MenuModel& m, const MenuActions& a) {
         Help("GitHub no ha publicado la huella de este instalador, así que Spectre no puede comprobarlo y no lo "
              "instala solo. Descárgalo desde la página de la versión.");
       Gap(4);
-      if (SoftButton("update-page", Icon::Folder, "Abrir página de descarga", bw, Tone::Primary))
-        a.openPath(Updater::ReleasePage());
+      if (SolidButton("update-page", "Abrir página de descarga", bw)) a.openPath(Updater::ReleasePage());
     } else {
       std::string help = "Se descarga el instalador";
       if (u.sizeBytes > 0) help += " (" + FormatBytes(u.sizeBytes) + ")";
@@ -994,73 +1178,75 @@ void UpdatesSection(MenuModel& m, const MenuActions& a) {
       if (m.stats.recording) help += " Si sigues grabando, se instalará cuando detengas la grabación.";
       Help(help.c_str());
       Gap(4);
-      if (SoftButton("update-install", Icon::Play, "Actualizar ahora", bw, Tone::Primary)) a.installUpdate();
+      if (SolidButton("update-install", "Actualizar ahora", bw)) a.installUpdate();
     }
     break;
   case S::Downloading: {
     int pct = int(std::clamp(u.downloaded, 0.0, 1.0) * 100.0 + 0.5);
     snprintf(buf, sizeof(buf), "Descargando la versión %s... %d %%", u.latest.c_str(), pct);
-    UpdateStatusLine(col::Accent, true, buf);
-    float w = std::min(ImGui::GetContentRegionAvail().x, 340 * s_), h = 6 * s_;
-    ImVec2 p = ImGui::GetCursorScreenPos();
+    UpdateStatusLine(p.accent, true, buf);
+    float w = ControlWidth(), h = Px(4);
+    ImVec2 q = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), C(col::Surface), h * 0.5f);
-    if (pct > 0) dl->AddRectFilled(p, ImVec2(p.x + w * float(pct) / 100.0f, p.y + h), C(col::Accent), h * 0.5f);
+    dl->AddRectFilled(q, ImVec2(q.x + w, q.y + h), C(p.surface));
+    if (pct > 0) dl->AddRectFilled(q, ImVec2(q.x + w * float(pct) / 100.0f, q.y + h), C(p.accent));
     ImGui::Dummy(ImVec2(w, h));
     Gap(8);
-    if (SoftButton("update-cancel", Icon::Close, "Cancelar", 150 * s_)) a.cancelUpdate();
+    if (GhostButton("update-cancel", "Cancelar", Px(120))) a.cancelUpdate();
     break;
   }
   case S::Launching:
     if (m.stats.recording)
-      UpdateStatusLine(col::Accent, false, "Actualización lista: se instalará cuando detengas la grabación.");
+      UpdateStatusLine(p.accent, false, "Actualización lista: se instalará cuando detengas la grabación.");
     else
-      UpdateStatusLine(col::Accent, true, "Abriendo el instalador. Spectre se cerrará y volverá a abrirse al terminar.");
+      UpdateStatusLine(p.accent, true, "Abriendo el instalador. Spectre se cerrará y volverá a abrirse al terminar.");
     break;
   case S::Error:
-    UpdateStatusLine(col::Red, false, u.message);
+    UpdateStatusLine(p.danger, false, u.message);
     Gap(4);
-    if (SoftButton("update-check", Icon::Replay, "Reintentar", bw)) a.checkUpdates();
+    if (GhostButton("update-check", "Reintentar", bw)) a.checkUpdates();
     break;
   }
 }
 
 void PageGeneral(MenuModel& m, const MenuActions& a) {
   auto& c = m.config;
-  Heading("Archivos");
+  AppearanceSection(m);
+
+  Heading("ARCHIVOS");
   FieldLabel("Carpeta de destino");
   if (ImGui::InputTextWithHint("##dir", m.outputDir.c_str(), &c.outputDir)) m.dirty = true;
   Help("Déjalo vacío para usar Vídeos\\Spectre.");
 
-  Heading("Inicio");
+  Heading("INICIO");
   m.dirty |= SwitchField("Iniciar con Windows", &c.autostart, "Spectre arranca minimizado en la bandeja.");
   m.dirty |= SwitchField("Mostrar avisos", &c.showNotifications,
                          "Avisos breves al guardar un clip o empezar a grabar. Los errores se muestran siempre.");
 
-  Heading("Memoria");
+  Heading("MEMORIA");
   FieldLabel("Límite del replay");
   m.dirty |= ImGui::SliderInt("##mem", &c.maxBufferMB, 64, 4096, "%d MB");
   Help("Tope de RAM para el replay. Si la duración y la calidad elegidas no caben, se guardan menos segundos.");
 
   UpdatesSection(m, a);
 
-  Heading("Spectre");
+  Heading("SPECTRE");
   Help("Cerrar el panel no cierra Spectre: sigue en la bandeja del sistema, junto al reloj.");
   Gap(4);
-  if (SoftButton("quit", Icon::Power, "Salir de Spectre", 200 * s_, Tone::Danger)) a.quit();
+  if (GhostButton("quit", "Salir de Spectre", Px(170), Tone::Danger)) a.quit();
 }
 
 void PagePerformance(MenuModel& m) {
   const auto& s = m.stats;
   auto row = [&](const char* label, const std::string& value) {
-    ImGui::PushStyleColor(ImGuiCol_Text, V(col::Muted));
+    ImGui::PushStyleColor(ImGuiCol_Text, V(Colors().textMuted));
     ImGui::TextUnformatted(label);
     ImGui::PopStyleColor();
-    ImGui::SameLine(kLabelColumn * s_);
+    ImGui::SameLine(Px(kLabelColumn));
     ImGui::TextUnformatted(value.c_str());
   };
   char buf[160];
-  Heading("Consumo de Spectre");
+  Heading("CONSUMO DE SPECTRE");
   snprintf(buf, sizeof(buf), "%.1f %%", m.usage.cpuPercent);
   row("CPU", buf);
   row("RAM", FormatBytes(m.usage.workingSet) + " (privada " + FormatBytes(m.usage.privateBytes) + ")");
@@ -1072,7 +1258,7 @@ void PagePerformance(MenuModel& m) {
   snprintf(buf, sizeof(buf), "%s, %.0f s", FormatBytes(s.bufferBytes).c_str(), s.bufferSeconds);
   row("Replay en memoria", buf);
 
-  Heading("Captura");
+  Heading("CAPTURA");
   row("GPU", s.gpu);
   row("Método", s.capture);
   row("Encoder", s.encoder);
@@ -1089,17 +1275,12 @@ void PagePerformance(MenuModel& m) {
   row("Pistas de audio", buf);
 }
 
-struct Page {
-  const char* name;
-  Icon icon;
-};
-constexpr Page kPages[] = {{"Clips", Icon::Replay},  {"Vídeo", Icon::Monitor},   {"Audio", Icon::Mic},
-                           {"Cámara", Icon::Camera}, {"Atajos", Icon::Keyboard}, {"General", Icon::Gear},
-                           {"Rendimiento", Icon::Chart}};
+constexpr const char* kPages[] = {"Clips", "Vídeo", "Audio", "Cámara", "Atajos", "General", "Rendimiento"};
 
-bool NavItem(int index, const Page& page, bool selected) {
+bool NavItem(int index, const char* name, bool selected) {
+  const Palette& p = Colors();
   ImGui::PushID(index);
-  const float h = 38 * s_;
+  const float h = Px(36);
   bool pressed = ImGui::InvisibleButton("nav", ImVec2(ImGui::GetContentRegionAvail().x, h));
   bool hov = ImGui::IsItemHovered();
   ImGui::PopID();
@@ -1107,61 +1288,68 @@ bool NavItem(int index, const Page& page, bool selected) {
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   if (selected) {
-    dl->AddRectFilled(a, b, C(col::SurfaceActive), 9 * s_);
-    dl->AddRectFilled(ImVec2(a.x, a.y + 10 * s_), ImVec2(a.x + 3 * s_, b.y - 10 * s_), C(col::Accent), 2 * s_);
+    dl->AddRectFilled(a, b, C(p.surface));
+    dl->AddRectFilled(a, ImVec2(a.x + Px(2), b.y), C(p.accent));
   } else if (hov) {
-    dl->AddRectFilled(a, b, C(IM_COL32(255, 255, 255, 9)), 9 * s_);
+    dl->AddRectFilled(a, b, C(p.surface, 0.6f));
   }
   float mid = (a.y + b.y) * 0.5f;
-  DrawIcon(dl, page.icon, ImVec2(a.x + 22 * s_, mid), 8 * s_, C(selected ? col::Text : col::Muted));
-  float fs = ImGui::GetFontSize();
-  dl->AddText(selected ? bold_ : ImGui::GetFont(), fs, ImVec2(a.x + 42 * s_, mid - fs * 0.5f),
-              C(selected ? col::Text : col::Muted), page.name);
+  float fs = Px(kBody);
+  Text(dl, selected ? bold_ : ImGui::GetFont(), fs, ImVec2(a.x + Px(16), mid - fs * 0.5f),
+       C(selected ? p.text : p.textMuted), name);
   return pressed;
 }
 
 } // namespace
 
 void DrawSettings(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
-  BeginFrameStyle(w);
+  BeginFrameStyle(w, m.config);
+  const Palette& p = Colors();
   ImGuiIO& io = ImGui::GetIO();
   const float appear = OpenProgress(m);
-  ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, int(140 * appear)));
+  // Sin velo oscuro detrás: Pablo quiere ver el juego tal cual con la ventana encima.
 
-  ImVec2 size(std::min(io.DisplaySize.x - 48 * s_, 920 * s_), std::min(io.DisplaySize.y - 48 * s_, 660 * s_));
+  // El cuadro mide kSettingsWidth x kSettingsHeight (a escala) y va centrado en
+  // la ventana que le dan; si la ventana es justo el cuadro, lo llena.
+  ImVec2 size(std::min(io.DisplaySize.x, Px(kSettingsWidth)), std::min(io.DisplaySize.y, Px(kSettingsHeight)));
+  // La entrada desliza 8 px hacia arriba, o menos si no hay sitio por debajo.
+  const float slide = std::min(Px(8), std::max(0.0f, (io.DisplaySize.y - size.y) * 0.5f));
   ImGui::PushStyleVar(ImGuiStyleVar_Alpha, appear);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16 * s_);
-  ImGui::PushStyleColor(ImGuiCol_WindowBg, V(col::Bg));
-  ImGui::PushStyleColor(ImGuiCol_Border, V(col::Line));
-  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f + ImVec2(0, (1.0f - appear) * 12 * s_), ImGuiCond_Always,
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, V(p.bg));
+  ImGui::PushStyleColor(ImGuiCol_Border, V(p.line));
+  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f + ImVec2(0, (1.0f - appear) * slide), ImGuiCond_Always,
                           ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(size, ImGuiCond_Always);
   ImGui::Begin("Ajustes", nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
   ImGui::PopStyleVar(); // WindowPadding: los hijos usan el suyo
 
-  // Barra lateral
-  const float navW = 210 * s_;
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, V(IM_COL32(255, 255, 255, 5)));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * s_, 14 * s_));
+  // Columna de navegación
+  const float navW = Px(200);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, V(p.bgAlt));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, Px(18)));
   ImGui::BeginChild("nav", ImVec2(navW, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
   {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float rowH = 30 * s_;
-    ImGui::SetCursorScreenPos(p);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 winPos = ImGui::GetWindowPos();
+    dl->AddRectFilled(ImVec2(winPos.x + navW - 1.0f * s_, winPos.y), ImVec2(winPos.x + navW, winPos.y + ImGui::GetWindowHeight()),
+                      C(p.line));
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    float rowH = Px(28);
+    ImGui::SetCursorScreenPos(ImVec2(q.x + Px(12), q.y));
     if (IconButton("back", Icon::Back, rowH, "Volver al panel")) a.backToPanel();
-    float fs = ImGui::GetFontSize() * 1.08f;
-    ImGui::GetWindowDrawList()->AddText(bold_, fs, ImVec2(p.x + rowH + 6 * s_, p.y + (rowH - fs) * 0.5f),
-                                        C(col::Text), "Ajustes");
-    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH + 14 * s_));
+    Wordmark(dl, ImVec2(q.x + Px(12) + rowH + Px(6), q.y + (rowH - Px(kSmall)) * 0.5f), "AJUSTES", C(p.text));
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(18)));
   }
   for (int i = 0; i < int(std::size(kPages)); ++i)
     if (NavItem(i, kPages[i], m.page == i)) m.page = i;
   {
-    float ss = SmallSize();
-    ImVec2 p(ImGui::GetWindowPos().x + 14 * s_, ImGui::GetWindowPos().y + ImGui::GetWindowHeight() - ss - 16 * s_);
-    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), ss, p, C(col::Faint), "Spectre " SPECTRE_VERSION);
+    float ss = Px(kHint);
+    ImVec2 q(ImGui::GetWindowPos().x + Px(16), ImGui::GetWindowPos().y + ImGui::GetWindowHeight() - ss - Px(16));
+    Text(ImGui::GetWindowDrawList(), ImGui::GetFont(), ss, q, C(p.textFaint), "Spectre " SPECTRE_VERSION);
   }
   ImGui::EndChild();
   ImGui::PopStyleVar();
@@ -1170,18 +1358,18 @@ void DrawSettings(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGui::SameLine(0, 0);
   ImGui::BeginGroup();
   // Cabecera de la página
-  const float footerH = 60 * s_;
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28 * s_, 18 * s_));
+  const float footerH = Px(56);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(28), Px(22)));
   ImGui::BeginChild("page", ImVec2(0, -footerH), ImGuiChildFlags_AlwaysUseWindowPadding);
   {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::PushFont(big_);
-    ImGui::TextUnformatted(kPages[m.page].name);
-    ImGui::PopFont();
-    float closeSize = 30 * s_;
-    ImGui::SetCursorScreenPos(ImVec2(p.x + ImGui::GetContentRegionAvail().x - closeSize, p.y));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    float closeSize = Px(28);
+    float ts = Px(kTitle);
+    Text(dl, big_, ts, ImVec2(q.x, q.y + (closeSize - ts) * 0.5f), C(p.text), kPages[m.page]);
+    ImGui::SetCursorScreenPos(ImVec2(q.x + ImGui::GetContentRegionAvail().x - closeSize, q.y));
     if (IconButton("close", Icon::Close, closeSize, "Cerrar (Esc)")) a.close();
-    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + std::max(closeSize, big_->FontSize) + 4 * s_));
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + closeSize + Px(2)));
   }
   switch (m.page) {
   case 0: PageClips(m, a); break;
@@ -1198,37 +1386,36 @@ void DrawSettings(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
 
   // Pie: aplicar / descartar
   {
-    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImVec2 q = ImGui::GetCursorScreenPos();
     float wAvail = ImGui::GetContentRegionAvail().x;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddLine(p, ImVec2(p.x + wAvail, p.y), C(col::Line));
-    float bw = 150 * s_;
-    float y = p.y + (footerH - 36 * s_) * 0.5f;
+    dl->AddRectFilled(q, ImVec2(q.x + wAvail, q.y + 1.0f * s_), C(p.line));
+    float bw = Px(120);
+    float y = q.y + (footerH - Px(32)) * 0.5f;
     if (m.dirty) {
-      float ss = SmallSize();
-      dl->AddText(ImGui::GetFont(), ss, ImVec2(p.x + 28 * s_, p.y + (footerH - ss) * 0.5f), C(col::Muted),
-                  "Hay cambios sin aplicar");
-      ImGui::SetCursorScreenPos(ImVec2(p.x + wAvail - bw * 2 - 8 * s_ - 24 * s_, y));
-      if (SoftButton("discard", Icon::Close, "Descartar", bw)) a.backToPanel();
-      ImGui::SameLine(0, 8 * s_);
-      if (SoftButton("apply", Icon::Play, "Aplicar", bw, Tone::Primary)) {
+      float ss = Px(kHint);
+      Text(dl, ImGui::GetFont(), ss, ImVec2(q.x + Px(28), q.y + (footerH - ss) * 0.5f), C(p.textMuted),
+           "Hay cambios sin aplicar");
+      ImGui::SetCursorScreenPos(ImVec2(q.x + wAvail - bw * 2 - Px(8) - Px(28), y));
+      if (GhostButton("discard", "Descartar", bw)) a.backToPanel();
+      ImGui::SameLine(0, Px(8));
+      if (SolidButton("apply", "Aplicar", bw)) {
         a.apply(m.config);
         m.dirty = false;
       }
     } else {
-      float ss = SmallSize();
+      float ss = Px(kHint);
       std::string hint = "Esc o " + m.config.hotkeys.overlay + " para cerrar";
-      dl->AddText(ImGui::GetFont(), ss, ImVec2(p.x + 28 * s_, p.y + (footerH - ss) * 0.5f), C(col::Faint),
-                  hint.c_str());
+      Text(dl, ImGui::GetFont(), ss, ImVec2(q.x + Px(28), q.y + (footerH - ss) * 0.5f), C(p.textFaint), hint.c_str());
     }
-    ImGui::SetCursorScreenPos(p);
+    ImGui::SetCursorScreenPos(q);
     ImGui::Dummy(ImVec2(wAvail, footerH));
   }
   ImGui::EndGroup();
 
   ImGui::End();
   ImGui::PopStyleColor(2);
-  ImGui::PopStyleVar(2);
+  ImGui::PopStyleVar(3);
 
   // Esc en un campo de texto o un desplegable solo cierra eso. ImGui los
   // desactiva en este mismo frame, por eso se mira también el anterior.
@@ -1237,8 +1424,9 @@ void DrawSettings(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   m.busyLastFrame = busy;
 }
 
-void DrawToast(OverlayWindow& w, const std::string& text, bool error, float alpha) {
-  BeginFrameStyle(w);
+void DrawToast(OverlayWindow& w, const Config& config, const std::string& text, bool error, float alpha) {
+  BeginFrameStyle(w, config);
+  const Palette& p = Colors();
   ImGuiIO& io = ImGui::GetIO();
   ImGui::SetNextWindowPos(ImVec2(0, 0));
   ImGui::SetNextWindowSize(io.DisplaySize);
@@ -1250,22 +1438,18 @@ void DrawToast(OverlayWindow& w, const std::string& text, bool error, float alph
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 a(1, 1), b(io.DisplaySize.x - 1, io.DisplaySize.y - 1);
-  dl->AddRectFilled(a, b, C(col::Bg), 14 * s_);
-  dl->AddRect(a, b, C(col::Line), 14 * s_);
-  ImVec2 mark(a.x + 30 * s_, (a.y + b.y) * 0.5f);
-  if (error) {
-    dl->AddCircleFilled(mark, 12 * s_, C(col::Red), 24);
-    dl->AddRectFilled(mark + ImVec2(-1.5f * s_, -6.5f * s_), mark + ImVec2(1.5f * s_, 2.0f * s_), C(col::Text));
-    dl->AddCircleFilled(mark + ImVec2(0, 5.5f * s_), 1.8f * s_, C(col::Text));
-  } else {
-    BrandMark(dl, mark, 12 * s_);
-  }
-  float x = a.x + 54 * s_;
-  float wrap = b.x - x - 16 * s_;
-  float fs = ImGui::GetFontSize() * 0.95f;
+  ImVec2 a(0, 0), b(io.DisplaySize.x, io.DisplaySize.y);
+  // Rectángulo plano con borde de 1 px y una barra de 3 px a la izquierda:
+  // del acento al guardar o grabar, roja si es un error.
+  dl->AddRectFilled(a, b, C(p.bg));
+  dl->AddRect(a + ImVec2(0.5f, 0.5f), b - ImVec2(0.5f, 0.5f), C(p.line), 0, 0, 1.0f * s_);
+  dl->AddRectFilled(a, ImVec2(a.x + Px(3), b.y), C(error ? p.danger : p.accent));
+  if (!error) DrawTrace(dl, a, b, p.accent);
+  float x = a.x + Px(18);
+  float wrap = b.x - x - Px(16);
+  float fs = Px(kBody);
   ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrap, text.c_str());
-  dl->AddText(ImGui::GetFont(), fs, ImVec2(x, (a.y + b.y - ts.y) * 0.5f), C(col::Text), text.c_str(), nullptr, wrap);
+  dl->AddText(ImGui::GetFont(), fs, ImVec2(x, (a.y + b.y - ts.y) * 0.5f), C(p.text), text.c_str(), nullptr, wrap);
   ImGui::End();
   ImGui::PopStyleColor();
   ImGui::PopStyleVar(3);
