@@ -121,8 +121,8 @@ private:
   ULONGLONG menuOpenedAt_ = 0;
   bool menuFocusChecked_ = false; // ya se comprobó que el foco llegó al panel tras abrirlo
   bool gameRestored_ = false;     // el juego minimizado al perder el foco ya se restauró
-  bool mouseWasDown_ = false;     // sondeo del clic fuera del panel
-  RECT menuHitScreen_{};          // zona del panel que recibe clics, en coordenadas de pantalla
+  bool mouseWasDown_ = false;     // sondeo del clic fuera del panel o de Ajustes
+  RECT menuHitScreen_{};          // zona del panel (o la ventana de Ajustes) que recibe clics, en pantalla
   bool menuHitValid_ = false;
 };
 

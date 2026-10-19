@@ -384,6 +384,7 @@ void App::OpenSettings() {
     menuModel_.devicesLoaded = true;
   }
   menuModel_.clips = ListClips(menuModel_.outputDir, kSettingsClips);
+  menuHitValid_ = false; // la zona de clic se vuelve a calcular en el siguiente frame
   PlaceMenu(menuActivated_);
   SyncKeyboardHook();
 }
@@ -397,6 +398,7 @@ void App::BackToPanel() {
   menuModel_.panelHeight = 0;
   menuModel_.openedAt = GetTickCount64();
   menuModel_.clips = ListClips(menuModel_.outputDir, kPanelClips);
+  menuHitValid_ = false;
   PlaceMenu(menuActivated_);
   SyncKeyboardHook();
 }
@@ -688,6 +690,13 @@ void App::RenderOverlays() {
     } else {
       menuModel_.update = updater_.Status();
       menu_.Render([this] { DrawSettings(menu_, menuModel_, menuActions_); });
+      // Ajustes no tiene región de clic: su ventana entera es el cuadro, y
+      // fuera de ella es fuera de Ajustes.
+      RECT win{};
+      if (GetWindowRect(menu_.Hwnd(), &win)) {
+        menuHitScreen_ = win;
+        menuHitValid_ = true;
+      }
     }
   }
   if (menu_.Visible()) {
@@ -700,7 +709,7 @@ void App::RenderOverlays() {
       keyboard_.Reinstall();
     }
     WatchGameWhileOpen();
-    if (menuMode_ == MenuMode::Panel) PollClickOutside();
+    PollClickOutside();
   }
   if (toast_.Visible()) {
     if (now >= toastUntil_) {
@@ -801,9 +810,11 @@ void App::WatchGameWhileOpen() {
   }
 }
 
-// Un clic fuera del panel lo cierra; el clic llega también a lo que haya
-// debajo. Se sondea el botón en cada frame en vez de usar un gancho de ratón,
-// que metería la latencia de nuestro frame a todo el ratón del sistema.
+// Un clic fuera del panel (o del cuadro de Ajustes) lo cierra; el clic llega
+// también a lo que haya debajo. Se sondea el botón en cada frame en vez de
+// usar un gancho de ratón, que metería la latencia de nuestro frame a todo el
+// ratón del sistema. Ajustes con cambios sin aplicar no se cierra: se
+// perderían (Aplicar o Volver deciden).
 void App::PollClickOutside() {
   const bool down = AnyMouseButtonDown();
   const bool pressed = down && !mouseWasDown_;
@@ -811,6 +822,10 @@ void App::PollClickOutside() {
   if (!pressed || !menuHitValid_) return;
   POINT p{};
   if (!GetCursorPos(&p) || PtInRect(&menuHitScreen_, p)) return;
+  if (menuMode_ == MenuMode::Settings && menuModel_.dirty) {
+    Toast("Ajustes tiene cambios sin aplicar");
+    return;
+  }
   CloseMenu();
 }
 
