@@ -305,23 +305,41 @@ RECT App::MenuRect() const {
     mi.rcMonitor = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
     mi.rcWork = mi.rcMonitor;
   }
-  if (menuMode_ == MenuMode::Settings) return mi.rcMonitor;
+  // Sobre un juego a pantalla completa la barra de tareas está tapada: se usa
+  // el monitor entero.
+  const RECT& work = menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
+  float scale = MonitorScale(menuMonitor_);
+  if (menuMode_ == MenuMode::Settings) {
+    // Ajustes: la ventana es solo el cuadro, centrado, y DrawSettings lo llena.
+    // Alrededor no hay ventana: los clics llegan al juego y los búferes son del
+    // tamaño del cuadro, no del monitor.
+    LONG margin = LONG(48 * scale);
+    LONG w = std::clamp<LONG>(LONG(std::ceil(kSettingsWidth * scale)), 1,
+                              std::max<LONG>(1, work.right - work.left - margin));
+    LONG h = std::clamp<LONG>(LONG(std::ceil(kSettingsHeight * scale)), 1,
+                              std::max<LONG>(1, work.bottom - work.top - margin));
+    LONG left = work.left + (work.right - work.left - w) / 2;
+    LONG top = work.top + (work.bottom - work.top - h) / 2;
+    return RECT{left, top, left + w, top + h};
+  }
   // Panel: franja estrecha pegada al borde derecho, como el overlay de NVIDIA.
   // La ventana ocupa todo el alto del área de trabajo; solo el panel recibe
   // clics (SetHitRegion) y el resto de la franja es transparente.
-  float scale = MonitorScale(menuMonitor_);
   int width = int(std::ceil(kPanelWidth * scale));
   int margin = int(18 * scale);
-  const RECT& work = mi.rcWork;
   return RECT{work.right - margin - width, work.top + margin, work.right - margin, work.bottom - margin};
 }
 
 void App::PlaceMenu(bool activate) {
+  menuActivated_ = activate;
   if (!menu_.Show(MenuRect(), activate)) {
     Toast("No se pudo abrir el panel", true);
     return;
   }
-  if (menuMode_ == MenuMode::Settings) menu_.SetHitRegion(nullptr);
+  // Un juego topmost (GLFW, Unity...) vuelve a subir al activarse: el panel se
+  // mantiene por encima mientras esté abierto.
+  menu_.StayAbove(menuScreen_.fullscreen ? menuScreen_.window : nullptr);
+  if (menuMode_ == MenuMode::Settings) menu_.SetHitRegion(nullptr); // la ventana es el cuadro entero
 }
 
 void App::OpenMenu() {
@@ -336,10 +354,11 @@ void App::OpenMenu() {
   menuModel_.outputDir = ResolveOutputDir(config_);
   menuModel_.clips = ListClips(menuModel_.outputDir, kPanelClips);
   RefreshMenuModel(false);
-  POINT cursor{};
-  GetCursorPos(&cursor);
-  menuMonitor_ = previousForeground_ ? MonitorFromWindow(previousForeground_, MONITOR_DEFAULTTOPRIMARY)
-                                     : MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+  // El panel va al monitor de la ventana activa (el juego), con su DPI; sin
+  // ventana, al del cursor.
+  menuScreen_ = QueryFullscreen(previousForeground_);
+  menuMonitor_ = menuScreen_.monitor;
+  if (menuScreen_.fullscreen) Log("Panel sobre %s", menuScreen_.Describe().c_str());
   PlaceMenu(true);
 }
 
@@ -592,7 +611,10 @@ void App::Toast(const std::string& text, bool error) {
   toastUntil_ = GetTickCount64() + kToastMs + ULONGLONG(std::max(0, lines - 2)) * 1200 + (error ? 1500 : 0);
   const RECT& work = mi.rcWork;
   RECT r{work.right - w - margin, work.top + margin, work.right - margin, work.top + margin + h};
-  toast_.Show(r, false);
+  if (!toast_.Show(r, false)) return;
+  // "Clip guardado" tiene que verse también encima de un juego topmost.
+  FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow(), false);
+  toast_.StayAbove(under.fullscreen ? under.window : nullptr);
 }
 
 void App::RefreshMenuModel(bool devices) {
@@ -617,12 +639,12 @@ void App::RenderOverlays() {
   // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio.
   // Hide() provoca un aviso de desactivación con la generación actual; se sube
   // después para que ese aviso quede obsoleto y no cierre el menú nuevo.
+  // Se recrea con la misma activación con la que se abrió y vuelve a quedar
+  // sobre el juego (PlaceMenu llama a StayAbove).
   if (menu_.Visible() && menu_.Lost()) {
-    RECT rect = MenuRect();
     menu_.Hide();
     ++menuGeneration_;
-    if (!menu_.Show(rect, true)) CloseMenu();
-    if (menuMode_ == MenuMode::Settings && menu_.Visible()) menu_.SetHitRegion(nullptr);
+    PlaceMenu(menuActivated_);
   }
   if (toast_.Visible() && toast_.Lost()) toast_.Hide();
   if (menu_.Visible()) {
@@ -769,6 +791,12 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   case WM_SPECTRE_CLOSE_MENU:
     if (UINT(wp) == menuGeneration_) CloseMenu();
+    return 0;
+  case WM_DISPLAYCHANGE:
+    // El juego cambió la resolución (o la restauró) con el panel abierto: el
+    // monitor tiene otro tamaño y el panel se recoloca sin tocar el foco. Tras
+    // el frame, por si el mensaje llega en mitad de uno.
+    if (menu_.Visible()) Defer([this] { if (menu_.Visible()) menu_.Move(MenuRect()); });
     return 0;
   case WM_SPECTRE_SHOW_MENU:
     OpenMenu();

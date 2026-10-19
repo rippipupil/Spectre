@@ -24,11 +24,25 @@ public:
 
   ~OverlayWindow() { Hide(); }
   void Init(HINSTANCE instance, Kind kind);
+  // activate=false: la ventana se muestra sin activarse y los clics tampoco la
+  // activan (WS_EX_NOACTIVATE + MA_NOACTIVATE). El juego sigue en primer plano
+  // y no se entera de que el panel existe: le llega el ratón pero no el
+  // teclado, porque no tiene el foco. activate=true: se activa ahora
+  // (SetForegroundWindow) y los clics la activan. Se puede cambiar en cada Show.
   bool Show(const RECT& rect, bool activate);
+  // Recoloca la ventana visible sin tocar la activación (el monitor cambió de
+  // resolución con el panel abierto).
+  void Move(const RECT& rect);
   void Hide();
   bool Visible() const { return hwnd_ != nullptr; }
-  // La GPU se reinició (driver actualizado, TDR): hay que ocultar y volver a mostrar.
+  // Hay que ocultar y volver a mostrar: la GPU se reinició (driver actualizado,
+  // TDR) o cambió el DPI, del que dependen fuentes y estilo.
   bool Lost() const { return lost_; }
+  // Ventana (del juego) que debe quedar debajo. Mientras el panel esté visible,
+  // en cada frame se comprueba si se ha puesto delante (un juego topmost sube
+  // al activarse o al restaurarse) y se reafirma el orden Z sin activar nada.
+  // nullptr lo desactiva; Hide() también.
+  void StayAbove(HWND window);
   HWND Hwnd() const { return hwnd_; }
   UINT Width() const { return width_; }
   UINT Height() const { return height_; }
@@ -51,6 +65,9 @@ private:
   bool CreateGraphics(UINT width, UINT height);
   void DestroyGraphics();
   void SetupImGui();
+  void SetNoActivate(bool noActivate);
+  bool Resize(const RECT& rect); // false si la GPU se perdió
+  void EnsureAbove();
 
   HINSTANCE instance_ = nullptr;
   Kind kind_ = Kind::Menu;
@@ -60,6 +77,12 @@ private:
   RECT hitRegion_{};
   bool hasHitRegion_ = false;
   bool lost_ = false;
+  bool noActivate_ = false;
+  HWND below_ = nullptr;          // ventana que debe quedar debajo (StayAbove)
+  ULONGLONG reassertSecond_ = 0;  // ventana de un segundo para contar reafirmaciones
+  int reasserts_ = 0;
+  ULONGLONG lastReassert_ = 0;
+  bool fighting_ = false;         // el juego vuelve a ponerse encima sin parar
 
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> context_;

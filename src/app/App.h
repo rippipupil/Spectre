@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Config.h"
+#include "app/Fullscreen.h"
 #include "app/System.h"
 #include "app/Updater.h"
 #include "core/Pipeline.h"
@@ -87,6 +88,8 @@ private:
   std::vector<std::function<void()>> deferred_;
   HWND previousForeground_ = nullptr;
   HMONITOR menuMonitor_ = nullptr;
+  FullscreenInfo menuScreen_;   // lo que había debajo al abrir el panel (juego a pantalla completa, su monitor)
+  bool menuActivated_ = true;   // activación con la que se mostró el panel; se repite al recrearlo
   UINT menuGeneration_ = 0;     // descarta avisos de cierre de un menú anterior
   ULONGLONG menuClosedAt_ = 0;
   ULONGLONG startFailedAt_ = 0; // la captura falló al arrancar: no reintentar en bucle
