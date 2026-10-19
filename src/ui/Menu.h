@@ -78,9 +78,8 @@ struct MenuActions {
 
 // Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).
 constexpr float kPanelWidth = 320.0f;
-// Cuadro de Ajustes (en px a escala 100 %): DrawSettings lo centra en la ventana
-// que recibe y, si la ventana mide justo esto, lo llena. App::MenuRect puede
-// darle una ventana de este tamaño en vez del monitor entero.
+// Cuadro de Ajustes, en píxeles lógicos: la ventana de Ajustes tiene este
+// tamaño (menos si el monitor es más pequeño) y DrawSettings la llena entera.
 constexpr float kSettingsWidth = 920.0f;
 constexpr float kSettingsHeight = 660.0f;
 
