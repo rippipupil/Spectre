@@ -78,6 +78,10 @@ struct MenuActions {
 
 // Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).
 constexpr float kPanelWidth = 320.0f;
+// Cuadro de Ajustes, en píxeles lógicos: la ventana de Ajustes tiene este
+// tamaño (menos si el monitor es más pequeño) y DrawSettings la llena entera.
+constexpr float kSettingsWidth = 920.0f;
+constexpr float kSettingsHeight = 660.0f;
 
 void DrawPanel(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
 void DrawSettings(OverlayWindow& window, MenuModel& model, const MenuActions& actions);

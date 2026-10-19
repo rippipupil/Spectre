@@ -305,21 +305,33 @@ RECT App::MenuRect() const {
     mi.rcMonitor = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
     mi.rcWork = mi.rcMonitor;
   }
-  if (menuMode_ == MenuMode::Settings) return mi.rcMonitor;
+  // Sobre un juego a pantalla completa la barra de tareas está tapada: se usa
+  // el monitor entero.
+  const RECT& work = menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
+  float scale = MonitorScale(menuMonitor_);
+  if (menuMode_ == MenuMode::Settings) {
+    // Ajustes: la ventana es solo el cuadro, centrado, y DrawSettings lo llena.
+    // Alrededor no hay ventana: los clics llegan al juego y los búferes son del
+    // tamaño del cuadro, no del monitor.
+    LONG margin = LONG(48 * scale);
+    LONG w = std::clamp<LONG>(LONG(std::ceil(kSettingsWidth * scale)), 1,
+                              std::max<LONG>(1, work.right - work.left - margin));
+    LONG h = std::clamp<LONG>(LONG(std::ceil(kSettingsHeight * scale)), 1,
+                              std::max<LONG>(1, work.bottom - work.top - margin));
+    LONG left = work.left + (work.right - work.left - w) / 2;
+    LONG top = work.top + (work.bottom - work.top - h) / 2;
+    return RECT{left, top, left + w, top + h};
+  }
   // Panel: franja estrecha pegada al borde derecho, como el overlay de NVIDIA.
   // La ventana ocupa todo el alto del área de trabajo; solo el panel recibe
   // clics (SetHitRegion) y el resto de la franja es transparente.
-  // Sobre un juego a pantalla completa la barra de tareas está tapada: se usa
-  // el monitor entero.
-  float scale = MonitorScale(menuMonitor_);
   int width = int(std::ceil(kPanelWidth * scale));
   int margin = int(18 * scale);
-  const RECT& work = menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
   return RECT{work.right - margin - width, work.top + margin, work.right - margin, work.bottom - margin};
 }
 
 void App::PlaceMenu(bool activate) {
-  menuActivate_ = activate;
+  menuActivated_ = activate;
   if (!menu_.Show(MenuRect(), activate)) {
     Toast("No se pudo abrir el panel", true);
     return;
@@ -327,7 +339,7 @@ void App::PlaceMenu(bool activate) {
   // Un juego topmost (GLFW, Unity...) vuelve a subir al activarse: el panel se
   // mantiene por encima mientras esté abierto.
   menu_.StayAbove(menuScreen_.fullscreen ? menuScreen_.window : nullptr);
-  if (menuMode_ == MenuMode::Settings) menu_.SetHitRegion(nullptr);
+  if (menuMode_ == MenuMode::Settings) menu_.SetHitRegion(nullptr); // la ventana es el cuadro entero
 }
 
 void App::OpenMenu() {
@@ -632,7 +644,7 @@ void App::RenderOverlays() {
   if (menu_.Visible() && menu_.Lost()) {
     menu_.Hide();
     ++menuGeneration_;
-    PlaceMenu(menuActivate_);
+    PlaceMenu(menuActivated_);
   }
   if (toast_.Visible() && toast_.Lost()) toast_.Hide();
   if (menu_.Visible()) {
