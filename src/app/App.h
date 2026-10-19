@@ -37,7 +37,9 @@ private:
   void OpenMenu();
   void OpenSettings();
   void BackToPanel();
-  void CloseMenu();
+  // restoreFocus=false: el programa que se acaba de abrir desde el panel
+  // (reproductor, Explorador) se queda con el foco en vez del juego.
+  void CloseMenu(bool restoreFocus = true);
   void ApplyConfig(const Config& next, bool quiet = false);
   void Quit();
   // Hay una actualización descargada esperando a que acabe la grabación.
@@ -62,9 +64,10 @@ private:
   void RenderOverlays();
   RECT MenuRect() const;
   void PlaceMenu(bool activate);
-  // Si el panel coge el foco al abrirse (escritorio, juego que esconde el
-  // ratón, pantalla completa exclusiva) o no (juego a pantalla completa con el
-  // cursor libre: el teclado llega entonces por KeyboardHook).
+  // Si el panel coge el foco al abrirse (escritorio, pantalla completa
+  // exclusiva, juego que encierra el cursor en parte del monitor) o no (juego
+  // a pantalla completa con el cursor libre, aunque esté escondido: el teclado
+  // llega entonces por KeyboardHook).
   bool ShouldActivateMenu(HWND foreground);
   void SyncKeyboardHook();
   std::vector<KeyboardHook::Hotkey> PassThroughHotkeys() const;

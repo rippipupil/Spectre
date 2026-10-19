@@ -90,6 +90,19 @@ void KeyboardHook::Uninstall() {
   std::memset(swallowed_, 0, sizeof(swallowed_));
 }
 
+void KeyboardHook::Reinstall() {
+  if (!wanted_ || paused_ > 0) return;
+  if (hook_) {
+    UnhookWindowsHookEx(hook_); // falla si Windows ya lo había quitado: da igual
+    hook_ = nullptr;
+    active_ = nullptr;
+  }
+  // Las teclas soltadas mientras el gancho no estaba fueron al juego: que el
+  // panel no las crea pulsadas.
+  ReleaseSwallowed();
+  Hook();
+}
+
 void KeyboardHook::Hook() {
   if (hook_) return;
   active_ = this;

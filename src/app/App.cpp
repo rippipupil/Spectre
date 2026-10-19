@@ -114,17 +114,19 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     menuModel_.selectedClip = -1;
   };
   // Abrir un clip o la carpeta lleva a otra ventana: el panel se cierra, como
-  // hacía al perder el foco (si no, se quedaría encima del reproductor).
+  // hacía al perder el foco (si no, se quedaría encima del reproductor). Sin
+  // devolver el foco al juego: ShellExecute vuelve antes de que exista la
+  // ventana del reproductor y este se abriría detrás.
   menuActions_.openPath = [this](const std::string& path) {
     Defer([this, path] {
       OpenPath(path);
-      CloseMenu();
+      CloseMenu(false);
     });
   };
   menuActions_.showInFolder = [this](const std::string& path) {
     Defer([this, path] {
       ShowInFolder(path);
-      CloseMenu();
+      CloseMenu(false);
     });
   };
   menuActions_.probeDuration = [](const std::string& path) {
@@ -399,7 +401,7 @@ void App::BackToPanel() {
   SyncKeyboardHook();
 }
 
-void App::CloseMenu() {
+void App::CloseMenu(bool restoreFocus) {
   if (!menu_.Visible()) return;
   ++menuGeneration_;
   menuClosedAt_ = GetTickCount64();
@@ -411,7 +413,8 @@ void App::CloseMenu() {
   // nada que devolver, y si el usuario se fue a otra ventana se respeta. Un
   // juego que se minimizó al perder el foco se restaura: al activarse vuelve
   // a su pantalla completa.
-  if (GetForegroundWindow() == menu_.Hwnd() && previous && previous != hwnd_ && IsWindow(previous)) {
+  if (restoreFocus && GetForegroundWindow() == menu_.Hwnd() && previous && previous != hwnd_ &&
+      IsWindow(previous)) {
     if (IsIconic(previous)) ShowWindow(previous, SW_RESTORE);
     SetForegroundWindow(previous);
   }
@@ -688,6 +691,14 @@ void App::RenderOverlays() {
     }
   }
   if (menu_.Visible()) {
+    // Un frame largo (abrir un MP4 al elegir un clip en Ajustes, disco lento)
+    // puede pasar del tiempo que Windows da a un gancho de bajo nivel, y
+    // entonces lo quita sin avisar: se vuelve a poner.
+    ULONGLONG frameMs = GetTickCount64() - now;
+    if (frameMs >= 200 && keyboard_.Installed()) {
+      Log("Panel: frame de %llu ms; se reinstala el gancho de teclado", frameMs);
+      keyboard_.Reinstall();
+    }
     WatchGameWhileOpen();
     if (menuMode_ == MenuMode::Panel) PollClickOutside();
   }
@@ -727,25 +738,23 @@ bool App::ShouldActivateMenu(HWND foreground) {
     Log("Panel: %s está en pantalla completa exclusiva (D3D); el panel coge el foco para verse", exe);
     return true;
   }
-  // El juego esconde el cursor o lo encierra (ratón relativo): sin quitarle el
-  // foco no se podría hacer clic en el panel.
-  // (CURSOR_SUPPRESSED es táctil o pasajero: no cuenta como escondido.)
-  CURSORINFO ci{};
-  ci.cbSize = sizeof(ci);
-  const bool cursorVisible =
-      GetCursorInfo(&ci) && (ci.flags & (CURSOR_SHOWING | CURSOR_SUPPRESSED)) && ci.hCursor != nullptr;
-  bool cursorFree = true;
+  // El juego encierra el cursor en una parte del monitor (ClipCursor): el panel
+  // quedaría fuera de su alcance y sin quitarle el foco no se podría hacer
+  // clic. Encerrarlo en el monitor entero no cuenta: el panel está dentro.
+  // Un cursor escondido tampoco: el juego lo esconde solo dentro de su ventana
+  // (GLFW con SetCursor(NULL) desde su WM_SETCURSOR; el contador de ShowCursor
+  // es del hilo que lo llama) y sobre el panel Windows pone la flecha. Geometry
+  // Dash lo esconde durante un nivel, y ahí el panel no debe quitarle el foco.
   RECT clip{};
   MONITORINFO mi{};
   mi.cbSize = sizeof(mi);
   if (GetClipCursor(&clip) && GetMonitorInfoW(MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST), &mi)) {
     const RECT& m = mi.rcMonitor;
-    cursorFree = clip.right - clip.left >= m.right - m.left && clip.bottom - clip.top >= m.bottom - m.top;
-  }
-  if (!cursorVisible || !cursorFree) {
-    Log("Panel: %s %s el cursor; el panel coge el foco para que se pueda usar", exe,
-        cursorVisible ? "encierra" : "esconde");
-    return true;
+    if (clip.right - clip.left < m.right - m.left || clip.bottom - clip.top < m.bottom - m.top) {
+      Log("Panel: %s encierra el cursor en %ldx%ld; el panel coge el foco para que se pueda usar", exe,
+          clip.right - clip.left, clip.bottom - clip.top);
+      return true;
+    }
   }
   // Juego a pantalla completa con el cursor libre (Geometry Dash y la mayoría):
   // el panel se abre sin quitarle el foco. Si se lo quitara, los juegos hechos

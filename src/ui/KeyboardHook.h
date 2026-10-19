@@ -46,6 +46,10 @@ public:
   bool Install(HWND target, HWND game, std::vector<Hotkey> passThrough);
   void Uninstall();
   bool Installed() const { return wanted_; }
+  // Windows quita sin avisar un gancho de bajo nivel cuyo callback tarda más
+  // de LowLevelHooksTimeout (como mucho 1 s), y el handle no lo refleja: tras
+  // un frame largo del hilo de la UI se quita y se vuelve a poner.
+  void Reinstall();
 
   // Windows elimina sin avisar un gancho de bajo nivel que tarda en responder,
   // y mientras tanto el teclado de todo el sistema va con retraso: antes de
