@@ -5,6 +5,7 @@
 #include "app/System.h"
 #include "app/Updater.h"
 #include "core/Pipeline.h"
+#include "ui/KeyboardHook.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
 
@@ -37,7 +38,10 @@ private:
   void OpenMenu();
   void OpenSettings();
   void BackToPanel();
-  void CloseMenu();
+  // restoreFocus=false: el programa que se acaba de abrir desde el panel
+  // (reproductor, Explorador) se queda con el foco en vez del juego.
+  void CloseMenu(bool restoreFocus = true);
+  void EndMenuSession(bool giveFocusBack); // la parte de CloseMenu que no depende de la ventana
   void ApplyConfig(const Config& next, bool quiet = false);
   void Quit();
   // Hay una actualización descargada esperando a que acabe la grabación.
@@ -62,6 +66,15 @@ private:
   void RenderOverlays();
   RECT MenuRect() const;
   void PlaceMenu(bool activate);
+  // Si el panel coge el foco al abrirse (escritorio, pantalla completa
+  // exclusiva, juego que encierra el cursor en parte del monitor) o no (juego
+  // a pantalla completa con el cursor libre, aunque esté escondido: el teclado
+  // llega entonces por KeyboardHook).
+  bool ShouldActivateMenu(const FullscreenInfo& screen);
+  void SyncKeyboardHook();
+  std::vector<KeyboardHook::Hotkey> PassThroughHotkeys() const;
+  void WatchGameWhileOpen();
+  void PollClickOutside();
   // Las acciones del menú se ejecutan después del frame de ImGui: cerrar o
   // redimensionar la ventana en mitad del frame tumbaba la app.
   void Defer(std::function<void()> action) { deferred_.push_back(std::move(action)); }
@@ -89,7 +102,6 @@ private:
   HWND previousForeground_ = nullptr;
   HMONITOR menuMonitor_ = nullptr;
   FullscreenInfo menuScreen_;   // lo que había debajo al abrir el panel (juego a pantalla completa, su monitor)
-  bool menuActivated_ = true;   // activación con la que se mostró el panel; se repite al recrearlo
   UINT menuGeneration_ = 0;     // descarta avisos de cierre de un menú anterior
   ULONGLONG menuClosedAt_ = 0;
   ULONGLONG startFailedAt_ = 0; // la captura falló al arrancar: no reintentar en bucle
@@ -104,6 +116,17 @@ private:
   Updater updater_;
   std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
   bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
+
+  // Panel sobre el juego. Abierto sin foco (juego a pantalla completa), el
+  // teclado llega por el gancho; con foco, el gancho no se instala.
+  KeyboardHook keyboard_;
+  bool menuActivated_ = false;    // el panel cogió el foco al abrirse; se repite al recrearlo
+  ULONGLONG menuOpenedAt_ = 0;
+  bool menuFocusChecked_ = false; // ya se comprobó que el foco llegó al panel tras abrirlo
+  bool gameRestored_ = false;     // el juego minimizado al perder el foco ya se restauró
+  bool mouseWasDown_ = false;     // sondeo del clic fuera del panel o de Ajustes
+  RECT menuHitScreen_{};          // zona del panel (o la ventana de Ajustes) que recibe clics, en pantalla
+  bool menuHitValid_ = false;
 };
 
 } // namespace spectre

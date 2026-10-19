@@ -79,8 +79,10 @@ FullscreenInfo QueryFullscreen(HWND window, bool diagnostics) {
   }
   info.topmost = (ex & WS_EX_TOPMOST) != 0;
   if (info.fullscreen && diagnostics) {
-    // Solo informativo: con las optimizaciones de pantalla completa de Windows
-    // el shell puede decir "exclusivo" aunque DWM siga componiendo encima.
+    // exclusive decide en App si el panel coge el foco (encima de la exclusiva
+    // real no se dibuja nada). No concluyente: con las optimizaciones de
+    // pantalla completa de Windows el shell suele devolver QUNS_BUSY, sin
+    // comprobar en un PC real.
     QUERY_USER_NOTIFICATION_STATE state{};
     info.exclusive = SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN;
     info.modeChanged = ModeDiffersFromDesktop(mi);
