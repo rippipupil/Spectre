@@ -21,7 +21,10 @@ struct FullscreenInfo {
   std::string Describe() const; // una línea para el log
 };
 
-// Nunca falla: si la ventana no vale, devuelve fullscreen=false con el monitor del cursor.
-FullscreenInfo QueryFullscreen(HWND window);
+// Nunca falla: si la ventana no vale (oculta, minimizada, de Spectre o del
+// shell: escritorio, barra de tareas), devuelve fullscreen=false con el monitor
+// del cursor. diagnostics=false deja exclusive y modeChanged sin rellenar:
+// consultan al shell y al driver y solo sirven para el log.
+FullscreenInfo QueryFullscreen(HWND window, bool diagnostics = true);
 
 } // namespace spectre

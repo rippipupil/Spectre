@@ -16,6 +16,17 @@ bool OwnWindow(HWND hwnd) {
   return pid == GetCurrentProcessId();
 }
 
+// El escritorio (Progman, WorkerW) cubre todos los monitores y la barra de
+// tareas es topmost: ninguno es un juego.
+bool ShellWindow(HWND hwnd) {
+  wchar_t cls[64] = {};
+  GetClassNameW(hwnd, cls, 64);
+  for (const wchar_t* shell : {L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
+                               L"Windows.UI.Core.CoreWindow"})
+    if (wcscmp(cls, shell) == 0) return true;
+  return false;
+}
+
 // Un juego "a pantalla completa" clásico (OpenGL, D3D9) cambia la resolución
 // del monitor; la de registro es la del escritorio.
 bool ModeDiffersFromDesktop(const MONITORINFOEXW& mi) {
@@ -28,9 +39,10 @@ bool ModeDiffersFromDesktop(const MONITORINFOEXW& mi) {
 }
 } // namespace
 
-FullscreenInfo QueryFullscreen(HWND window) {
+FullscreenInfo QueryFullscreen(HWND window, bool diagnostics) {
   FullscreenInfo info;
-  if (window && (!IsWindow(window) || !IsWindowVisible(window) || IsIconic(window) || OwnWindow(window)))
+  if (window && (!IsWindow(window) || !IsWindowVisible(window) || IsIconic(window) || OwnWindow(window) ||
+                 ShellWindow(window)))
     window = nullptr;
   HMONITOR monitor = window ? MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) : nullptr;
   if (!monitor) {
@@ -66,7 +78,7 @@ FullscreenInfo QueryFullscreen(HWND window) {
     info.fullscreen = covers && !framed;
   }
   info.topmost = (ex & WS_EX_TOPMOST) != 0;
-  if (info.fullscreen) {
+  if (info.fullscreen && diagnostics) {
     // Solo informativo: con las optimizaciones de pantalla completa de Windows
     // el shell puede decir "exclusivo" aunque DWM siga componiendo encima.
     QUERY_USER_NOTIFICATION_STATE state{};

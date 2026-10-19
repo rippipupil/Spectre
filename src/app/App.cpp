@@ -319,6 +319,7 @@ RECT App::MenuRect() const {
 }
 
 void App::PlaceMenu(bool activate) {
+  menuActivate_ = activate;
   if (!menu_.Show(MenuRect(), activate)) {
     Toast("No se pudo abrir el panel", true);
     return;
@@ -600,7 +601,7 @@ void App::Toast(const std::string& text, bool error) {
   RECT r{work.right - w - margin, work.top + margin, work.right - margin, work.top + margin + h};
   if (!toast_.Show(r, false)) return;
   // "Clip guardado" tiene que verse también encima de un juego topmost.
-  FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow());
+  FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow(), false);
   toast_.StayAbove(under.fullscreen ? under.window : nullptr);
 }
 
@@ -626,12 +627,12 @@ void App::RenderOverlays() {
   // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio.
   // Hide() provoca un aviso de desactivación con la generación actual; se sube
   // después para que ese aviso quede obsoleto y no cierre el menú nuevo.
+  // Se recrea con la misma activación con la que se abrió y vuelve a quedar
+  // sobre el juego (PlaceMenu llama a StayAbove).
   if (menu_.Visible() && menu_.Lost()) {
-    RECT rect = MenuRect();
     menu_.Hide();
     ++menuGeneration_;
-    if (!menu_.Show(rect, true)) CloseMenu();
-    if (menuMode_ == MenuMode::Settings && menu_.Visible()) menu_.SetHitRegion(nullptr);
+    PlaceMenu(menuActivate_);
   }
   if (toast_.Visible() && toast_.Lost()) toast_.Hide();
   if (menu_.Visible()) {

@@ -89,6 +89,7 @@ private:
   HWND previousForeground_ = nullptr;
   HMONITOR menuMonitor_ = nullptr;
   FullscreenInfo menuScreen_;   // lo que había debajo al abrir el panel (juego a pantalla completa, su monitor)
+  bool menuActivate_ = true;    // activación con la que se mostró el panel; se repite al recrearlo
   UINT menuGeneration_ = 0;     // descarta avisos de cierre de un menú anterior
   ULONGLONG menuClosedAt_ = 0;
   ULONGLONG startFailedAt_ = 0; // la captura falló al arrancar: no reintentar en bucle
