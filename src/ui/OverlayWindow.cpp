@@ -123,6 +123,9 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
       return false;
     }
     SetupImGui();
+    if (kind_ == Kind::Menu)
+      Log("Overlay: panel creado %s, %ux%u en (%ld,%ld), escala %.2f", activate ? "activado" : "sin activar", w, h,
+          rect.left, rect.top, double(scale_));
   } else {
     SetNoActivate(!activate);
     if (!Resize(rect)) {
@@ -170,7 +173,9 @@ void OverlayWindow::SetNoActivate(bool noActivate) {
   if (!hwnd_) return;
   LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
   LONG_PTR want = noActivate_ ? (ex | WS_EX_NOACTIVATE) : (ex & ~LONG_PTR(WS_EX_NOACTIVATE));
-  if (want != ex) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
+  if (want == ex) return;
+  SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
+  if (kind_ == Kind::Menu) Log("Overlay: el panel %s", noActivate_ ? "deja de activarse" : "pasa a activarse");
 }
 
 void OverlayWindow::StayAbove(HWND window) {
@@ -396,6 +401,11 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     // siguiente frame, por la misma ruta que una GPU perdida.
     if (self) self->lost_ = true;
     return 0;
+  case WM_SYSCOMMAND:
+    // Soltar Alt (viene pulsado desde Alt+Z) pondría la ventana activada en
+    // "modo menú" y se tragaría la siguiente tecla; no hay menú.
+    if ((wp & 0xFFF0) == SC_KEYMENU) return 0;
+    break;
   case WM_NCHITTEST:
     if (self && self->kind_ == Kind::Toast) return HTTRANSPARENT;
     break;
