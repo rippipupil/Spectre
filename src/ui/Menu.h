@@ -81,6 +81,7 @@ constexpr float kPanelWidth = 320.0f;
 
 void DrawPanel(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
 void DrawSettings(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
-void DrawToast(OverlayWindow& window, const std::string& text, bool error, float alpha);
+// El aviso recibe la configuración activa para dibujarse con su tema.
+void DrawToast(OverlayWindow& window, const Config& config, const std::string& text, bool error, float alpha);
 
 } // namespace spectre

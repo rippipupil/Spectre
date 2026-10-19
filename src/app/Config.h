@@ -52,6 +52,10 @@ struct Config {
   bool showNotifications = true;
   int maxBufferMB = 1024;
 
+  // Apariencia (ver ui/Theme.h)
+  std::string theme = "negro";         // "negro" | "psiquico"
+  bool themeMotion = true;             // animaciones propias del tema (solo las tiene Psíquico)
+
   HotkeyConfig hotkeys;
 };
 

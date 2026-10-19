@@ -651,7 +651,7 @@ void App::RenderOverlays() {
     } else {
       float remaining = float(toastUntil_ - now);
       float alpha = remaining < 400 ? remaining / 400.0f : 1.0f;
-      toast_.Render([&] { DrawToast(toast_, toastText_, toastError_, alpha); });
+      toast_.Render([&] { DrawToast(toast_, config_, toastText_, toastError_, alpha); });
     }
   }
   RunDeferred();
