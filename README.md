@@ -17,7 +17,7 @@ Spectre se queda en la bandeja del sistema, junto al reloj. Cerrar el panel no l
 | `Alt+F9` | Empieza o detiene una grabación |
 | `Alt+Shift+F10` | Activa o pausa el replay |
 
-Desde el panel puedes guardar un clip, cambiar su duración (de 15 segundos a 5 minutos), grabar, silenciar el micrófono, encender la cámara y abrir los últimos clips. En *Ajustes* están la calidad de vídeo, los dispositivos de audio, la posición de la webcam, los atajos y un recortador de clips que no recodifica.
+Desde el panel puedes guardar un clip, cambiar su duración (de 15 segundos a 5 minutos), grabar, silenciar el micrófono, encender la cámara y abrir los últimos clips. En *Ajustes* están la calidad de vídeo, los dispositivos de audio, la posición de la webcam, los atajos, un recortador de clips que no recodifica y, en *General*, el tema de la interfaz: *Negro* (negro, gris oscuro y blanco) o *Psíquico* (negro violáceo y magenta, con animaciones que se pueden apagar).
 
 Los vídeos se guardan en `Vídeos\Spectre`. La configuración y el registro de errores (`spectre.log`) están en `%APPDATA%\Spectre`.
 

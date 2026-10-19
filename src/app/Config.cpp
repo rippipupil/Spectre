@@ -2,6 +2,7 @@
 
 #include "common/Util.h"
 #include "encode/Quality.h"
+#include "ui/Theme.h"
 
 #include <nlohmann/json.hpp>
 
@@ -18,7 +19,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 outputDeviceId, gameAudioOnly, captureMic, micDeviceId,
                                                 systemVolume, micVolume, separateTracks, cameraEnabled, cameraId,
                                                 cameraCorner, cameraSizePercent, outputDir, autostart,
-                                                showNotifications, maxBufferMB, hotkeys)
+                                                showNotifications, maxBufferMB, theme, themeMotion, hotkeys)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 
@@ -35,6 +36,7 @@ static void Sanitize(Config& c) {
   c.micVolume = std::clamp(c.micVolume, 0.0f, 2.0f);
   if (c.outputHeight != 0) c.outputHeight = std::clamp(c.outputHeight, 360, 2160);
   if (c.monitorIndex < 0) c.monitorIndex = 0;
+  if (!IsKnownTheme(c.theme)) c.theme = "negro";
 }
 
 Config LoadConfig() {

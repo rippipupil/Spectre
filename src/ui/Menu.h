@@ -78,9 +78,15 @@ struct MenuActions {
 
 // Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).
 constexpr float kPanelWidth = 320.0f;
+// Cuadro de Ajustes (en px a escala 100 %): DrawSettings lo centra en la ventana
+// que recibe y, si la ventana mide justo esto, lo llena. App::MenuRect puede
+// darle una ventana de este tamaño en vez del monitor entero.
+constexpr float kSettingsWidth = 920.0f;
+constexpr float kSettingsHeight = 660.0f;
 
 void DrawPanel(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
 void DrawSettings(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
-void DrawToast(OverlayWindow& window, const std::string& text, bool error, float alpha);
+// El aviso recibe la configuración activa para dibujarse con su tema.
+void DrawToast(OverlayWindow& window, const Config& config, const std::string& text, bool error, float alpha);
 
 } // namespace spectre
