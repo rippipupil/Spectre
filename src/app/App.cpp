@@ -309,10 +309,12 @@ RECT App::MenuRect() const {
   // Panel: franja estrecha pegada al borde derecho, como el overlay de NVIDIA.
   // La ventana ocupa todo el alto del área de trabajo; solo el panel recibe
   // clics (SetHitRegion) y el resto de la franja es transparente.
+  // Sobre un juego a pantalla completa la barra de tareas está tapada: se usa
+  // el monitor entero.
   float scale = MonitorScale(menuMonitor_);
   int width = int(std::ceil(kPanelWidth * scale));
   int margin = int(18 * scale);
-  const RECT& work = mi.rcWork;
+  const RECT& work = menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
   return RECT{work.right - margin - width, work.top + margin, work.right - margin, work.bottom - margin};
 }
 
@@ -321,6 +323,9 @@ void App::PlaceMenu(bool activate) {
     Toast("No se pudo abrir el panel", true);
     return;
   }
+  // Un juego topmost (GLFW, Unity...) vuelve a subir al activarse: el panel se
+  // mantiene por encima mientras esté abierto.
+  menu_.StayAbove(menuScreen_.fullscreen ? menuScreen_.window : nullptr);
   if (menuMode_ == MenuMode::Settings) menu_.SetHitRegion(nullptr);
 }
 
@@ -336,10 +341,11 @@ void App::OpenMenu() {
   menuModel_.outputDir = ResolveOutputDir(config_);
   menuModel_.clips = ListClips(menuModel_.outputDir, kPanelClips);
   RefreshMenuModel(false);
-  POINT cursor{};
-  GetCursorPos(&cursor);
-  menuMonitor_ = previousForeground_ ? MonitorFromWindow(previousForeground_, MONITOR_DEFAULTTOPRIMARY)
-                                     : MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+  // El panel va al monitor de la ventana activa (el juego), con su DPI; sin
+  // ventana, al del cursor.
+  menuScreen_ = QueryFullscreen(previousForeground_);
+  menuMonitor_ = menuScreen_.monitor;
+  if (menuScreen_.fullscreen) Log("Panel sobre %s", menuScreen_.Describe().c_str());
   PlaceMenu(true);
 }
 
@@ -592,7 +598,10 @@ void App::Toast(const std::string& text, bool error) {
   toastUntil_ = GetTickCount64() + kToastMs + ULONGLONG(std::max(0, lines - 2)) * 1200 + (error ? 1500 : 0);
   const RECT& work = mi.rcWork;
   RECT r{work.right - w - margin, work.top + margin, work.right - margin, work.top + margin + h};
-  toast_.Show(r, false);
+  if (!toast_.Show(r, false)) return;
+  // "Clip guardado" tiene que verse también encima de un juego topmost.
+  FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow());
+  toast_.StayAbove(under.fullscreen ? under.window : nullptr);
 }
 
 void App::RefreshMenuModel(bool devices) {
@@ -769,6 +778,12 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   case WM_SPECTRE_CLOSE_MENU:
     if (UINT(wp) == menuGeneration_) CloseMenu();
+    return 0;
+  case WM_DISPLAYCHANGE:
+    // El juego cambió la resolución (o la restauró) con el panel abierto: el
+    // monitor tiene otro tamaño y el panel se recoloca sin tocar el foco. Tras
+    // el frame, por si el mensaje llega en mitad de uno.
+    if (menu_.Visible()) Defer([this] { if (menu_.Visible()) menu_.Move(MenuRect()); });
     return 0;
   case WM_SPECTRE_SHOW_MENU:
     OpenMenu();

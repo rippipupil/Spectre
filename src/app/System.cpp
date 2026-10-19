@@ -138,7 +138,7 @@ std::optional<ForegroundApp> DetectFullscreenApp() {
   wchar_t cls[128] = {};
   GetClassNameW(hwnd, cls, 128);
   for (const wchar_t* shell : {L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
-                               L"Windows.UI.Core.CoreWindow", L"SpectreOverlay"})
+                               L"Windows.UI.Core.CoreWindow", L"SpectreOverlay", L"SpectreToast"})
     if (wcscmp(cls, shell) == 0) return std::nullopt;
 
   RECT wr;

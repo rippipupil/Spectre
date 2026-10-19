@@ -103,12 +103,17 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
   UINT w = UINT(rect.right - rect.left), h = UINT(rect.bottom - rect.top);
   if (!hwnd_) {
     DWORD ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+    // Sin activación: la ventana nunca roba el foco, ni al mostrarse ni al
+    // recibir un clic. Sobre un juego a pantalla completa es imprescindible:
+    // muchos (GLFW, como Geometry Dash) se minimizan al perder el foco.
+    if (!activate) ex |= WS_EX_NOACTIVATE;
     // El aviso deja pasar los clics a cualquier ventana de debajo (HTTRANSPARENT
     // solo funciona con ventanas del mismo hilo).
     if (kind_ == Kind::Toast) ex |= WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT;
     hwnd_ = CreateWindowExW(ex, kind_ == Kind::Menu ? kMenuClass : kToastClass, L"Spectre", WS_POPUP, rect.left,
                             rect.top, int(w), int(h), nullptr, nullptr, instance_, this);
     if (!hwnd_) return false;
+    noActivate_ = !activate || kind_ == Kind::Toast;
     if (kind_ == Kind::Toast) SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
     // El menú y los avisos nunca aparecen en los clips.
     SetWindowDisplayAffinity(hwnd_, WDA_EXCLUDEFROMCAPTURE);
@@ -118,25 +123,99 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
       return false;
     }
     SetupImGui();
-  } else if (w != width_ || h != height_) {
-    SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h), SWP_NOACTIVATE);
-    rtv_.Reset();
-    ComPtr<ID3D11Texture2D> back;
-    if (FAILED(swapChain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) ||
-        FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&back))) ||
-        FAILED(device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_))) {
+  } else {
+    SetNoActivate(!activate);
+    if (!Resize(rect)) {
       // GPU reiniciada (driver actualizado, TDR...): se crea todo de nuevo.
       Hide();
       return Show(rect, activate);
     }
-    width_ = w;
-    height_ = h;
   }
   ShowWindow(hwnd_, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+  // HWND_TOPMOST la pone la primera de las ventanas "siempre encima", también
+  // por delante de un juego topmost, sin necesidad de activarla.
   SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h),
                activate ? 0 : SWP_NOACTIVATE);
   if (activate) SetForegroundWindow(hwnd_);
   return true;
+}
+
+void OverlayWindow::Move(const RECT& rect) {
+  if (!hwnd_) return;
+  if (!Resize(rect)) {
+    lost_ = true; // se recrea en el siguiente frame (App comprueba Lost())
+    return;
+  }
+  SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(rect.right - rect.left), int(rect.bottom - rect.top),
+               SWP_NOACTIVATE);
+}
+
+bool OverlayWindow::Resize(const RECT& rect) {
+  UINT w = UINT(rect.right - rect.left), h = UINT(rect.bottom - rect.top);
+  if (w == width_ && h == height_) return true;
+  SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h), SWP_NOACTIVATE);
+  rtv_.Reset();
+  ComPtr<ID3D11Texture2D> back;
+  if (FAILED(swapChain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) ||
+      FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&back))) ||
+      FAILED(device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_)))
+    return false;
+  width_ = w;
+  height_ = h;
+  return true;
+}
+
+void OverlayWindow::SetNoActivate(bool noActivate) {
+  noActivate_ = noActivate || kind_ == Kind::Toast;
+  if (!hwnd_) return;
+  LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+  LONG_PTR want = noActivate_ ? (ex | WS_EX_NOACTIVATE) : (ex & ~LONG_PTR(WS_EX_NOACTIVATE));
+  if (want != ex) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
+}
+
+void OverlayWindow::StayAbove(HWND window) {
+  below_ = window;
+  reasserts_ = 0;
+  reassertSecond_ = 0;
+  lastReassert_ = 0;
+  fighting_ = false;
+}
+
+void OverlayWindow::EnsureAbove() {
+  if (!hwnd_ || !below_) return;
+  if (!IsWindow(below_)) {
+    below_ = nullptr;
+    return;
+  }
+  // Por encima de nosotros solo hay ventanas topmost: si el juego está entre
+  // ellas es que se ha colocado delante (al activarse, al restaurarse...).
+  bool covered = false;
+  int steps = 0;
+  for (HWND w = GetWindow(hwnd_, GW_HWNDPREV); w && steps < 256; w = GetWindow(w, GW_HWNDPREV), ++steps) {
+    if (w == below_) {
+      covered = true;
+      break;
+    }
+  }
+  if (!covered) return;
+  // Un juego que se vuelve a poner topmost en cada frame haría parpadear el
+  // panel: a partir de la novena vez en un segundo se deja de competir y solo
+  // se reintenta cada medio segundo, hasta que el panel se cierre.
+  ULONGLONG now = GetTickCount64();
+  if (!fighting_) {
+    if (now - reassertSecond_ >= 1000) {
+      reassertSecond_ = now;
+      reasserts_ = 0;
+    }
+    if (++reasserts_ > 8) {
+      fighting_ = true;
+      Log("Overlay: el juego vuelve a ponerse encima sin parar; se reafirma cada 500 ms");
+    }
+  }
+  if (fighting_ && now - lastReassert_ < 500) return;
+  lastReassert_ = now;
+  // Sin activar ni mover nada: solo el orden Z.
+  SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
 void OverlayWindow::Hide() {
@@ -154,6 +233,8 @@ void OverlayWindow::Hide() {
   hwnd_ = nullptr;
   hasHitRegion_ = false;
   lost_ = false;
+  noActivate_ = false;
+  StayAbove(nullptr);
   DestroyWindow(h);
 }
 
@@ -270,6 +351,7 @@ void OverlayWindow::Render(const std::function<void()>& draw) {
   if (!hwnd_ || !imgui_) return;
   // draw() no debe ocultar ni redimensionar esta ventana: las acciones del
   // menú se aplazan hasta después del frame (ver App::RenderOverlays).
+  EnsureAbove();
   ImGui::SetCurrentContext(imgui_);
   ImGui_ImplDX11_NewFrame();
   ImGui_ImplWin32_NewFrame();
@@ -306,8 +388,14 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
   }
   switch (msg) {
   case WM_MOUSEACTIVATE:
-    if (self && self->kind_ == Kind::Toast) return MA_NOACTIVATE;
+    // El clic se procesa igualmente (llega como WM_LBUTTONDOWN); solo no activa.
+    if (self && self->noActivate_) return MA_NOACTIVATE;
     break;
+  case WM_DPICHANGED:
+    // Fuentes y estilo están hechos para el DPI de creación: se recrea en el
+    // siguiente frame, por la misma ruta que una GPU perdida.
+    if (self) self->lost_ = true;
+    return 0;
   case WM_NCHITTEST:
     if (self && self->kind_ == Kind::Toast) return HTTRANSPARENT;
     break;
