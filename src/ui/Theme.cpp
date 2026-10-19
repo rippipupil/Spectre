@@ -20,7 +20,7 @@ constexpr Theme kNegro{"negro",
                         IM_COL32(58, 58, 58, 255),    // lineStrong
                         IM_COL32(255, 255, 255, 255), // text
                         IM_COL32(154, 154, 154, 255), // textMuted
-                        IM_COL32(106, 106, 106, 255), // textFaint
+                        IM_COL32(124, 124, 124, 255), // textFaint (5,0:1 sobre bg, 4,7:1 sobre bgAlt)
                         IM_COL32(255, 255, 255, 255), // accent
                         IM_COL32(229, 229, 229, 255), // accentHover
                         IM_COL32(204, 204, 204, 255), // accentActive
@@ -45,7 +45,7 @@ constexpr Theme kPsiquico{"psiquico",
                            IM_COL32(58, 49, 96, 255),    // lineStrong
                            IM_COL32(242, 236, 255, 255), // text
                            IM_COL32(167, 155, 203, 255), // textMuted
-                           IM_COL32(110, 100, 144, 255), // textFaint
+                           IM_COL32(132, 122, 172, 255), // textFaint (5,0:1 sobre bg, 4,9:1 sobre bgAlt)
                            IM_COL32(255, 63, 209, 255),  // accent
                            IM_COL32(255, 102, 220, 255), // accentHover
                            IM_COL32(229, 43, 184, 255),  // accentActive

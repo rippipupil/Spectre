@@ -200,6 +200,7 @@ struct HoverTrail {
   ImVec2 a, b;        // rectángulo actual
   ImVec2 ghostA, ghostB;
   double ghostSince = -10.0;
+  unsigned long long openedAt = 0; // apertura del panel a la que pertenece
 } trail_;
 
 void TrackHover(ImGuiID id, ImVec2 a, ImVec2 b, bool hovered) {
@@ -563,16 +564,21 @@ void PanelStatus(const MenuModel& m) {
   ImGui::Dummy(ImVec2(0, h));
 }
 
-// Rastro fantasma del tema Psíquico: el contorno del panel aparece 10 px más
-// arriba y se funde en 240 ms. Usa el tamaño del frame anterior.
+// Rastro fantasma del tema Psíquico: un segundo contorno aparece 10 px por
+// dentro del panel y se funde en 240 ms mientras llega al borde. Va por encima
+// del panel y dentro de su rectángulo: el panel es opaco y la ventana recorta
+// lo que quede fuera de la zona de clic, así que fuera no se vería. Usa el
+// tamaño del frame anterior.
 void DrawOpenGhost(const MenuModel& m, float width) {
   if (!ThemeMotion() || m.panelHeight <= 0) return;
   float t = float(GetTickCount64() - m.openedAt) / 240.0f;
   if (t >= 1.0f) return;
   t = std::clamp(t, 0.0f, 1.0f);
   float ease = 1.0f - (1.0f - t) * (1.0f - t);
-  float top = ImGui::GetIO().DisplaySize.y * 0.5f - m.panelHeight * 0.5f - Px(10) * (1.0f - ease);
-  ImGui::GetBackgroundDrawList()->AddRect(ImVec2(0, top), ImVec2(width, top + m.panelHeight),
+  float inset = Px(10) * (1.0f - ease);
+  float top = ImGui::GetIO().DisplaySize.y * 0.5f - m.panelHeight * 0.5f;
+  ImGui::GetForegroundDrawList()->AddRect(ImVec2(inset, top + inset),
+                                          ImVec2(width - inset, top + m.panelHeight - inset),
                                           ImGui::GetColorU32(Colors().accent, 0.55f * (1.0f - ease)), 0, 0,
                                           1.0f * s_);
 }
@@ -581,6 +587,12 @@ void DrawOpenGhost(const MenuModel& m, float width) {
 
 void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   BeginFrameStyle(w, m.config);
+  // La sombra de fila no sobrevive a una reapertura: el reloj de ImGui vuelve
+  // a cero con cada contexto nuevo y un resto antiguo parpadearía.
+  if (trail_.openedAt != m.openedAt) {
+    trail_ = HoverTrail{};
+    trail_.openedAt = m.openedAt;
+  }
   const Palette& p = Colors();
   const float appear = OpenProgress(m);
   const float width = kPanelWidth * s_;
@@ -683,7 +695,7 @@ float ControlWidth() { return std::min(ImGui::GetContentRegionAvail().x, Px(kCon
 void FieldLabel(const char* label, const char* help = nullptr) {
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted(label);
-  if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
+  if (help && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", help);
   ImGui::SameLine(Px(kLabelColumn));
   ImGui::SetNextItemWidth(ControlWidth());
 }
@@ -727,14 +739,15 @@ bool SwitchField(const char* label, bool* value, const char* help = nullptr) {
   ImVec2 q = ImGui::GetCursorScreenPos();
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted(label);
-  if (help && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
+  if (help && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", help);
   ImGui::SameLine(Px(kLabelColumn));
   bool pressed = ImGui::InvisibleButton("switch", ImVec2(Px(32), rowH));
   if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   if (pressed) *value = !*value;
   ImVec2 b = ImGui::GetItemRectMax();
+  // Alfa 1: C() ya aplica style.Alpha, así dentro de BeginDisabled no se atenúa dos veces.
   DrawSwitch(ImGui::GetWindowDrawList(), ImVec2(b.x, (q.y + b.y) * 0.5f), *value, ImGui::GetItemID() ^ 0x5157u,
-             ImGui::GetStyle().Alpha);
+             1.0f);
   ImGui::PopID();
   return pressed;
 }
@@ -1085,9 +1098,12 @@ void AppearanceSection(MenuModel& m) {
     }
   }
   Gap(2);
+  // Solo el tema Psíquico tiene animaciones: con Negro el interruptor se ve apagado.
+  ImGui::BeginDisabled(!FindTheme(c.theme).psychic);
   m.dirty |= SwitchField("Animaciones del tema", &c.themeMotion,
                          "Movimiento propio del tema Psíquico: rastro al abrir el panel, estela en el botón "
                          "principal y marca de estado que respira. El tema Negro no tiene animaciones.");
+  ImGui::EndDisabled();
   Help("Los cambios se ven al momento; pulsa Aplicar para conservarlos.");
 }
 
@@ -1293,14 +1309,18 @@ void DrawSettings(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   const float appear = OpenProgress(m);
   // Sin velo oscuro detrás: Pablo quiere ver el juego tal cual con la ventana encima.
 
-  ImVec2 size(std::min(io.DisplaySize.x - Px(48), Px(920)), std::min(io.DisplaySize.y - Px(48), Px(660)));
+  // El cuadro mide kSettingsWidth x kSettingsHeight (a escala) y va centrado en
+  // la ventana que le dan; si la ventana es justo el cuadro, lo llena.
+  ImVec2 size(std::min(io.DisplaySize.x, Px(kSettingsWidth)), std::min(io.DisplaySize.y, Px(kSettingsHeight)));
+  // La entrada desliza 8 px hacia arriba, o menos si no hay sitio por debajo.
+  const float slide = std::min(Px(8), std::max(0.0f, (io.DisplaySize.y - size.y) * 0.5f));
   ImGui::PushStyleVar(ImGuiStyleVar_Alpha, appear);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
   ImGui::PushStyleColor(ImGuiCol_WindowBg, V(p.bg));
   ImGui::PushStyleColor(ImGuiCol_Border, V(p.line));
-  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f + ImVec2(0, (1.0f - appear) * Px(8)), ImGuiCond_Always,
+  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f + ImVec2(0, (1.0f - appear) * slide), ImGuiCond_Always,
                           ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(size, ImGuiCond_Always);
   ImGui::Begin("Ajustes", nullptr,

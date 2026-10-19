@@ -25,20 +25,6 @@ std::string FontPath(const wchar_t* file) {
   std::error_code ec;
   return std::filesystem::exists(p, ec) ? Narrow(p.wstring()) : std::string();
 }
-// Los rangos por defecto de ImGui solo traen Latin-1: los símbolos que usa el
-// menú (● ○ ■ ▶ ⚙ …) salían como "?". Se añaden solo esos glifos desde Segoe UI
-// Symbol para que el atlas de fuentes siga siendo pequeño.
-void MergeSymbols(ImGuiIO& io, float size) {
-  static const ImWchar ranges[] = {0x2022, 0x2022, 0x2026, 0x2026, 0x2190, 0x2193, 0x25A0, 0x25A0,
-                                   0x25B6, 0x25B6, 0x25CB, 0x25CB, 0x25CF, 0x25CF, 0x2699, 0x2699,
-                                   0x2702, 0x2702, 0};
-  auto path = FontPath(L"seguisym.ttf");
-  if (path.empty()) return;
-  ImFontConfig cfg;
-  cfg.MergeMode = true;
-  cfg.PixelSnapH = true;
-  io.Fonts->AddFontFromFileTTF(path.c_str(), size, &cfg, ranges);
-}
 } // namespace
 
 void OverlayWindow::Init(HINSTANCE instance, Kind kind) {
@@ -207,11 +193,11 @@ void OverlayWindow::SetupImGui() {
     cfg.SizePixels = 13.0f * scale_;
     main = io.Fonts->AddFontDefault(&cfg);
   }
-  MergeSymbols(io, base * scale_);
+  // Solo los rangos por defecto (Latin-1): los iconos se dibujan con líneas,
+  // así que no hace falta fusionar Segoe UI Symbol (eran tres lecturas del
+  // archivo y tres copias en memoria por cada apertura del panel).
   boldFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * scale_) : nullptr;
-  if (boldFont_) MergeSymbols(io, base * scale_);
   bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.5f * scale_) : nullptr;
-  if (bigFont_) MergeSymbols(io, base * 1.5f * scale_);
   if (!boldFont_) boldFont_ = main;
   if (!bigFont_) bigFont_ = main;
 
