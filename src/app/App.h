@@ -4,6 +4,7 @@
 #include "app/System.h"
 #include "app/Updater.h"
 #include "core/Pipeline.h"
+#include "ui/KeyboardHook.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
 
@@ -61,6 +62,14 @@ private:
   void RenderOverlays();
   RECT MenuRect() const;
   void PlaceMenu(bool activate);
+  // Si el panel coge el foco al abrirse (escritorio, juego que esconde el
+  // ratón, pantalla completa exclusiva) o no (juego a pantalla completa con el
+  // cursor libre: el teclado llega entonces por KeyboardHook).
+  bool ShouldActivateMenu(HWND foreground);
+  void SyncKeyboardHook();
+  std::vector<KeyboardHook::Hotkey> PassThroughHotkeys() const;
+  void WatchGameWhileOpen();
+  void PollClickOutside();
   // Las acciones del menú se ejecutan después del frame de ImGui: cerrar o
   // redimensionar la ventana en mitad del frame tumbaba la app.
   void Defer(std::function<void()> action) { deferred_.push_back(std::move(action)); }
@@ -101,6 +110,17 @@ private:
   Updater updater_;
   std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
   bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
+
+  // Panel sobre el juego. Abierto sin foco (juego a pantalla completa), el
+  // teclado llega por el gancho; con foco, el gancho no se instala.
+  KeyboardHook keyboard_;
+  bool menuActivated_ = false;    // el panel cogió el foco al abrirse
+  ULONGLONG menuOpenedAt_ = 0;
+  bool menuFocusChecked_ = false; // ya se comprobó que el foco llegó al panel tras abrirlo
+  bool gameRestored_ = false;     // el juego minimizado al perder el foco ya se restauró
+  bool mouseWasDown_ = false;     // sondeo del clic fuera del panel
+  RECT menuHitScreen_{};          // zona del panel que recibe clics, en coordenadas de pantalla
+  bool menuHitValid_ = false;
 };
 
 } // namespace spectre

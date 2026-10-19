@@ -49,6 +49,12 @@ float MonitorScale(HMONITOR monitor) {
   return float(dpiX) / 96.0f;
 }
 
+bool AnyMouseButtonDown() {
+  for (int vk : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2})
+    if (GetAsyncKeyState(vk) & 0x8000) return true;
+  return false;
+}
+
 bool SameCaptureSettings(const Config& a, const Config& b) {
   return a.captureMode == b.captureMode && a.monitorIndex == b.monitorIndex && a.captureApi == b.captureApi &&
          a.captureCursor == b.captureCursor && a.fps == b.fps && a.outputHeight == b.outputHeight &&
@@ -85,10 +91,12 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
 
   menu_.Init(instance, OverlayWindow::Kind::Menu);
   toast_.Init(instance, OverlayWindow::Kind::Toast);
-  // Alt+F4 o hacer clic fuera cierran el menú, pero siempre a través de la
-  // cola de mensajes (nunca dentro del WndProc ni del frame de la ventana).
+  // Alt+F4 cierra el menú, siempre a través de la cola de mensajes (nunca
+  // dentro del WndProc ni del frame de la ventana). Perder el foco no lo
+  // cierra: el panel se queda abierto hasta que el usuario lo cierra con
+  // Alt+Z, Esc, el botón o un clic fuera (PollClickOutside).
   menu_.onCloseRequested = [this] { PostMessageW(hwnd_, WM_SPECTRE_CLOSE_MENU, menuGeneration_, 0); };
-  menu_.onDeactivated = [this] { PostMessageW(hwnd_, WM_SPECTRE_CLOSE_MENU, menuGeneration_, 0); };
+  keyboard_.onCloseRequested = menu_.onCloseRequested;
 
   menuActions_.saveClip = [this] { Defer([this] { SaveClip(); }); };
   menuActions_.toggleRecording = [this] { Defer([this] { ToggleRecording(); }); };
@@ -105,8 +113,20 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     menuModel_.clips = ListClips(ResolveOutputDir(config_), kSettingsClips);
     menuModel_.selectedClip = -1;
   };
-  menuActions_.openPath = [this](const std::string& path) { Defer([path] { OpenPath(path); }); };
-  menuActions_.showInFolder = [this](const std::string& path) { Defer([path] { ShowInFolder(path); }); };
+  // Abrir un clip o la carpeta lleva a otra ventana: el panel se cierra, como
+  // hacía al perder el foco (si no, se quedaría encima del reproductor).
+  menuActions_.openPath = [this](const std::string& path) {
+    Defer([this, path] {
+      OpenPath(path);
+      CloseMenu();
+    });
+  };
+  menuActions_.showInFolder = [this](const std::string& path) {
+    Defer([this, path] {
+      ShowInFolder(path);
+      CloseMenu();
+    });
+  };
   menuActions_.probeDuration = [](const std::string& path) {
     double seconds = 0;
     return ProbeDuration(path, &seconds) ? seconds : 0.0;
@@ -329,6 +349,12 @@ void App::OpenMenu() {
   ++menuGeneration_;
   previousForeground_ = GetForegroundWindow();
   if (previousForeground_ == hwnd_) previousForeground_ = nullptr; // ventana oculta (tras el menú de la bandeja)
+  menuActivated_ = ShouldActivateMenu(previousForeground_);
+  menuOpenedAt_ = GetTickCount64();
+  menuFocusChecked_ = false;
+  gameRestored_ = false;
+  menuHitValid_ = false;
+  mouseWasDown_ = AnyMouseButtonDown();
   menuMode_ = MenuMode::Panel;
   menuModel_ = MenuModel{};
   menuModel_.config = config_;
@@ -340,7 +366,8 @@ void App::OpenMenu() {
   GetCursorPos(&cursor);
   menuMonitor_ = previousForeground_ ? MonitorFromWindow(previousForeground_, MONITOR_DEFAULTTOPRIMARY)
                                      : MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
-  PlaceMenu(true);
+  PlaceMenu(menuActivated_);
+  SyncKeyboardHook();
 }
 
 void App::OpenSettings() {
@@ -355,7 +382,8 @@ void App::OpenSettings() {
     menuModel_.devicesLoaded = true;
   }
   menuModel_.clips = ListClips(menuModel_.outputDir, kSettingsClips);
-  PlaceMenu(true);
+  PlaceMenu(menuActivated_);
+  SyncKeyboardHook();
 }
 
 void App::BackToPanel() {
@@ -367,20 +395,27 @@ void App::BackToPanel() {
   menuModel_.panelHeight = 0;
   menuModel_.openedAt = GetTickCount64();
   menuModel_.clips = ListClips(menuModel_.outputDir, kPanelClips);
-  PlaceMenu(true);
+  PlaceMenu(menuActivated_);
+  SyncKeyboardHook();
 }
 
 void App::CloseMenu() {
   if (!menu_.Visible()) return;
   ++menuGeneration_;
   menuClosedAt_ = GetTickCount64();
-  menu_.Hide();
-  // Solo se devuelve el foco si nadie lo ha cogido ya (p. ej. el reproductor
-  // que acaba de abrir un clip).
-  HWND fg = GetForegroundWindow();
-  if (previousForeground_ && previousForeground_ != hwnd_ && IsWindow(previousForeground_) && (!fg || fg == hwnd_))
-    SetForegroundWindow(previousForeground_);
+  keyboard_.Uninstall();
+  HWND previous = previousForeground_;
   previousForeground_ = nullptr;
+  // Si el panel tiene el foco, se le devuelve al juego antes de destruir la
+  // ventana (si no, Windows activaría cualquier otra). Abierto sin foco no hay
+  // nada que devolver, y si el usuario se fue a otra ventana se respeta. Un
+  // juego que se minimizó al perder el foco se restaura: al activarse vuelve
+  // a su pantalla completa.
+  if (GetForegroundWindow() == menu_.Hwnd() && previous && previous != hwnd_ && IsWindow(previous)) {
+    if (IsIconic(previous)) ShowWindow(previous, SW_RESTORE);
+    SetForegroundWindow(previous);
+  }
+  menu_.Hide();
 }
 
 void App::ApplyConfig(const Config& next, bool quiet) {
@@ -410,6 +445,7 @@ void App::ApplyConfig(const Config& next, bool quiet) {
       SaveConfig(config_);
       menuModel_.config.hotkeys = config_.hotkeys;
     }
+    SyncKeyboardHook(); // el gancho deja pasar los atajos nuevos
   }
   startFailedAt_ = 0; // con ajustes nuevos se puede volver a intentar ya
 
@@ -614,15 +650,16 @@ void App::RefreshMenuModel(bool devices) {
 
 void App::RenderOverlays() {
   ULONGLONG now = GetTickCount64();
-  // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio.
-  // Hide() provoca un aviso de desactivación con la generación actual; se sube
-  // después para que ese aviso quede obsoleto y no cierre el menú nuevo.
+  // GPU reiniciada mientras el menú estaba abierto: se recrea en el mismo sitio,
+  // con el mismo modo de foco. Se sube la generación para que un aviso de
+  // cierre publicado para la ventana anterior no cierre la nueva.
   if (menu_.Visible() && menu_.Lost()) {
     RECT rect = MenuRect();
     menu_.Hide();
     ++menuGeneration_;
-    if (!menu_.Show(rect, true)) CloseMenu();
+    if (!menu_.Show(rect, menuActivated_)) CloseMenu();
     if (menuMode_ == MenuMode::Settings && menu_.Visible()) menu_.SetHitRegion(nullptr);
+    SyncKeyboardHook(); // la ventana es otra
   }
   if (toast_.Visible() && toast_.Lost()) toast_.Hide();
   if (menu_.Visible()) {
@@ -639,11 +676,20 @@ void App::RenderOverlays() {
         LONG top = std::max<LONG>(0, (LONG(menu_.Height()) - h) / 2);
         RECT hit{0, top, LONG(menu_.Width()), top + h};
         menu_.SetHitRegion(&hit);
+        RECT win{};
+        if (GetWindowRect(menu_.Hwnd(), &win)) {
+          menuHitScreen_ = {win.left + hit.left, win.top + hit.top, win.left + hit.right, win.top + hit.bottom};
+          menuHitValid_ = true;
+        }
       }
     } else {
       menuModel_.update = updater_.Status();
       menu_.Render([this] { DrawSettings(menu_, menuModel_, menuActions_); });
     }
+  }
+  if (menu_.Visible()) {
+    WatchGameWhileOpen();
+    if (menuMode_ == MenuMode::Panel) PollClickOutside();
   }
   if (toast_.Visible()) {
     if (now >= toastUntil_) {
@@ -658,9 +704,105 @@ void App::RenderOverlays() {
 }
 
 void App::RunDeferred() {
+  if (deferred_.empty()) return;
+  KeyboardHook::Pause pause(keyboard_); // las acciones pueden tardar (reiniciar la captura)
   auto actions = std::move(deferred_);
   deferred_.clear();
   for (auto& action : actions) action();
+}
+
+// ------------------------------------------------ el panel sobre el juego
+
+bool App::ShouldActivateMenu(HWND foreground) {
+  // Sin ventana delante (menú de la bandeja) o con una ventana normal: el
+  // panel coge el foco como cualquier aplicación.
+  if (!foreground) return true;
+  auto game = DetectFullscreenApp();
+  if (!game) return true;
+  const char* exe = game->exeName.c_str();
+  // Pantalla completa exclusiva de DirectX: mientras el juego tenga el foco no
+  // se dibuja nada encima. Al perderlo sale del modo y al recuperarlo vuelve.
+  QUERY_USER_NOTIFICATION_STATE state = QUNS_ACCEPTS_NOTIFICATIONS;
+  if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN) {
+    Log("Panel: %s está en pantalla completa exclusiva (D3D); el panel coge el foco para verse", exe);
+    return true;
+  }
+  // El juego esconde el cursor o lo encierra (ratón relativo): sin quitarle el
+  // foco no se podría hacer clic en el panel.
+  // (CURSOR_SUPPRESSED es táctil o pasajero: no cuenta como escondido.)
+  CURSORINFO ci{};
+  ci.cbSize = sizeof(ci);
+  const bool cursorVisible =
+      GetCursorInfo(&ci) && (ci.flags & (CURSOR_SHOWING | CURSOR_SUPPRESSED)) && ci.hCursor != nullptr;
+  bool cursorFree = true;
+  RECT clip{};
+  MONITORINFO mi{};
+  mi.cbSize = sizeof(mi);
+  if (GetClipCursor(&clip) && GetMonitorInfoW(MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST), &mi)) {
+    const RECT& m = mi.rcMonitor;
+    cursorFree = clip.right - clip.left >= m.right - m.left && clip.bottom - clip.top >= m.bottom - m.top;
+  }
+  if (!cursorVisible || !cursorFree) {
+    Log("Panel: %s %s el cursor; el panel coge el foco para que se pueda usar", exe,
+        cursorVisible ? "encierra" : "esconde");
+    return true;
+  }
+  // Juego a pantalla completa con el cursor libre (Geometry Dash y la mayoría):
+  // el panel se abre sin quitarle el foco. Si se lo quitara, los juegos hechos
+  // con GLFW se minimizan y devuelven la resolución del escritorio.
+  Log("Panel: abierto sobre %s sin quitarle el foco", exe);
+  return false;
+}
+
+std::vector<KeyboardHook::Hotkey> App::PassThroughHotkeys() const {
+  std::vector<KeyboardHook::Hotkey> keys;
+  for (const std::string* text : {&config_.hotkeys.overlay, &config_.hotkeys.saveClip,
+                                  &config_.hotkeys.toggleRecording, &config_.hotkeys.toggleReplay}) {
+    UINT mods = 0, vk = 0;
+    if (ParseHotkey(*text, &mods, &vk)) keys.push_back({mods, vk});
+  }
+  return keys;
+}
+
+void App::SyncKeyboardHook() {
+  if (menu_.Visible() && !menuActivated_) keyboard_.Install(menu_.Hwnd(), previousForeground_, PassThroughHotkeys());
+  else keyboard_.Uninstall();
+}
+
+// Con el panel abierto con foco: el foco pudo irse a otra ventana en el cambio
+// (se vuelve a pedir una vez) y el juego pudo minimizarse al perderlo (GLFW):
+// se restaura detrás del panel sin activarlo, solo mientras el foco lo tenga
+// el panel (si el usuario se fue a otra aplicación, no se toca nada).
+void App::WatchGameWhileOpen() {
+  HWND menu = menu_.Hwnd();
+  ULONGLONG since = GetTickCount64() - menuOpenedAt_;
+  if (menuActivated_ && !menuFocusChecked_ && since >= 100) {
+    menuFocusChecked_ = true;
+    HWND fg = GetForegroundWindow();
+    if (fg != menu && fg != previousForeground_) {
+      Log("Panel: otra ventana cogió el foco al abrir; se vuelve a pedir");
+      SetForegroundWindow(menu);
+    }
+  }
+  if (!gameRestored_ && previousForeground_ && IsWindow(previousForeground_) && IsIconic(previousForeground_) &&
+      GetForegroundWindow() == menu) {
+    gameRestored_ = true;
+    Log("Panel: el juego se minimizó al perder el foco; se restaura detrás del panel");
+    ShowWindow(previousForeground_, SW_SHOWNOACTIVATE);
+  }
+}
+
+// Un clic fuera del panel lo cierra; el clic llega también a lo que haya
+// debajo. Se sondea el botón en cada frame en vez de usar un gancho de ratón,
+// que metería la latencia de nuestro frame a todo el ratón del sistema.
+void App::PollClickOutside() {
+  const bool down = AnyMouseButtonDown();
+  const bool pressed = down && !mouseWasDown_;
+  mouseWasDown_ = down;
+  if (!pressed || !menuHitValid_) return;
+  POINT p{};
+  if (!GetCursorPos(&p) || PtInRect(&menuHitScreen_, p)) return;
+  CloseMenu();
 }
 
 void App::AddTrayIcon() {
@@ -724,7 +866,8 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   }
   switch (msg) {
-  case WM_HOTKEY:
+  case WM_HOTKEY: {
+    KeyboardHook::Pause pause(keyboard_); // guardar un clip o grabar pueden tardar
     switch (int(wp)) {
     case kHotkeyOverlay: ToggleMenu(); break;
     case kHotkeySaveClip: SaveClip(); break;
@@ -733,12 +876,14 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     default: break;
     }
     return 0;
+  }
   case WM_TIMER:
     // La grabación pudo acabar sola (error de disco, etc.): la actualización pendiente no se queda colgada.
     if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerGame) {
       CheckGame();
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
+      KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
       bool wasRecording = pipeline_.Recording();
       if (wasRecording) pipeline_.StopRecording();
       Log("Captura perdida: se reinicia");
@@ -776,13 +921,14 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_TRAY:
     if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowTrayMenu();
     else if (LOWORD(lp) == WM_LBUTTONUP) {
-      // Al pulsar el icono el panel pierde el foco y se cierra justo antes:
-      // ese clic lo cierra, no lo vuelve a abrir.
+      // Al pulsar el icono, el clic fuera del panel lo cierra justo antes
+      // (PollClickOutside): ese clic lo cierra, no lo vuelve a abrir.
       if (menu_.Visible()) CloseMenu();
       else if (GetTickCount64() - menuClosedAt_ > 400) OpenMenu();
     }
     return 0;
-  case WM_COMMAND:
+  case WM_COMMAND: {
+    KeyboardHook::Pause pause(keyboard_);
     switch (LOWORD(wp)) {
     case kCmdOpen: OpenMenu(); break;
     case kCmdSettings: OpenSettings(); break;
@@ -794,6 +940,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     default: break;
     }
     return 0;
+  }
   case WM_QUERYENDSESSION:
     return TRUE;
   case WM_ENDSESSION:
