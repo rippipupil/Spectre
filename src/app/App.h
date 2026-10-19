@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Config.h"
+#include "app/Fullscreen.h"
 #include "app/System.h"
 #include "app/Updater.h"
 #include "core/Pipeline.h"
@@ -40,6 +41,7 @@ private:
   // restoreFocus=false: el programa que se acaba de abrir desde el panel
   // (reproductor, Explorador) se queda con el foco en vez del juego.
   void CloseMenu(bool restoreFocus = true);
+  void EndMenuSession(bool giveFocusBack); // la parte de CloseMenu que no depende de la ventana
   void ApplyConfig(const Config& next, bool quiet = false);
   void Quit();
   // Hay una actualización descargada esperando a que acabe la grabación.
@@ -68,7 +70,7 @@ private:
   // exclusiva, juego que encierra el cursor en parte del monitor) o no (juego
   // a pantalla completa con el cursor libre, aunque esté escondido: el teclado
   // llega entonces por KeyboardHook).
-  bool ShouldActivateMenu(HWND foreground);
+  bool ShouldActivateMenu(const FullscreenInfo& screen);
   void SyncKeyboardHook();
   std::vector<KeyboardHook::Hotkey> PassThroughHotkeys() const;
   void WatchGameWhileOpen();
@@ -99,6 +101,7 @@ private:
   std::vector<std::function<void()>> deferred_;
   HWND previousForeground_ = nullptr;
   HMONITOR menuMonitor_ = nullptr;
+  FullscreenInfo menuScreen_;   // lo que había debajo al abrir el panel (juego a pantalla completa, su monitor)
   UINT menuGeneration_ = 0;     // descarta avisos de cierre de un menú anterior
   ULONGLONG menuClosedAt_ = 0;
   ULONGLONG startFailedAt_ = 0; // la captura falló al arrancar: no reintentar en bucle
@@ -117,7 +120,7 @@ private:
   // Panel sobre el juego. Abierto sin foco (juego a pantalla completa), el
   // teclado llega por el gancho; con foco, el gancho no se instala.
   KeyboardHook keyboard_;
-  bool menuActivated_ = false;    // el panel cogió el foco al abrirse
+  bool menuActivated_ = false;    // el panel cogió el foco al abrirse; se repite al recrearlo
   ULONGLONG menuOpenedAt_ = 0;
   bool menuFocusChecked_ = false; // ya se comprobó que el foco llegó al panel tras abrirlo
   bool gameRestored_ = false;     // el juego minimizado al perder el foco ya se restauró

@@ -17,7 +17,9 @@ Spectre se queda en la bandeja del sistema, junto al reloj. Cerrar el panel no l
 | `Alt+F9` | Empieza o detiene una grabación |
 | `Alt+Shift+F10` | Activa o pausa el replay |
 
-Desde el panel puedes guardar un clip, cambiar su duración (de 15 segundos a 5 minutos), grabar, silenciar el micrófono, encender la cámara y abrir los últimos clips. En *Ajustes* están la calidad de vídeo, los dispositivos de audio, la posición de la webcam, los atajos y un recortador de clips que no recodifica.
+Desde el panel puedes guardar un clip, cambiar su duración (de 15 segundos a 5 minutos), grabar, silenciar el micrófono, encender la cámara y abrir los últimos clips. En *Ajustes* están la calidad de vídeo, los dispositivos de audio, la posición de la webcam, los atajos, un recortador de clips que no recodifica y, en *General*, el tema de la interfaz: *Negro* (negro, gris oscuro y blanco) o *Psíquico* (negro violáceo y magenta, con animaciones que se pueden apagar).
+
+El panel se abre encima del juego, también a pantalla completa, sin quitarle el foco: el juego no se minimiza y el panel se queda abierto hasta que lo cierras con `Alt+Z`, `Esc` o un clic fuera. Mientras está abierto, el teclado va al panel y no al juego. Solo hay un caso en el que nada puede dibujarse encima sin meterse dentro del juego (cosa que Spectre no hace, por los anticheats): la pantalla completa *exclusiva* de Direct3D con las optimizaciones de pantalla completa de Windows desactivadas en el exe del juego. Ahí el panel coge el foco para verse: el juego sale de la pantalla completa mientras el panel está abierto (muchos se minimizan, como con `Alt+Tab`) y vuelve a ella al cerrarlo. Para seguir viendo el juego detrás del panel, ponlo en ventana sin bordes o vuelve a activar las optimizaciones.
 
 Los vídeos se guardan en `Vídeos\Spectre`. La configuración y el registro de errores (`spectre.log`) están en `%APPDATA%\Spectre`.
 

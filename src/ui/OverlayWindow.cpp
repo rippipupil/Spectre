@@ -2,6 +2,7 @@
 
 #include "common/Compat.h"
 #include "common/Util.h"
+#include "ui/Theme.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -17,73 +18,12 @@ namespace {
 constexpr wchar_t kMenuClass[] = L"SpectreOverlay";
 constexpr wchar_t kToastClass[] = L"SpectreToast";
 
-void ApplyStyle(float scale) {
-  ImGuiStyle& s = ImGui::GetStyle();
-  ImGui::StyleColorsDark(&s);
-  s.WindowRounding = 12;
-  s.ChildRounding = 8;
-  s.FrameRounding = 6;
-  s.PopupRounding = 6;
-  s.GrabRounding = 6;
-  s.TabRounding = 6;
-  s.ScrollbarRounding = 6;
-  s.WindowBorderSize = 1;
-  s.FrameBorderSize = 0;
-  s.WindowPadding = ImVec2(18, 16);
-  s.FramePadding = ImVec2(10, 6);
-  s.ItemSpacing = ImVec2(10, 8);
-  s.ScrollbarSize = 12;
-
-  const ImVec4 bg(0.07f, 0.07f, 0.09f, 0.97f);
-  const ImVec4 panel(0.12f, 0.12f, 0.15f, 1.0f);
-  const ImVec4 accent(0.58f, 0.36f, 0.98f, 1.0f);
-  const ImVec4 accentHover(0.66f, 0.47f, 1.0f, 1.0f);
-  ImVec4* c = s.Colors;
-  c[ImGuiCol_WindowBg] = bg;
-  c[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.10f, 0.13f, 0.98f);
-  c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-  c[ImGuiCol_Border] = ImVec4(1, 1, 1, 0.08f);
-  c[ImGuiCol_FrameBg] = panel;
-  c[ImGuiCol_FrameBgHovered] = ImVec4(0.17f, 0.17f, 0.21f, 1.0f);
-  c[ImGuiCol_FrameBgActive] = ImVec4(0.20f, 0.20f, 0.25f, 1.0f);
-  c[ImGuiCol_Button] = panel;
-  c[ImGuiCol_ButtonHovered] = ImVec4(0.20f, 0.20f, 0.25f, 1.0f);
-  c[ImGuiCol_ButtonActive] = accent;
-  c[ImGuiCol_Header] = ImVec4(0.58f, 0.36f, 0.98f, 0.35f);
-  c[ImGuiCol_HeaderHovered] = ImVec4(0.58f, 0.36f, 0.98f, 0.50f);
-  c[ImGuiCol_HeaderActive] = accent;
-  c[ImGuiCol_Tab] = ImVec4(0, 0, 0, 0);
-  c[ImGuiCol_TabHovered] = ImVec4(0.58f, 0.36f, 0.98f, 0.45f);
-  c[ImGuiCol_TabSelected] = ImVec4(0.58f, 0.36f, 0.98f, 0.75f);
-  c[ImGuiCol_CheckMark] = accentHover;
-  c[ImGuiCol_SliderGrab] = accent;
-  c[ImGuiCol_SliderGrabActive] = accentHover;
-  c[ImGuiCol_Separator] = ImVec4(1, 1, 1, 0.08f);
-  c[ImGuiCol_Text] = ImVec4(0.93f, 0.93f, 0.96f, 1.0f);
-  c[ImGuiCol_TextDisabled] = ImVec4(0.55f, 0.55f, 0.62f, 1.0f);
-  s.ScaleAllSizes(scale);
-}
-
 std::string FontPath(const wchar_t* file) {
   wchar_t windir[MAX_PATH];
   GetWindowsDirectoryW(windir, MAX_PATH);
   auto p = std::filesystem::path(windir) / L"Fonts" / file;
   std::error_code ec;
   return std::filesystem::exists(p, ec) ? Narrow(p.wstring()) : std::string();
-}
-// Los rangos por defecto de ImGui solo traen Latin-1: los símbolos que usa el
-// menú (● ○ ■ ▶ ⚙ …) salían como "?". Se añaden solo esos glifos desde Segoe UI
-// Symbol para que el atlas de fuentes siga siendo pequeño.
-void MergeSymbols(ImGuiIO& io, float size) {
-  static const ImWchar ranges[] = {0x2022, 0x2022, 0x2026, 0x2026, 0x2190, 0x2193, 0x25A0, 0x25A0,
-                                   0x25B6, 0x25B6, 0x25CB, 0x25CB, 0x25CF, 0x25CF, 0x2699, 0x2699,
-                                   0x2702, 0x2702, 0};
-  auto path = FontPath(L"seguisym.ttf");
-  if (path.empty()) return;
-  ImFontConfig cfg;
-  cfg.MergeMode = true;
-  cfg.PixelSnapH = true;
-  io.Fonts->AddFontFromFileTTF(path.c_str(), size, &cfg, ranges);
 }
 } // namespace
 
@@ -103,12 +43,17 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
   UINT w = UINT(rect.right - rect.left), h = UINT(rect.bottom - rect.top);
   if (!hwnd_) {
     DWORD ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+    // Sin activación: la ventana nunca roba el foco, ni al mostrarse ni al
+    // recibir un clic. Sobre un juego a pantalla completa es imprescindible:
+    // muchos (GLFW, como Geometry Dash) se minimizan al perder el foco.
+    if (!activate) ex |= WS_EX_NOACTIVATE;
     // El aviso deja pasar los clics a cualquier ventana de debajo (HTTRANSPARENT
     // solo funciona con ventanas del mismo hilo).
     if (kind_ == Kind::Toast) ex |= WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT;
     hwnd_ = CreateWindowExW(ex, kind_ == Kind::Menu ? kMenuClass : kToastClass, L"Spectre", WS_POPUP, rect.left,
                             rect.top, int(w), int(h), nullptr, nullptr, instance_, this);
     if (!hwnd_) return false;
+    noActivate_ = !activate || kind_ == Kind::Toast;
     if (kind_ == Kind::Toast) SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
     // El menú y los avisos nunca aparecen en los clips.
     SetWindowDisplayAffinity(hwnd_, WDA_EXCLUDEFROMCAPTURE);
@@ -118,25 +63,104 @@ bool OverlayWindow::Show(const RECT& rect, bool activate) {
       return false;
     }
     SetupImGui();
-  } else if (w != width_ || h != height_) {
-    SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h), SWP_NOACTIVATE);
-    rtv_.Reset();
-    ComPtr<ID3D11Texture2D> back;
-    if (FAILED(swapChain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) ||
-        FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&back))) ||
-        FAILED(device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_))) {
+    if (kind_ == Kind::Menu)
+      Log("Overlay: panel creado %s, %ux%u en (%ld,%ld), escala %.2f", activate ? "activado" : "sin activar", w, h,
+          rect.left, rect.top, double(scale_));
+  } else {
+    SetNoActivate(!activate);
+    if (!Resize(rect)) {
       // GPU reiniciada (driver actualizado, TDR...): se crea todo de nuevo.
       Hide();
       return Show(rect, activate);
     }
-    width_ = w;
-    height_ = h;
   }
   ShowWindow(hwnd_, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+  // HWND_TOPMOST la pone la primera de las ventanas "siempre encima", también
+  // por delante de un juego topmost, sin necesidad de activarla.
   SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h),
                activate ? 0 : SWP_NOACTIVATE);
   if (activate) SetForegroundWindow(hwnd_);
   return true;
+}
+
+void OverlayWindow::Move(const RECT& rect) {
+  if (!hwnd_) return;
+  if (!Resize(rect)) {
+    lost_ = true; // se recrea en el siguiente frame (App comprueba Lost())
+    return;
+  }
+  SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(rect.right - rect.left), int(rect.bottom - rect.top),
+               SWP_NOACTIVATE);
+}
+
+bool OverlayWindow::Resize(const RECT& rect) {
+  UINT w = UINT(rect.right - rect.left), h = UINT(rect.bottom - rect.top);
+  if (w == width_ && h == height_) return true;
+  SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, int(w), int(h), SWP_NOACTIVATE);
+  rtv_.Reset();
+  ComPtr<ID3D11Texture2D> back;
+  if (FAILED(swapChain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) ||
+      FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&back))) ||
+      FAILED(device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_)))
+    return false;
+  width_ = w;
+  height_ = h;
+  return true;
+}
+
+void OverlayWindow::SetNoActivate(bool noActivate) {
+  noActivate_ = noActivate || kind_ == Kind::Toast;
+  if (!hwnd_) return;
+  LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+  LONG_PTR want = noActivate_ ? (ex | WS_EX_NOACTIVATE) : (ex & ~LONG_PTR(WS_EX_NOACTIVATE));
+  if (want == ex) return;
+  SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
+  if (kind_ == Kind::Menu) Log("Overlay: el panel %s", noActivate_ ? "deja de activarse" : "pasa a activarse");
+}
+
+void OverlayWindow::StayAbove(HWND window) {
+  below_ = window;
+  reasserts_ = 0;
+  reassertSecond_ = 0;
+  lastReassert_ = 0;
+  fighting_ = false;
+}
+
+void OverlayWindow::EnsureAbove() {
+  if (!hwnd_ || !below_) return;
+  if (!IsWindow(below_)) {
+    below_ = nullptr;
+    return;
+  }
+  // Por encima de nosotros solo hay ventanas topmost: si el juego está entre
+  // ellas es que se ha colocado delante (al activarse, al restaurarse...).
+  bool covered = false;
+  int steps = 0;
+  for (HWND w = GetWindow(hwnd_, GW_HWNDPREV); w && steps < 256; w = GetWindow(w, GW_HWNDPREV), ++steps) {
+    if (w == below_) {
+      covered = true;
+      break;
+    }
+  }
+  if (!covered) return;
+  // Un juego que se vuelve a poner topmost en cada frame haría parpadear el
+  // panel: a partir de la novena vez en un segundo se deja de competir y solo
+  // se reintenta cada medio segundo, hasta que el panel se cierre.
+  ULONGLONG now = GetTickCount64();
+  if (!fighting_) {
+    if (now - reassertSecond_ >= 1000) {
+      reassertSecond_ = now;
+      reasserts_ = 0;
+    }
+    if (++reasserts_ > 8) {
+      fighting_ = true;
+      Log("Overlay: el juego vuelve a ponerse encima sin parar; se reafirma cada 500 ms");
+    }
+  }
+  if (fighting_ && now - lastReassert_ < 500) return;
+  lastReassert_ = now;
+  // Sin activar ni mover nada: solo el orden Z.
+  SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
 void OverlayWindow::Hide() {
@@ -154,6 +178,8 @@ void OverlayWindow::Hide() {
   hwnd_ = nullptr;
   hasHitRegion_ = false;
   lost_ = false;
+  noActivate_ = false;
+  StayAbove(nullptr);
   DestroyWindow(h);
 }
 
@@ -243,7 +269,7 @@ void OverlayWindow::SetupImGui() {
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-  const float base = kind_ == Kind::Menu ? 17.0f : 16.0f;
+  const float base = 15.0f;
   auto regular = FontPath(L"segoeui.ttf");
   auto bold = FontPath(L"segoeuib.ttf");
   ImFont* main = nullptr;
@@ -253,15 +279,15 @@ void OverlayWindow::SetupImGui() {
     cfg.SizePixels = 13.0f * scale_;
     main = io.Fonts->AddFontDefault(&cfg);
   }
-  MergeSymbols(io, base * scale_);
+  // Solo los rangos por defecto (Latin-1): los iconos se dibujan con líneas,
+  // así que no hace falta fusionar Segoe UI Symbol (eran tres lecturas del
+  // archivo y tres copias en memoria por cada apertura del panel).
   boldFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * scale_) : nullptr;
-  if (boldFont_) MergeSymbols(io, base * scale_);
-  bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.6f * scale_) : nullptr;
-  if (bigFont_) MergeSymbols(io, base * 1.6f * scale_);
+  bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.5f * scale_) : nullptr;
   if (!boldFont_) boldFont_ = main;
   if (!bigFont_) bigFont_ = main;
 
-  ApplyStyle(scale_);
+  ApplyBaseStyle(scale_);
   ImGui_ImplWin32_Init(hwnd_);
   ImGui_ImplDX11_Init(device_.Get(), context_.Get());
 }
@@ -270,6 +296,7 @@ void OverlayWindow::Render(const std::function<void()>& draw) {
   if (!hwnd_ || !imgui_) return;
   // draw() no debe ocultar ni redimensionar esta ventana: las acciones del
   // menú se aplazan hasta después del frame (ver App::RenderOverlays).
+  EnsureAbove();
   ImGui::SetCurrentContext(imgui_);
   ImGui_ImplDX11_NewFrame();
   ImGui_ImplWin32_NewFrame();
@@ -306,7 +333,18 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
   }
   switch (msg) {
   case WM_MOUSEACTIVATE:
-    if (self && self->kind_ == Kind::Toast) return MA_NOACTIVATE;
+    // El clic se procesa igualmente (llega como WM_LBUTTONDOWN); solo no activa.
+    if (self && self->noActivate_) return MA_NOACTIVATE;
+    break;
+  case WM_DPICHANGED:
+    // Fuentes y estilo están hechos para el DPI de creación: se recrea en el
+    // siguiente frame, por la misma ruta que una GPU perdida.
+    if (self) self->lost_ = true;
+    return 0;
+  case WM_SYSCOMMAND:
+    // Soltar Alt (viene pulsado desde Alt+Z) pondría la ventana activada en
+    // "modo menú" y se tragaría la siguiente tecla; no hay menú.
+    if ((wp & 0xFFF0) == SC_KEYMENU) return 0;
     break;
   case WM_NCHITTEST:
     if (self && self->kind_ == Kind::Toast) return HTTRANSPARENT;
