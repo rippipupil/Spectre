@@ -73,8 +73,9 @@ private:
   void ReportStorageLimit(const LimitResult& result);
   // " Queda poco espacio..." para añadir al aviso de un clip o una grabación (vacío si sobra).
   std::string LowDiskNote();
-  // La grabación terminó (atajo, panel o captura perdida): marcas, biblioteca y límite de espacio.
-  void OnRecordingStopped(const std::string& path);
+  // La grabación terminó (atajo, panel o captura perdida): marcas, biblioteca y
+  // límite de espacio. stoppedAt: QPC de justo antes de pararla.
+  void OnRecordingStopped(const std::string& path, int64_t stoppedAt);
 
   // UI
   void Toast(const std::string& text, bool error = false);

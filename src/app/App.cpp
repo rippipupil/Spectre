@@ -385,13 +385,13 @@ void App::SaveClip() {
   pipeline_.SaveClip(path, double(config_.clipSeconds));
 }
 
-void App::OnRecordingStopped(const std::string& path) {
+void App::OnRecordingStopped(const std::string& path, int64_t stoppedAt) {
   if (!path.empty() && !recordMarkers_.empty()) {
     // Desde el final, como en los clips: la grabación acaba al detenerla, pero
     // empieza en el keyframe anterior a pulsar el atajo (hasta 2 s antes).
-    int64_t now = QpcNow();
+    // Se cuenta desde antes de parar: con un disco lento, parar puede tardar.
     std::vector<double> tail;
-    for (int64_t at : recordMarkers_) tail.push_back(QpcToSeconds(now - at));
+    for (int64_t at : recordMarkers_) tail.push_back(QpcToSeconds(stoppedAt - at));
     library_->SetTailMarkers(path, std::move(tail));
   }
   recordMarkers_.clear();
@@ -404,11 +404,12 @@ void App::OnRecordingStopped(const std::string& path) {
 void App::ToggleRecording() {
   if (pipeline_.Recording()) {
     std::string path = pipeline_.Stats().recordPath;
+    int64_t stoppedAt = QpcNow();
     pipeline_.StopRecording();
     if (config_.soundOnSave) PlayCue(Cue::Saved);
     std::string note = LowDiskNote();
     Toast("Grabación guardada: " + FileNameOf(path) + note, !note.empty());
-    OnRecordingStopped(path);
+    OnRecordingStopped(path, stoppedAt);
     UpdatePipeline(std::exchange(restartPending_, false));
     InstallPendingUpdate();
     return;
@@ -1452,13 +1453,14 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
       bool wasRecording = pipeline_.Recording();
       std::string path = wasRecording ? pipeline_.Stats().recordPath : std::string();
+      int64_t stoppedAt = QpcNow();
       if (wasRecording) pipeline_.StopRecording();
       Log("Captura perdida: se reinicia");
       pipeline_.Stop();
       restartPending_ = false;
       if (wasRecording) {
         Toast("La ventana capturada se cerró; la grabación se guardó");
-        OnRecordingStopped(path);
+        OnRecordingStopped(path, stoppedAt);
       }
       UpdatePipeline();
       InstallPendingUpdate();
