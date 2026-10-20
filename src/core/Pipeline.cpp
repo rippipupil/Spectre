@@ -2,12 +2,15 @@
 
 #include "app/CrashHandler.h"
 #include "common/Util.h"
+#include "core/ThreadPolicy.h"
 
 #include <avrt.h>
 #include <dwmapi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
 
 namespace spectre {
 
@@ -75,32 +78,58 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     return false;
   }
   if (settings_.gpuPriority) gpu_.BoostGpuPriority();
+  PerfMonitor::LogEnvironment(settings_.target.monitor
+                                  ? settings_.target.monitor
+                                  : MonitorFromWindow(settings_.target.window, MONITOR_DEFAULTTONEAREST));
 
-  // 2. Tamaño de salida: nunca se escala hacia arriba; dimensiones pares.
   SIZE src = TargetSize(settings_.target);
-  int h = settings_.outputHeight > 0 ? std::min<int>(settings_.outputHeight, src.cy) : src.cy;
-  int w = int(std::lround(double(h) * src.cx / src.cy));
-  width_ = std::max(w & ~1, 2);
-  height_ = std::max(h & ~1, 2);
+  for (int pass = 0;; ++pass) {
+    // 2. Tamaño de salida: nunca se escala hacia arriba; dimensiones pares.
+    int h = settings_.outputHeight > 0 ? std::min<int>(settings_.outputHeight, src.cy) : src.cy;
+    int w = int(std::lround(double(h) * src.cx / src.cy));
+    width_ = std::max(w & ~1, 2);
+    height_ = std::max(h & ~1, 2);
 
-  if (!converter_.Init(gpu_.Device(), gpu_.Context(), UINT(width_), UINT(height_), UINT(settings_.fps))) {
-    Stop();
-    return false;
-  }
+    if (!converter_.Init(gpu_.Device(), gpu_.Context(), UINT(width_), UINT(height_), UINT(settings_.fps))) {
+      Stop();
+      return false;
+    }
 
-  // 3. Encoder de vídeo.
-  VideoEncoderSettings es;
-  es.width = width_;
-  es.height = height_;
-  es.fps = settings_.fps;
-  plan_ = PlanQuality(settings_.quality, settings_.bitrateKbps, width_, height_, settings_.fps, settings_.codec);
-  es.quality = plan_;
-  es.codec = settings_.codec;
-  es.preferred = settings_.encoder;
-  if (!encoder_.Open(es, gpu_.Device())) {
-    if (notify_) notify_("No hay ningún encoder de vídeo disponible", true);
-    Stop();
-    return false;
+    // 3. Encoder de vídeo.
+    VideoEncoderSettings es;
+    es.width = width_;
+    es.height = height_;
+    es.fps = settings_.fps;
+    plan_ = PlanQuality(settings_.quality, settings_.bitrateKbps, width_, height_, settings_.fps, settings_.codec);
+    es.quality = plan_;
+    es.codec = settings_.codec;
+    es.preferred = settings_.encoder;
+    if (!encoder_.Open(es, gpu_.Device())) {
+      if (notify_) notify_("No hay ningún encoder de vídeo disponible", true);
+      Stop();
+      return false;
+    }
+
+    // Sin encoder por GPU, codificar 1080p60 en la CPU le quita al juego
+    // varios núcleos: se baja a 720p30, que cuesta unas 4,5 veces menos. Si
+    // el encoder por CPU se eligió a mano, se respeta. La captura sigue a los
+    // fps de antes: solo cuesta alguna copia de textura de más.
+    if (pass > 0 || !encoder_.Software() || settings_.encoder == encoder_.Name() ||
+        (height_ <= 720 && settings_.fps <= 30))
+      break;
+    Log("Encoder por CPU: se baja de %dx%d@%d a 720p30 como mucho para no quitarle CPU al juego", width_, height_,
+        settings_.fps);
+    settings_.encoder = encoder_.Name(); // la segunda vuelta no vuelve a probar los de GPU
+    settings_.outputHeight = settings_.outputHeight > 0 ? std::min(settings_.outputHeight, 720) : 720;
+    settings_.fps = std::min(settings_.fps, 30);
+    encoder_.Close();
+    {
+      GpuLock lock(GpuMutex());
+      converter_.Reset();
+    }
+    static std::atomic<bool> warned{false};
+    if (notify_ && !warned.exchange(true))
+      notify_("La gráfica no pudo codificar el vídeo: se graba a 720p30 por CPU. Actualiza su driver", true);
   }
 
   buffer_ = std::make_shared<ReplayBuffer>();
@@ -119,13 +148,17 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
       notify_("No se pudo capturar el audio; se grabará solo vídeo", true);
     }
   }
-  buffer_->Configure(streams_, settings_.replaySeconds, settings_.maxBufferBytes);
+  buffer_->Configure(streams_, settings_.replaySeconds, BufferLimit(settings_.replaySeconds));
+  if (!settings_.maxBufferBytes)
+    Log("Replay: tope de memoria automático %zu MB para %.0f s", BufferLimit(settings_.replaySeconds) >> 20,
+        settings_.replaySeconds);
   acceptPackets_ = true;
 
   // 5. Cámara (opcional).
   if (settings_.camera) {
     camera_ = std::make_unique<Camera>();
-    if (!camera_->Start(gpu_.Device(), settings_.cameraId)) camera_.reset();
+    UINT camWidth = UINT(std::max(width_ * settings_.cameraSizePercent / 100, 16));
+    if (!camera_->Start(gpu_.Device(), settings_.cameraId, camWidth)) camera_.reset();
   }
 
   running_ = true;
@@ -141,10 +174,40 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   });
   Log("Pipeline iniciado: %dx%d@%d, captura %s, encoder %s", width_, height_, settings_.fps, capture_->Name(),
       encoder_.Name().c_str());
+  perf_.Start(gpu_.Adapter(), settings_.fps, [this](PerfMonitor::Sample* sample) {
+    {
+      std::lock_guard lock(statsMutex_);
+      sample->video = window_;
+      window_ = {};
+    }
+    char buf[200];
+    snprintf(buf, sizeof(buf), "replay %zu MB de %zu MB (%.0f s), audio codificado %.0f ms por detrás",
+             buffer_->Bytes() >> 20, buffer_->MaxBytes() >> 20, buffer_->DurationSeconds(),
+             audio_.LatencySeconds() * 1000.0);
+    sample->extra = buf;
+  });
   return true;
 }
 
+size_t Pipeline::BufferLimit(double seconds) const {
+  if (settings_.maxBufferBytes) return settings_.maxBufferBytes;
+  // Peor caso: todo el rato al bitrate máximo del preset (en VBR se llega a él
+  // en escenas con mucho movimiento), más los segundos de margen del anillo y
+  // un 10 %. Sin pasar de la cuarta parte de la RAM: con 16 GB caben 5 min en
+  // Alta a 1440p; con poca RAM el clip sale más corto antes que hacer que
+  // Windows mande el juego al archivo de paginación.
+  double kbps = plan_.maxKbps;
+  for (size_t i = 1; i < streams_.size(); ++i)
+    if (streams_[i].params) kbps += double(streams_[i].params->bit_rate) / 1000.0;
+  double bytes = kbps * 125.0 * (seconds + ReplayBuffer::kExtraSeconds) * 1.1;
+  MEMORYSTATUSEX mem{};
+  mem.dwLength = sizeof(mem);
+  double quarter = GlobalMemoryStatusEx(&mem) ? double(mem.ullTotalPhys) / 4.0 : double(1u << 30);
+  return size_t(std::max(std::min(bytes, quarter), double(64u << 20)));
+}
+
 void Pipeline::Stop() {
+  perf_.Stop();
   running_ = false;
   if (videoThread_.joinable()) videoThread_.join();
   audio_.Stop();
@@ -168,6 +231,7 @@ void Pipeline::Stop() {
   gpu_.Reset();
   framesEncoded_ = framesSkipped_ = 0;
   encodeMs_ = frameAgeMs_ = 0;
+  window_ = {};
 }
 
 RECT Pipeline::CameraRect(UINT camWidth, UINT camHeight) const {
@@ -191,9 +255,18 @@ bool Pipeline::Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& fra
 }
 
 void Pipeline::VideoLoop() {
+  // Con encoder por GPU el hilo apenas usa CPU y la prioridad multimedia le
+  // hace despertar puntual en cada ranura. Con encoder por CPU es al revés:
+  // codifica aquí mismo, y con prioridad multimedia (por encima de cualquier
+  // hilo del juego) le quitaría un núcleo entero. Entonces el juego va primero.
   DWORD taskIndex = 0;
-  HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Capture", &taskIndex);
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+  HANDLE mmcss = nullptr;
+  if (encoder_.Software()) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  } else {
+    mmcss = AvSetMmThreadCharacteristicsW(L"Capture", &taskIndex);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+  }
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
@@ -203,6 +276,20 @@ void Pipeline::VideoLoop() {
 
   const int64_t freq = QpcFrequency();
   const int fps = settings_.fps;
+  const double period = double(freq) / fps; // ticks de QPC por ranura
+  // Fase de la rejilla (R18). Con el monitor a los mismos Hz que la salida
+  // llega un frame por ranura y, si la rejilla cae justo donde llegan, unos
+  // pocos ms de ruido hacen que una ranura vea aún el frame anterior (sale
+  // repetido) y la siguiente se salte uno: el clip va a tirones. Mientras la
+  // captura entrega un frame por ranura, la rejilla se corre poco a poco para
+  // muestrear a mitad de camino entre dos llegadas. Puede ir de -1/2 a 3/2
+  // periodos (como mucho 17 ms de desfase con el audio a 60 fps); al salirse
+  // vuelve un periodo, que es el frame repetido o saltado que de todas formas
+  // exige un monitor a 59,94 Hz. Simulado en investigacion/simulacion-fase.py.
+  double phase = 0;
+  std::array<uint8_t, 30> arrivals{}; // frames nuevos en cada una de las últimas ranuras
+  int arrivalsSum = 0;
+  size_t arrivalsPos = 0, arrivalsCount = 0;
   int64_t lastIndex = -1;
   uint64_t lastSequence = 0;
   int consecutiveFailures = 0;
@@ -212,8 +299,10 @@ void Pipeline::VideoLoop() {
 
   while (running_ && !failed_) {
     int64_t now = QpcNow();
-    int64_t index = (now - startQpc_) * fps / freq;
+    double rel = double(now - startQpc_) - phase;
+    int64_t index = rel < 0 ? -1 : int64_t(rel / period);
     if (index > lastIndex) {
+      double lateMs = (rel - double(index) * period) * 1000.0 / double(freq);
       CapturedFrame frame = capture_->Latest();
       if (frame.texture) {
         int64_t t0 = QpcNow();
@@ -221,17 +310,41 @@ void Pipeline::VideoLoop() {
         // que llegó hace X ms se muestra X ms tarde respecto al audio. Se mide
         // solo con frames nuevos (uno repetido en una escena quieta no cuenta).
         bool fresh = frame.sequence != lastSequence;
+        uint64_t arrived = lastSequence ? frame.sequence - lastSequence : 1;
         lastSequence = frame.sequence;
         double ageMs = QpcToSeconds(t0 - frame.qpc) * 1000.0;
         bool ok = encoder_.Encode(
             index, [&](ID3D11Texture2D* dst, UINT slice) { return Render(dst, slice, frame); }, sink);
         double ms = QpcToSeconds(QpcNow() - t0) * 1000.0;
+
+        uint8_t count = uint8_t(std::min<uint64_t>(arrived, 3));
+        arrivalsSum += int(count) - int(arrivals[arrivalsPos]);
+        arrivals[arrivalsPos] = count;
+        arrivalsPos = (arrivalsPos + 1) % arrivals.size();
+        arrivalsCount = std::min(arrivalsCount + 1, arrivals.size());
+        bool inPhase = arrivalsCount == arrivals.size() && std::abs(arrivalsSum - int(arrivals.size())) <= 1;
+        if (inPhase && fresh && arrived == 1) {
+          phase -= 0.1 * (double(t0 - frame.qpc) - period / 2);
+          if (phase < -period / 2) phase += period;
+          else if (phase >= 1.5 * period) phase -= period;
+        }
+
         {
           std::lock_guard lock(statsMutex_);
           encodeMs_ = encodeMs_ * 0.95 + ms * 0.05;
           if (fresh && ageMs >= 0 && ageMs < 1000) frameAgeMs_ = frameAgeMs_ * 0.95 + ageMs * 0.05;
           if (ok) framesEncoded_++;
-          if (lastIndex >= 0 && index > lastIndex + 1) framesSkipped_ += uint64_t(index - lastIndex - 1);
+          window_.slots++;
+          if (ok) window_.encoded++;
+          window_.AddEncode(ms);
+          if (fresh) window_.captured += arrived;
+          else window_.repeated++;
+          if (inPhase) window_.inPhase++;
+          window_.lateMaxMs = std::max(window_.lateMaxMs, lateMs);
+          if (lastIndex >= 0 && index > lastIndex + 1) {
+            framesSkipped_ += uint64_t(index - lastIndex - 1);
+            window_.skipped += uint64_t(index - lastIndex - 1);
+          }
         }
         // GPU reiniciada (driver actualizado, TDR) o encoder que ya no acepta
         // nada: mejor reiniciar el pipeline entero que seguir fallando en silencio.
@@ -246,8 +359,8 @@ void Pipeline::VideoLoop() {
       }
       lastIndex = index;
     }
-    // Dormir hasta el siguiente frame.
-    int64_t next = startQpc_ + (lastIndex + 1) * freq / fps;
+    // Dormir hasta la siguiente ranura.
+    int64_t next = startQpc_ + int64_t(phase + double(lastIndex + 1) * period);
     int64_t wait100ns = (next - QpcNow()) * 10'000'000 / freq;
     if (wait100ns > 0) {
       LARGE_INTEGER due;
@@ -286,12 +399,24 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
   std::thread([buffer, streams, notify, path, seconds, end, pending, waitMs] {
     InstallThreadCrashHandler();
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     Sleep(waitMs);
     bool ok = false;
     try {
+      // La copia de la lista bloquea el anillo, al que entregan sus paquetes
+      // los hilos de vídeo y audio: se hace con la prioridad normal del hilo,
+      // no con la baja de la escritura, para que el juego no pueda dejarlo sin
+      // turno con el lock cogido. Son referencias, ~1 ms con 5 min de replay.
+      int64_t t0 = QpcNow();
       auto packets = buffer->Snapshot(seconds, end);
+      double copyMs = QpcToSeconds(QpcNow() - t0) * 1000.0;
+      // Escribir sí puede esperar: prioridad baja y, dentro de WriteClip, E/S
+      // y memoria de fondo.
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+      SetThreadEcoQoS(true);
+      Log("Clip: %zu paquetes tomados del anillo en %.1f ms", packets.size(), copyMs);
+      t0 = QpcNow();
       ok = WriteClip(path, streams, packets);
+      Log("Clip: escrito en %.0f ms", QpcToSeconds(QpcNow() - t0) * 1000.0);
     } catch (const std::exception& e) {
       Log("Clip: excepción al guardar: %s", e.what());
     }
@@ -305,7 +430,25 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
 
 bool Pipeline::StartRecording(const std::string& path) {
   if (!running_ || Recording()) return false;
+  if (recorder_) {
+    // La anterior se cortó sola porque el disco no daba abasto. Su hilo vacía
+    // la cola y cierra el archivo; esperarle aquí congelaría la interfaz.
+    if (!recorder_->Finished()) {
+      if (notify_) notify_("Aún se está guardando la grabación anterior en el disco", true);
+      return false;
+    }
+    buffer_->DetachLive();
+    recorder_->Stop();
+    recorder_.reset();
+  }
   recorder_ = std::make_unique<Recorder>();
+  auto notify = notify_;
+  recorder_->onOverflow = [notify] {
+    if (notify)
+      notify("Grabación detenida: el disco no daba abasto. Se guardó hasta ese momento; prueba otro disco o menos "
+             "calidad",
+             true);
+  };
   if (!recorder_->Start(path, streams_)) {
     recorder_.reset();
     return false;
@@ -324,14 +467,15 @@ void Pipeline::StopRecording() {
 
 void Pipeline::SetReplaySeconds(double seconds) {
   settings_.replaySeconds = seconds;
-  if (buffer_) buffer_->SetSeconds(seconds);
+  if (buffer_) buffer_->SetLimits(seconds, BufferLimit(seconds));
 }
 
 PipelineStats Pipeline::Stats() {
   PipelineStats s;
   s.running = running_;
   if (!running_) return s;
-  s.encoder = encoder_.Name() + (encoder_.ZeroCopy() ? " (cero copias)" : "");
+  s.encoder = encoder_.Label() + (encoder_.ZeroCopy() ? " (cero copias)" : "");
+  s.encoderSoftware = encoder_.Software();
   s.capture = capture_ ? capture_->Name() : "";
   s.gpu = gpu_.AdapterName();
   s.width = width_;
@@ -350,6 +494,7 @@ PipelineStats Pipeline::Stats() {
   if (buffer_) {
     s.bufferBytes = buffer_->Bytes();
     s.bufferSeconds = buffer_->DurationSeconds();
+    s.bufferLimitBytes = buffer_->MaxBytes();
   }
   s.audioTracks = int(streams_.size()) - 1;
   s.recording = Recording();

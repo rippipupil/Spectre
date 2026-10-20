@@ -4,6 +4,7 @@
 #include "capture/Camera.h"
 #include "capture/CaptureSource.h"
 #include "core/Mp4Writer.h"
+#include "core/PerfMonitor.h"
 #include "core/ReplayBuffer.h"
 #include "encode/VideoEncoder.h"
 #include "gpu/GpuDevice.h"
@@ -35,7 +36,9 @@ struct PipelineSettings {
   std::string cameraCorner = "bottom-right";
   int cameraSizePercent = 25;
   double replaySeconds = 30;
-  size_t maxBufferBytes = 1024u << 20;
+  // Tope de RAM del replay; 0 = automático: lo que ocupa la duración pedida
+  // al bitrate máximo del preset, sin pasar de la cuarta parte de la RAM.
+  size_t maxBufferBytes = 0;
 };
 
 struct PipelineStats {
@@ -50,6 +53,8 @@ struct PipelineStats {
   uint64_t framesSkipped = 0;
   size_t bufferBytes = 0;
   double bufferSeconds = 0;
+  size_t bufferLimitBytes = 0; // tope en uso (el automático ya calculado)
+  bool encoderSoftware = false; // codifica en la CPU
   int audioTracks = 0;
   std::string systemAudio; // dispositivo y formato abiertos (vacío = no se captura)
   std::string micAudio;
@@ -100,6 +105,7 @@ private:
   void VideoLoop();
   bool Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& frame);
   RECT CameraRect(UINT camWidth, UINT camHeight) const;
+  size_t BufferLimit(double seconds) const;
 
   PipelineSettings settings_;
   Notify notify_;
@@ -127,6 +133,8 @@ private:
   double frameAgeMs_ = 0; // cuánto lleva capturado cada frame nuevo al codificarlo
   uint64_t framesEncoded_ = 0;
   uint64_t framesSkipped_ = 0;
+  VideoCounters window_; // desde la última lectura de perf_
+  PerfMonitor perf_;
 };
 
 } // namespace spectre

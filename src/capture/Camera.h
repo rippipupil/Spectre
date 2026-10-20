@@ -20,19 +20,21 @@ struct CameraDevice {
 };
 std::vector<CameraDevice> EnumerateCameras();
 
-// Webcam con Media Foundation. Pide como máximo 1280x720 a 30 fps y deja el
-// último frame en una textura BGRA para componerla en la GPU.
+// Webcam con Media Foundation. Deja el último frame en una textura BGRA para
+// componerla en la GPU. Pide a la cámara el formato más pequeño que llegue al
+// ancho con el que se va a ver (como mucho 1280x720): decodificar y convertir
+// cada frame se hace en la CPU, y a 640x360 cuesta la cuarta parte que a 720p.
 class Camera {
 public:
   ~Camera() { Stop(); }
-  bool Start(ID3D11Device* device, const std::string& id);
+  bool Start(ID3D11Device* device, const std::string& id, UINT wantWidth = 1280);
   void Stop();
 
   // Llamar con GpuMutex tomado.
   bool Latest(ComPtr<ID3D11Texture2D>* tex, UINT* width, UINT* height);
 
 private:
-  void Run(std::wstring id);
+  void Run(std::wstring id, UINT wantWidth);
   void ReleaseSource();
 
   ComPtr<ID3D11Device> device_;

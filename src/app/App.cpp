@@ -548,7 +548,9 @@ PipelineSettings App::BuildSettings() const {
   s.cameraCorner = config_.cameraCorner;
   s.cameraSizePercent = config_.cameraSizePercent;
   s.replaySeconds = config_.replayEnabled ? config_.clipSeconds : 3.0;
-  s.maxBufferBytes = size_t(config_.maxBufferMB) << 20;
+  // 1024 MB es el valor por defecto de siempre: con él, el tope lo calcula el
+  // pipeline según calidad, duración y RAM (con 5 min en Alta se quedaba corto).
+  s.maxBufferBytes = config_.maxBufferMB == 1024 ? 0 : size_t(config_.maxBufferMB) << 20;
   return s;
 }
 

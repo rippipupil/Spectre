@@ -36,7 +36,7 @@ std::vector<CameraDevice> EnumerateCameras() {
   return list;
 }
 
-bool Camera::Start(ID3D11Device* device, const std::string& id) {
+bool Camera::Start(ID3D11Device* device, const std::string& id, UINT wantWidth) {
   Stop();
   if (!MediaFoundationAvailable()) {
     Log("Cámara: Media Foundation no está disponible (Windows N)");
@@ -54,9 +54,9 @@ bool Camera::Start(ID3D11Device* device, const std::string& id) {
     wid = Widen(cams.front().id);
   }
   running_ = true;
-  thread_ = std::thread([this, wid] {
+  thread_ = std::thread([this, wid, wantWidth] {
     InstallThreadCrashHandler();
-    Run(wid);
+    Run(wid, wantWidth);
   });
   return true;
 }
@@ -85,7 +85,7 @@ bool Camera::Latest(ComPtr<ID3D11Texture2D>* tex, UINT* width, UINT* height) {
   return true;
 }
 
-void Camera::Run(std::wstring id) {
+void Camera::Run(std::wstring id, UINT wantWidth) {
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 
@@ -109,18 +109,34 @@ void Camera::Run(std::wstring id) {
   }
   const DWORD stream = DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
   if (SUCCEEDED(hr)) {
-    // Formato nativo más grande que no pase de 1280x720.
+    // Formato nativo: el más pequeño que llegue a wantWidth (si ninguno llega,
+    // el más grande), sin pasar de 1280x720. A igual tamaño, con 24 fps o más
+    // y sin comprimir (MJPEG hay que decodificarlo en la CPU).
+    struct Score {
+      bool fits = false, fluid = false, raw = false;
+      UINT64 area = 0;
+    };
+    auto better = [](const Score& a, const Score& b) { // a mejor que b
+      if (a.fits != b.fits) return a.fits;
+      if (a.area != b.area) return a.fits ? a.area < b.area : a.area > b.area;
+      if (a.fluid != b.fluid) return a.fluid;
+      return a.raw && !b.raw;
+    };
     ComPtr<IMFMediaType> best;
-    UINT64 bestArea = 0;
+    Score bestScore;
     for (DWORD i = 0;; ++i) {
       ComPtr<IMFMediaType> type;
       if (FAILED(reader->GetNativeMediaType(stream, i, &type))) break;
-      UINT32 w = 0, h = 0;
+      UINT32 w = 0, h = 0, num = 0, den = 0;
       MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &w, &h);
-      UINT64 area = UINT64(w) * h;
-      if (w <= 1280 && h <= 720 && area > bestArea) {
-        bestArea = area;
+      if (w == 0 || h == 0 || w > 1280 || h > 720) continue;
+      MFGetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, &num, &den);
+      GUID subtype{};
+      type->GetGUID(MF_MT_SUBTYPE, &subtype);
+      Score score{w >= wantWidth, den && num >= 24 * den, subtype != MFVideoFormat_MJPG, UINT64(w) * h};
+      if (!best || better(score, bestScore)) {
         best = type;
+        bestScore = score;
       }
     }
     if (best) reader->SetCurrentMediaType(stream, nullptr, best.Get());
@@ -146,7 +162,7 @@ void Camera::Run(std::wstring id) {
     CoUninitialize();
     return;
   }
-  Log("Cámara: %ux%u", w, h);
+  Log("Cámara: %ux%u (se ve a %u de ancho)", w, h, wantWidth);
 
   std::vector<uint8_t> flipped;
   while (running_) {

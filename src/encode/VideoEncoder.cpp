@@ -180,7 +180,7 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
     // (nvEncLockBitstream bloqueante): con la GPU llena por el juego esa
     // espera se comía la ranura siguiente y el clip salía a saltos. Con 2, el
     // paquete de un frame se recoge al enviar el siguiente, cuando ya está
-    // hecho. Llega 33 ms más tarde al anillo; SaveClip ya espera más que eso.
+    // hecho. Llega un frame más tarde al anillo; SaveClip ya espera más.
     av_dict_set(&opts, "delay", "2", 0);
     av_dict_set(&opts, "rc-lookahead", "0", 0);
     av_dict_set(&opts, "tune", "hq", 0);
