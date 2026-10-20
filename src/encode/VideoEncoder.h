@@ -25,9 +25,10 @@ struct VideoEncoderSettings {
 };
 
 struct EncoderInfo {
-  std::string name;  // nombre de FFmpeg
+  std::string name;  // id para la configuración (el nombre de FFmpeg, o h264_mf_hw para MF por GPU)
   std::string label; // texto para la UI
 };
+struct EncoderCandidate;
 // Encoders que FFmpeg tiene compilados para el códec (no garantiza que la GPU los soporte).
 std::vector<EncoderInfo> CandidateEncoders(const std::string& codec);
 
@@ -49,12 +50,15 @@ public:
 
   const AVCodecContext* Context() const { return ctx_; }
   const std::string& Name() const { return name_; }
+  const std::string& Label() const { return label_; }
   bool ZeroCopy() const { return hwFrames_ != nullptr; }
+  // Codifica en la CPU (no se pudo abrir ninguno por GPU, o se eligió a mano).
+  bool Software() const { return software_; }
 
 private:
   // simple: sin las opciones de calidad (VBR, AQ, multipass...), por si el
   // driver no las admite y preferimos este encoder a uno peor.
-  bool TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, bool simple);
+  bool TryOpen(const AVCodec* codec, const EncoderCandidate& cand, const VideoEncoderSettings& s, bool simple);
   bool SetupHwFrames(const VideoEncoderSettings& s);
   bool SetupStaging(const VideoEncoderSettings& s);
   bool SendStaging(int index, const PacketSink& sink);
@@ -68,10 +72,17 @@ private:
   AVBufferRef* hwFrames_ = nullptr;
   AVPacket* packet_ = nullptr;
   std::string name_;
+  std::string label_;
+  bool software_ = false;
+  // Hay abierto un encoder de Media Foundation y un MFStartup nuestro que se
+  // suelta al cerrarlo (ver TryOpen).
+  bool mfStarted_ = false;
   AVPixelFormat swFormat_ = AV_PIX_FMT_NV12;
 
   // Camino por memoria de sistema.
   static constexpr int kStaging = 3;
+  static constexpr int kFrameAlign = 64;
+  AVBufferPool* framePool_ = nullptr;
   ComPtr<ID3D11Texture2D> nv12_;
   std::array<ComPtr<ID3D11Texture2D>, kStaging> staging_;
   std::array<int64_t, kStaging> stagingPts_{};

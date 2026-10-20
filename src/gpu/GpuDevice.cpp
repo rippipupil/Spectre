@@ -7,6 +7,48 @@
 
 namespace spectre {
 
+namespace {
+
+// Planificación de la GPU por hardware (HAGS) con D3DKMT, como lo registra
+// OBS. Las estructuras se declaran aquí porque no todas las cabeceras las
+// traen. -1 = no se sabe (Windows 10 anterior a 2004 o driver sin WDDM 2.7).
+int HagsEnabled(LUID luid) {
+  struct OpenAdapterFromLuid {
+    LUID AdapterLuid;
+    UINT hAdapter;
+  };
+  struct QueryAdapterInfo {
+    UINT hAdapter;
+    int Type;
+    void* pPrivateDriverData;
+    UINT PrivateDriverDataSize;
+  };
+  struct CloseAdapter {
+    UINT hAdapter;
+  };
+  constexpr int kWddm27Caps = 70; // KMTQAITYPE_WDDM_2_7_CAPS
+  HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+  if (!gdi) return -1;
+  auto open = reinterpret_cast<LONG(APIENTRY*)(OpenAdapterFromLuid*)>(
+      reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid")));
+  auto query = reinterpret_cast<LONG(APIENTRY*)(const QueryAdapterInfo*)>(
+      reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo")));
+  auto close = reinterpret_cast<LONG(APIENTRY*)(const CloseAdapter*)>(
+      reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTCloseAdapter")));
+  if (!open || !query || !close) return -1;
+  OpenAdapterFromLuid adapter{luid, 0};
+  if (open(&adapter) != 0) return -1;
+  UINT caps = 0; // D3DKMT_WDDM_2_7_CAPS: bit 0 la admite, bit 1 activada
+  QueryAdapterInfo info{adapter.hAdapter, kWddm27Caps, &caps, sizeof(caps)};
+  LONG status = query(&info);
+  CloseAdapter closeInfo{adapter.hAdapter};
+  close(&closeInfo);
+  if (status != 0) return -1;
+  return (caps & 2) ? 1 : 0;
+}
+
+} // namespace
+
 ComPtr<IDXGIAdapter1> GpuDevice::HighPerformanceAdapter() {
   ComPtr<IDXGIFactory1> factory;
   if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return nullptr;
@@ -86,7 +128,24 @@ bool GpuDevice::Create(IDXGIAdapter1* adapter) {
   ComPtr<ID3D11Multithread> mt;
   if (SUCCEEDED(context_.As(&mt))) mt->SetMultithreadProtected(TRUE);
 
-  Log("GPU: %s (vendor 0x%04X)", adapterName_.c_str(), vendorId_);
+  // Versión del driver: con NVIDIA, el encoder depende de ella (las cabeceras
+  // de NVENC de FFmpeg 8.1 piden la 570 o más; con una anterior se cae a Media
+  // Foundation). Las cifras finales son la versión comercial: 32.0.15.6094 es
+  // la 560.94.
+  char driver[96] = "desconocido";
+  LARGE_INTEGER umd{};
+  if (SUCCEEDED(adapter_->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) {
+    unsigned part3 = HIWORD(umd.LowPart), part4 = LOWORD(umd.LowPart);
+    int n = snprintf(driver, sizeof(driver), "%u.%u.%u.%u", HIWORD(umd.HighPart), LOWORD(umd.HighPart), part3, part4);
+    if (vendorId_ == 0x10DE && n > 0) {
+      unsigned version = (part3 % 10) * 10000 + part4;
+      snprintf(driver + n, sizeof(driver) - size_t(n), " (NVIDIA %u.%02u%s)", version / 100, version % 100,
+               version < 57000 ? ", AVISO: NVENC pide la 570 o más" : "");
+    }
+  }
+  int hags = HagsEnabled(desc.AdapterLuid);
+  Log("GPU: %s (vendor 0x%04X), driver %s, planificación por hardware (HAGS) %s", adapterName_.c_str(), vendorId_,
+      driver, hags < 0 ? "sin datos" : hags ? "activada" : "desactivada");
   return true;
 }
 
@@ -99,6 +158,12 @@ void GpuDevice::Reset() {
 }
 
 void GpuDevice::BoostGpuPriority() {
+  // OBS no la cambia en gráficas Intel (libobs-d3d11, InitDevice): se hace
+  // igual.
+  if (vendorId_ == 0x8086) {
+    Log("Prioridad de GPU del proceso: sin cambios (gráfica Intel)");
+    return;
+  }
   // D3DKMT_SCHEDULINGPRIORITYCLASS: 3 = ABOVE_NORMAL, 4 = HIGH.
   using SetPriorityFn = LONG(APIENTRY*)(HANDLE, int);
   auto fn = reinterpret_cast<SetPriorityFn>(
