@@ -2,13 +2,16 @@
 
 #include "app/CrashHandler.h"
 #include "common/Util.h"
+#include "core/ThreadPolicy.h"
 
 #include <algorithm>
+#include <chrono>
+#include <climits>
 #include <cstdio>
 
 namespace spectre {
 
-bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fragmented) {
+bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fragmented, int64_t reserveMoov) {
   Close();
   streams_ = streams;
   int err = avformat_alloc_output_context2(&fmt_, nullptr, "mp4", path.c_str());
@@ -40,7 +43,12 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
     return false;
   }
   AVDictionary* opts = nullptr;
-  av_dict_set(&opts, "movflags", fragmented ? "frag_keyframe+empty_moov+default_base_moof" : "+faststart", 0);
+  if (fragmented)
+    av_dict_set(&opts, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
+  else if (reserveMoov > 0)
+    av_dict_set_int(&opts, "moov_size", std::min<int64_t>(reserveMoov, INT_MAX), 0);
+  else
+    av_dict_set(&opts, "movflags", "+faststart", 0);
   err = avformat_write_header(fmt_, &opts);
   av_dict_free(&opts);
   if (err < 0) {
@@ -136,14 +144,36 @@ bool Mp4Writer::Close() {
 }
 
 bool WriteClip(const std::string& path, const StreamList& streams,
-               const std::vector<std::pair<PacketPtr, int>>& packets) {
+               const std::vector<std::pair<SharedPacket, int>>& packets) {
   if (packets.empty()) return false;
-  Mp4Writer writer;
-  if (!writer.Open(path, streams, false)) return false;
-  for (const auto& [pkt, stream] : packets)
-    if (!writer.Write(pkt.get(), stream)) return false;
-  Log("Clip: pistas %s", writer.Summary().c_str());
-  return writer.Close();
+  // Por cada paquete el índice guarda como mucho ~45 bytes (tamaño, duración,
+  // desfase de composición, posición y entrada stsc de su bloque, marca de
+  // keyframe), más las cabeceras de cada pista. Lo que sobra queda como una
+  // caja "free" de relleno: unos cientos de KB en un clip de decenas de MB.
+  int64_t reserve = 64 * 1024 + int64_t(streams.size()) * 16 * 1024 + int64_t(packets.size()) * 48;
+
+  // Escribir el clip no tiene prisa: con la E/S y la memoria en prioridad
+  // baja, el juego lee del disco antes que nosotros y las páginas del clip son
+  // las primeras que Windows suelta de la caché. Si aun así tarda más de 5 s
+  // (disco muy ocupado), se sigue con prioridad normal para que el clip no se
+  // quede a medias al cerrar Spectre.
+  BackgroundMode background;
+  ULONGLONG started = GetTickCount64();
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    Mp4Writer writer;
+    if (!writer.Open(path, streams, false, attempt == 0 ? reserve : 0)) return false;
+    for (const auto& [pkt, stream] : packets) {
+      if (background.Active() && GetTickCount64() - started > 5000) {
+        background.Leave();
+        Log("Clip: la escritura va lenta; sigue con prioridad normal");
+      }
+      if (!writer.Write(pkt.get(), stream)) return false;
+    }
+    if (attempt == 0) Log("Clip: pistas %s", writer.Summary().c_str());
+    if (writer.Close()) return true;
+    if (attempt == 0) Log("Clip: el índice no cupo en los %lld KB reservados; se reescribe con faststart", (long long)(reserve / 1024));
+  }
+  return false;
 }
 
 bool ProbeDuration(const std::string& path, double* seconds) {
@@ -236,6 +266,11 @@ bool Recorder::Start(const std::string& path, const StreamList& streams) {
     std::lock_guard lock(mutex_);
     queue_.clear();
   }
+  staged_.clear();
+  pendingBytes_ = 0;
+  peakQueueBytes_ = 0;
+  overflowed_ = false;
+  finished_ = false;
   running_ = true;
   thread_ = std::thread([this] {
     InstallThreadCrashHandler();
@@ -246,40 +281,100 @@ bool Recorder::Start(const std::string& path, const StreamList& streams) {
 }
 
 void Recorder::Push(const AVPacket* packet, int stream) {
-  if (!running_) return;
-  {
-    std::lock_guard lock(mutex_);
-    queue_.emplace_back(ClonePacket(packet), stream);
+  if (!running_ || overflowed_) return;
+  PacketPtr copy = ClonePacket(packet);
+  if (!copy) return;
+  size_t bytes = size_t(copy->size);
+  if (pendingBytes_ + bytes > kMaxQueueBytes) {
+    // El disco no da abasto: se corta aquí. El hilo de escritura vacía la cola,
+    // cierra el archivo (válido hasta este punto) y lo apunta en el log; aquí
+    // nada de escribir en disco, que este hilo tiene el anillo bloqueado.
+    overflowed_ = true;
+    cv_.notify_one();
+    if (onOverflow) onOverflow();
+    return;
   }
+  size_t pending = pendingBytes_ += bytes;
+  if (pending > peakQueueBytes_) peakQueueBytes_ = pending;
+  // Nunca esperar al hilo de escritura: va con prioridad de fondo y, si el
+  // juego ocupa la CPU, puede quedarse sin turno justo con el lock cogido. Los
+  // hilos de captura llegan aquí con el anillo bloqueado, así que esperarle
+  // pararía la captura. Si está ocupado, el paquete espera en staged_ (solo
+  // lo tocan los productores, que el anillo ya pone en fila) y entra en la
+  // cola con el siguiente.
+  std::unique_lock lock(mutex_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    staged_.emplace_back(std::move(copy), stream);
+    return;
+  }
+  for (auto& item : staged_) queue_.push_back(std::move(item));
+  staged_.clear();
+  queue_.emplace_back(std::move(copy), stream);
+  lock.unlock();
   cv_.notify_one();
 }
 
 void Recorder::Run() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  SetThreadEcoQoS(true);
+  // Con la cola al día, E/S y memoria en prioridad de fondo; si se acumulan
+  // más de 32 MB (el juego está leyendo mucho del disco, o el disco es lento),
+  // prioridad normal hasta bajar de 4 MB. Al parar, también normal: Stop()
+  // espera a que se vacíe la cola en el hilo de la interfaz.
+  BackgroundMode background;
   for (;;) {
     std::deque<std::pair<PacketPtr, int>> batch;
     {
+      // Con plazo: Push no avisa cuando deja el paquete en staged_ ni toma el
+      // lock al cortar la grabación, así que un aviso puede perderse.
       std::unique_lock lock(mutex_);
-      cv_.wait(lock, [&] { return !queue_.empty() || !running_; });
+      cv_.wait_for(lock, std::chrono::milliseconds(200),
+                   [&] { return !queue_.empty() || !running_ || overflowed_; });
       batch.swap(queue_);
-      if (batch.empty() && !running_) break;
+      if (batch.empty() && (!running_ || overflowed_)) break;
     }
-    for (auto& [pkt, stream] : batch) writer_.Write(pkt.get(), stream);
+    size_t backlog = pendingBytes_;
+    bool hurry = !running_ || backlog > (32u << 20);
+    if (background.Active() && hurry) background.Leave();
+    else if (!background.Active() && !hurry && backlog < (4u << 20)) background.Enter();
+    size_t written = 0;
+    for (auto& [pkt, stream] : batch) {
+      written += size_t(pkt->size);
+      writer_.Write(pkt.get(), stream);
+    }
+    pendingBytes_ -= written;
     seconds_ = writer_.WrittenSeconds();
   }
+  background.Leave();
+  if (overflowed_) {
+    // Se cerró por la cola: el archivo se termina aquí mismo, sin esperar a
+    // que alguien llame a Stop().
+    Log("Grabación: el disco no daba abasto (%zu MB en cola); se detuvo la grabación", peakQueueBytes_.load() >> 20);
+    Log("Grabación: pistas %s", writer_.Summary().c_str());
+    writer_.Close();
+    Log("Grabación cortada: %s (%.1f s)", path_.c_str(), seconds_.load());
+  }
+  finished_ = true;
 }
 
 void Recorder::Stop() {
   if (!thread_.joinable()) return;
   {
     std::lock_guard lock(mutex_);
+    // Lo que quedó esperando en staged_: los productores ya no llaman a Push
+    // (se desengancharon del anillo antes de Stop).
+    for (auto& item : staged_) queue_.push_back(std::move(item));
+    staged_.clear();
     running_ = false;
   }
   cv_.notify_one();
   thread_.join();
-  Log("Grabación: pistas %s", writer_.Summary().c_str());
-  writer_.Close();
-  Log("Grabación terminada: %s (%.1f s)", path_.c_str(), seconds_.load());
+  if (!overflowed_) {
+    Log("Grabación: pistas %s", writer_.Summary().c_str());
+    writer_.Close();
+    Log("Grabación terminada: %s (%.1f s, cola máxima %zu MB)", path_.c_str(), seconds_.load(),
+        peakQueueBytes_.load() >> 20);
+  }
 }
 
 } // namespace spectre

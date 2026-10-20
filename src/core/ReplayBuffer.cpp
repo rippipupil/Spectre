@@ -12,6 +12,7 @@ void ReplayBuffer::Configure(const StreamList& streams, double seconds, size_t m
   entries_.clear();
   bytes_ = 0;
   lastVideoTime_ = 0;
+  Publish();
 }
 
 void ReplayBuffer::Clear() {
@@ -19,12 +20,21 @@ void ReplayBuffer::Clear() {
   entries_.clear();
   bytes_ = 0;
   live_ = nullptr;
+  Publish();
 }
 
-void ReplayBuffer::SetSeconds(double seconds) {
+void ReplayBuffer::SetLimits(double seconds, size_t maxBytes) {
   std::lock_guard lock(mutex_);
   seconds_ = seconds;
+  maxBytes_ = maxBytes;
   Trim();
+  Publish();
+}
+
+void ReplayBuffer::Publish() {
+  publishedBytes_ = bytes_;
+  publishedSeconds_ = entries_.empty() ? 0.0 : lastVideoTime_ - entries_.front().time;
+  publishedMaxBytes_ = maxBytes_;
 }
 
 double ReplayBuffer::TimeOf(const AVPacket* p, int stream) const {
@@ -36,20 +46,19 @@ double ReplayBuffer::TimeOf(const AVPacket* p, int stream) const {
 void ReplayBuffer::Push(const AVPacket* packet, int stream) {
   std::lock_guard lock(mutex_);
   if (live_) live_(packet, stream);
-  Entry e{ClonePacket(packet), stream, TimeOf(packet, stream)};
+  Entry e{SharePacket(packet), stream, TimeOf(packet, stream)};
   if (!e.packet) return;
   if (stream == 0) lastVideoTime_ = e.time;
   bytes_ += size_t(e.packet->size);
   entries_.push_back(std::move(e));
   Trim();
+  Publish();
 }
 
 void ReplayBuffer::Trim() {
-  // Se guardan 5 s extra: un keyframe (uno cada 2 s) antes del inicio del
-  // clip, más lo que entra mientras SaveClip espera al audio (hasta 1,5 s).
   auto overLimit = [&] {
     if (entries_.empty()) return false;
-    return bytes_ > maxBytes_ || lastVideoTime_ - entries_.front().time > seconds_ + 5.0;
+    return bytes_ > maxBytes_ || lastVideoTime_ - entries_.front().time > seconds_ + kExtraSeconds;
   };
   if (!overLimit()) return;
   while (overLimit()) {
@@ -64,46 +73,56 @@ void ReplayBuffer::Trim() {
   }
 }
 
-std::vector<std::pair<PacketPtr, int>> ReplayBuffer::Snapshot(double seconds, double end) {
-  std::lock_guard lock(mutex_);
-  std::vector<std::pair<PacketPtr, int>> out;
-  if (entries_.empty()) return out;
-  end = std::min(end, lastVideoTime_);
-  double start = end - seconds;
-  // Último keyframe de vídeo con tiempo <= start (o el primero disponible).
-  size_t first = entries_.size();
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    const auto& e = entries_[i];
-    if (e.stream == 0 && (e.packet->flags & AV_PKT_FLAG_KEY)) {
-      if (first == entries_.size() || e.time <= start) first = i;
-      if (e.time > start) break;
+std::vector<std::pair<SharedPacket, int>> ReplayBuffer::Snapshot(double seconds, double end) {
+  std::vector<Entry> picked;
+  {
+    std::lock_guard lock(mutex_);
+    if (entries_.empty()) return {};
+    end = std::min(end, lastVideoTime_);
+    double start = end - seconds;
+    // Último keyframe de vídeo con tiempo <= start (o el primero disponible).
+    size_t first = entries_.size();
+    for (size_t i = 0; i < entries_.size(); ++i) {
+      const auto& e = entries_[i];
+      if (e.stream == 0 && (e.packet->flags & AV_PKT_FLAG_KEY)) {
+        if (first == entries_.size() || e.time <= start) first = i;
+        if (e.time > start) break;
+      }
     }
+    if (first == entries_.size()) return {};
+    picked.reserve(entries_.size());
+    for (size_t i = 0; i < entries_.size(); ++i)
+      if (InClip(i, first, end)) picked.push_back(entries_[i]);
   }
-  if (first == entries_.size()) return out;
-  for (size_t i : ClipEntries(first, end)) out.emplace_back(ClonePacket(entries_[i].packet.get()), entries_[i].stream);
+  std::stable_sort(picked.begin(), picked.end(), ClipOrder);
+  std::vector<std::pair<SharedPacket, int>> out;
+  out.reserve(picked.size());
+  for (auto& e : picked) out.emplace_back(std::move(e.packet), e.stream);
   return out;
 }
 
-std::vector<size_t> ReplayBuffer::ClipEntries(size_t first, double end) const {
+bool ReplayBuffer::InClip(size_t i, size_t first, double end) const {
   // Normalmente el audio entra en el anillo después que el vídeo del mismo
   // instante (~165 ms), pero si el encoder de vídeo entrega con más retraso
   // que eso puede haber audio con t >= keyframe guardado antes que él: se
-  // recorre todo el anillo y se ordena por tiempo.
-  std::vector<size_t> idx;
-  double firstTime = entries_[first].time;
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    const auto& e = entries_[i];
-    if (e.time > end || (e.stream == 0 ? i < first : e.time < firstTime)) continue;
-    idx.push_back(i);
-  }
+  // mira todo el anillo y luego se ordena por tiempo.
+  const auto& e = entries_[i];
+  if (e.time > end) return false;
+  return e.stream == 0 ? i >= first : e.time >= entries_[first].time;
+}
+
+bool ReplayBuffer::ClipOrder(const Entry& x, const Entry& y) {
   // Cada pista ya está en orden; a igual tiempo, el vídeo primero (el MP4
   // empieza en el keyframe).
-  std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-    const auto& x = entries_[a];
-    const auto& y = entries_[b];
-    if (x.time != y.time) return x.time < y.time;
-    return x.stream == 0 && y.stream != 0;
-  });
+  if (x.time != y.time) return x.time < y.time;
+  return x.stream == 0 && y.stream != 0;
+}
+
+std::vector<size_t> ReplayBuffer::ClipEntries(size_t first, double end) const {
+  std::vector<size_t> idx;
+  for (size_t i = 0; i < entries_.size(); ++i)
+    if (InClip(i, first, end)) idx.push_back(i);
+  std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) { return ClipOrder(entries_[a], entries_[b]); });
   return idx;
 }
 
@@ -125,17 +144,6 @@ void ReplayBuffer::AttachLive(PacketSink live) {
 void ReplayBuffer::DetachLive() {
   std::lock_guard lock(mutex_);
   live_ = nullptr;
-}
-
-size_t ReplayBuffer::Bytes() {
-  std::lock_guard lock(mutex_);
-  return bytes_;
-}
-
-double ReplayBuffer::DurationSeconds() {
-  std::lock_guard lock(mutex_);
-  if (entries_.empty()) return 0;
-  return lastVideoTime_ - entries_.front().time;
 }
 
 } // namespace spectre

@@ -1,5 +1,6 @@
 #include "encode/VideoEncoder.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 extern "C" {
@@ -8,48 +9,68 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 
+#include <mfapi.h>
+#include <objbase.h>
+
 #include <algorithm>
 #include <cstring>
+#include <thread>
 
 namespace spectre {
 
-namespace {
-
-struct Candidate {
-  const char* name;
-  const char* label;
-  bool zeroCopy; // acepta texturas D3D11 directamente
+struct EncoderCandidate {
+  std::string id;    // nombre en la configuración y en el log
+  std::string codec; // encoder de FFmpeg
+  std::string label;
+  bool zeroCopy = false; // acepta texturas D3D11 directamente
+  bool hardware = true;  // false: codifica en la CPU y le quita núcleos al juego
+  bool mfHardware = false; // Media Foundation con el MFT del driver (hw_encoding=1)
 };
 
+namespace {
+
+using Candidate = EncoderCandidate;
+
+// Primero todo lo que codifica en la GPU y, al final, la CPU. El MFT del
+// driver va justo después de los encoders nativos: funciona aunque FFmpeg no
+// pueda abrir NVENC o AMF (driver anterior al que piden sus cabeceras, runtime
+// de AMF que falta) y evita caer a la CPU, que es lo que da lag en el juego.
+// HEVC y AV1 no tienen opción por CPU: antes que eso, H.264 por GPU.
 const std::vector<Candidate>& CandidatesFor(const std::string& codec) {
   static const std::vector<Candidate> h264 = {
-      {"h264_nvenc", "NVIDIA NVENC (H.264)", true},
-      {"h264_amf", "AMD AMF (H.264)", true},
-      {"h264_qsv", "Intel QuickSync (H.264)", false},
-      {"h264_mf", "Media Foundation (H.264)", false},
-      {"libopenh264", "OpenH264 por software", false},
+      {"h264_nvenc", "h264_nvenc", "NVIDIA NVENC (H.264)", true},
+      {"h264_amf", "h264_amf", "AMD AMF (H.264)", true},
+      {"h264_qsv", "h264_qsv", "Intel QuickSync (H.264)"},
+      {"h264_mf_hw", "h264_mf", "Media Foundation por GPU (H.264)", false, true, true},
+      {"libopenh264", "libopenh264", "OpenH264 por CPU", false, false},
+      {"h264_mf", "h264_mf", "Media Foundation por CPU (H.264)", false, false},
   };
   static const std::vector<Candidate> hevc = {
-      {"hevc_nvenc", "NVIDIA NVENC (HEVC)", true},
-      {"hevc_amf", "AMD AMF (HEVC)", true},
-      {"hevc_qsv", "Intel QuickSync (HEVC)", false},
-      {"hevc_mf", "Media Foundation (HEVC)", false},
+      {"hevc_nvenc", "hevc_nvenc", "NVIDIA NVENC (HEVC)", true},
+      {"hevc_amf", "hevc_amf", "AMD AMF (HEVC)", true},
+      {"hevc_qsv", "hevc_qsv", "Intel QuickSync (HEVC)"},
+      {"hevc_mf_hw", "hevc_mf", "Media Foundation por GPU (HEVC)", false, true, true},
   };
   static const std::vector<Candidate> av1 = {
-      {"av1_nvenc", "NVIDIA NVENC (AV1)", true},
-      {"av1_amf", "AMD AMF (AV1)", true},
-      {"av1_qsv", "Intel QuickSync (AV1)", false},
+      {"av1_nvenc", "av1_nvenc", "NVIDIA NVENC (AV1)", true},
+      {"av1_amf", "av1_amf", "AMD AMF (AV1)", true},
+      {"av1_qsv", "av1_qsv", "Intel QuickSync (AV1)"},
   };
   if (codec == "hevc") return hevc;
   if (codec == "av1") return av1;
   return h264;
 }
 
-const Candidate* FindCandidate(const std::string& name) {
+// Un id de la lista o, para configuraciones antiguas, un encoder de FFmpeg
+// por su nombre con sus opciones por defecto.
+Candidate ResolveCandidate(const std::string& id) {
   for (const char* codec : {"h264", "hevc", "av1"})
     for (const auto& c : CandidatesFor(codec))
-      if (name == c.name) return &c;
-  return nullptr;
+      if (id == c.id) return c;
+  Candidate c{id, id, id};
+  c.hardware = id.find("nvenc") != std::string::npos || id.find("amf") != std::string::npos ||
+               id.find("qsv") != std::string::npos;
+  return c;
 }
 
 bool SupportsPixFmt(const AVCodec* codec, AVPixelFormat fmt) {
@@ -76,7 +97,7 @@ void UnlockGpu(void*) { GpuMutex().unlock(); }
 std::vector<EncoderInfo> CandidateEncoders(const std::string& codec) {
   std::vector<EncoderInfo> out;
   for (const auto& c : CandidatesFor(codec))
-    if (avcodec_find_encoder_by_name(c.name)) out.push_back({c.name, c.label});
+    if (avcodec_find_encoder_by_name(c.codec.c_str())) out.push_back({c.id, c.label});
   return out;
 }
 
@@ -86,28 +107,41 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
   device_->GetImmediateContext(&context_);
   packet_ = av_packet_alloc();
 
-  std::vector<std::string> order;
-  if (settings.preferred != "auto" && !settings.preferred.empty()) order.push_back(settings.preferred);
-  for (const auto& c : CandidatesFor(settings.codec)) order.push_back(c.name);
+  std::vector<Candidate> order;
+  auto add = [&](const Candidate& c) {
+    for (const auto& o : order)
+      if (o.id == c.id) return;
+    order.push_back(c);
+  };
+  if (settings.preferred != "auto" && !settings.preferred.empty()) add(ResolveCandidate(settings.preferred));
+  for (const auto& c : CandidatesFor(settings.codec)) add(c);
   // HEVC/AV1 no disponibles: se vuelve a H.264, que funciona en todas partes.
   if (settings.codec != "h264")
-    for (const auto& c : CandidatesFor("h264")) order.push_back(c.name);
+    for (const auto& c : CandidatesFor("h264")) add(c);
 
-  for (const auto& name : order) {
-    const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
+  bool triedHardware = false;
+  for (const auto& cand : order) {
+    const AVCodec* codec = avcodec_find_encoder_by_name(cand.codec.c_str());
     if (!codec) continue;
+    if (!cand.hardware && triedHardware)
+      Log("AVISO: ningún encoder por GPU se pudo abrir; se prueba %s, que codifica en la CPU y puede dar lag en "
+          "el juego (el motivo de cada fallo está en las líneas «ffmpeg:» de arriba)",
+          cand.id.c_str());
+    triedHardware |= cand.hardware;
     // Primero con las opciones de calidad; si el driver las rechaza, el mismo
     // encoder en modo simple antes que bajar a uno peor.
-    bool ok = TryOpen(codec, settings, false);
+    bool ok = TryOpen(codec, cand, settings, false);
     if (!ok) {
-      Log("%s no aceptó las opciones de calidad; se abre en modo simple", codec->name);
-      ok = TryOpen(codec, settings, true);
+      Log("%s no aceptó las opciones de calidad; se abre en modo simple", cand.id.c_str());
+      ok = TryOpen(codec, cand, settings, true);
     }
     if (ok) {
-      name_ = name;
-      Log("Encoder de vídeo: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s)", name_.c_str(), settings.width,
+      name_ = cand.id;
+      label_ = cand.label;
+      software_ = !cand.hardware;
+      Log("Encoder de vídeo: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s%s)", name_.c_str(), settings.width,
           settings.height, settings.fps, settings.quality.targetKbps, settings.quality.maxKbps,
-          settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema");
+          settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema", software_ ? ", CPU" : "");
       return true;
     }
   }
@@ -116,9 +150,9 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
   return false;
 }
 
-bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, bool simple) {
-  const Candidate* cand = FindCandidate(codec->name);
-  const bool zeroCopy = cand && cand->zeroCopy && SupportsPixFmt(codec, AV_PIX_FMT_D3D11);
+bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const VideoEncoderSettings& s,
+                           bool simple) {
+  const bool zeroCopy = cand.zeroCopy && SupportsPixFmt(codec, AV_PIX_FMT_D3D11);
   const QualityPlan& q = s.quality;
   const int level = q.level < 0 ? 2 : q.level; // personalizada usa las opciones de "alta"
   const int64_t target = int64_t(q.targetKbps) * 1000;
@@ -147,7 +181,12 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, 
   const std::string cq = std::to_string(q.cq);
   if (n.find("nvenc") != std::string::npos) {
     av_dict_set(&opts, "forced-idr", "1", 0);
-    av_dict_set(&opts, "delay", "0", 0);
+    // Con delay 0, cada Encode() esperaba a que NVENC terminase ese frame
+    // (nvEncLockBitstream bloqueante): con la GPU llena por el juego esa
+    // espera se comía la ranura siguiente y el clip salía a saltos. Con 2, el
+    // paquete de un frame se recoge al enviar el siguiente, cuando ya está
+    // hecho. Llega un frame más tarde al anillo; SaveClip ya espera más.
+    av_dict_set(&opts, "delay", "2", 0);
     av_dict_set(&opts, "rc-lookahead", "0", 0);
     av_dict_set(&opts, "tune", "hq", 0);
     if (simple) {
@@ -173,6 +212,11 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, 
       }
     }
   } else if (n.find("amf") != std::string::npos) {
+    // Por defecto AMF admite 16 frames en vuelo, cada uno con su textura NV12
+    // del pool: ~50 MB de VRAM a 1080p y ~200 MB a 4K que el juego no puede
+    // usar. Con 4 sobra para que el VCN no espere y, si se atasca, el hilo de
+    // vídeo se frena en vez de acumular frames.
+    av_dict_set(&opts, "async_depth", "4", 0);
     if (simple) {
       av_dict_set(&opts, "usage", "lowlatency", 0);
       av_dict_set(&opts, "quality", "speed", 0);
@@ -196,6 +240,13 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, 
       av_dict_set(&opts, "preset", kPreset[level], 0);
     }
   } else if (n.find("_mf") != std::string::npos) {
+    // hw_encoding=1: el MFT del fabricante (NVENC, VCN o QuickSync por dentro);
+    // sin él, FFmpeg usa el encoder de Microsoft en la CPU. En la GPU, perfil
+    // High; en la CPU se queda en Baseline, que cuesta menos.
+    if (cand.mfHardware) {
+      av_dict_set(&opts, "hw_encoding", "1", 0);
+      if (codec->id == AV_CODEC_ID_H264) ctx_->profile = AV_PROFILE_H264_HIGH;
+    }
     if (simple) {
       av_dict_set(&opts, "rate_control", "cbr", 0);
       av_dict_set(&opts, "scenario", "live_streaming", 0);
@@ -223,7 +274,27 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, 
   }
 
   if (ok) {
-    int err = avcodec_open2(ctx_, codec, &opts);
+    int err = 0;
+    if (n.find("_mf") != std::string::npos) {
+      // Media Foundation. FFmpeg pone en el MTA de COM el hilo que abre: en el
+      // de la interfaz, que es STA, el open falla («COM must not be in STA
+      // mode») y aun así su limpieza hace MFShutdown() y CoUninitialize(), que
+      // dejan sin COM a la interfaz y sin Media Foundation al proceso (webcam,
+      // listas de audio). Por eso se abre en un hilo propio y Close() cierra
+      // en otro. Si el open falla al buscar el MFT, FFmpeg 8.1 hace además un
+      // MFShutdown() de más: se lleva este MFStartup y no el de main. Si falla
+      // después, este se queda sin soltar y Media Foundation sigue arrancada,
+      // que no molesta.
+      bool mf = MediaFoundationAvailable();
+      if (mf) MFStartup(MF_VERSION, MFSTARTUP_LITE);
+      std::thread([&] {
+        InstallThreadCrashHandler();
+        err = avcodec_open2(ctx_, codec, &opts);
+      }).join();
+      mfStarted_ = mf && err >= 0;
+    } else {
+      err = avcodec_open2(ctx_, codec, &opts);
+    }
     if (err < 0) {
       Log("No se pudo abrir %s (%s): %s", codec->name, simple ? "simple" : "calidad", AvError(err).c_str());
       ok = false;
@@ -234,6 +305,7 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const VideoEncoderSettings& s, 
     avcodec_free_context(&ctx_);
     av_buffer_unref(&hwFrames_);
     av_buffer_unref(&hwDevice_);
+    av_buffer_pool_uninit(&framePool_);
     nv12_.Reset();
     for (auto& st : staging_) st.Reset();
   }
@@ -291,15 +363,35 @@ bool VideoEncoder::SetupStaging(const VideoEncoderSettings& s) {
   desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
   for (auto& st : staging_)
     if (FAILED(device_->CreateTexture2D(&desc, nullptr, &st))) return false;
+  // Los frames para el encoder salen de un pool: av_frame_get_buffer pedía
+  // ~3 MB nuevos por frame a 1080p, que Windows sirve con VirtualAlloc y
+  // páginas a cero (decenas de miles de fallos de página por segundo).
+  int size = av_image_get_buffer_size(swFormat_, s.width, s.height, kFrameAlign);
+  if (size <= 0) return false;
+  framePool_ = av_buffer_pool_init(size_t(size), nullptr);
+  if (!framePool_) return false;
   stagingPending_.fill(false);
   frameCounter_ = 0;
   return true;
 }
 
 void VideoEncoder::Close() {
+  if (mfStarted_) {
+    // Media Foundation (ver TryOpen): la limpieza de FFmpeg hace su
+    // CoUninitialize() en el hilo que cierra. Este hilo entra en el MTA para
+    // que esa llamada cierre lo suyo.
+    std::thread([this] {
+      InstallThreadCrashHandler();
+      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      avcodec_free_context(&ctx_);
+    }).join();
+    MFShutdown();
+    mfStarted_ = false;
+  }
   avcodec_free_context(&ctx_);
   av_buffer_unref(&hwFrames_);
   av_buffer_unref(&hwDevice_);
+  av_buffer_pool_uninit(&framePool_); // los frames que aún tenga el encoder se liberan al soltarlos
   av_packet_free(&packet_);
   nv12_.Reset();
   for (auto& st : staging_) st.Reset();
@@ -307,6 +399,8 @@ void VideoEncoder::Close() {
   context_.Reset();
   device_.Reset();
   name_.clear();
+  label_.clear();
+  software_ = false;
 }
 
 bool VideoEncoder::Encode(int64_t pts, const RenderFn& render, const PacketSink& sink) {
@@ -359,34 +453,42 @@ bool VideoEncoder::SendStaging(int index, const PacketSink& sink) {
   frame->format = swFormat_;
   frame->width = ctx_->width;
   frame->height = ctx_->height;
-  if (av_frame_get_buffer(frame, 0) < 0) {
+  frame->buf[0] = av_buffer_pool_get(framePool_);
+  if (!frame->buf[0] || av_image_fill_arrays(frame->data, frame->linesize, frame->buf[0]->data, swFormat_,
+                                             ctx_->width, ctx_->height, kFrameAlign) < 0) {
     av_frame_free(&frame);
     return false;
   }
+  // Solo Map y Unmap van con GpuMutex: la copia a memoria (1-2 ms a 1080p) ya
+  // no frena a la captura ni a la cámara. El puntero sigue siendo válido hasta
+  // Unmap y la textura staging solo la usa este hilo.
+  D3D11_MAPPED_SUBRESOURCE m;
   {
     GpuLock lock(GpuMutex());
-    D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(context_->Map(staging_[index].Get(), 0, D3D11_MAP_READ, 0, &m))) {
       av_frame_free(&frame);
       return false;
     }
-    const auto* y = static_cast<const uint8_t*>(m.pData);
-    const auto* uv = y + size_t(m.RowPitch) * ctx_->height;
-    av_image_copy_plane(frame->data[0], frame->linesize[0], y, int(m.RowPitch), ctx_->width, ctx_->height);
-    if (swFormat_ == AV_PIX_FMT_NV12) {
-      av_image_copy_plane(frame->data[1], frame->linesize[1], uv, int(m.RowPitch), ctx_->width, ctx_->height / 2);
-    } else {
-      // YUV420P (OpenH264): separar U y V.
-      for (int row = 0; row < ctx_->height / 2; ++row) {
-        const uint8_t* src = uv + size_t(row) * m.RowPitch;
-        uint8_t* u = frame->data[1] + size_t(row) * frame->linesize[1];
-        uint8_t* v = frame->data[2] + size_t(row) * frame->linesize[2];
-        for (int col = 0; col < ctx_->width / 2; ++col) {
-          u[col] = src[col * 2];
-          v[col] = src[col * 2 + 1];
-        }
+  }
+  const auto* y = static_cast<const uint8_t*>(m.pData);
+  const auto* uv = y + size_t(m.RowPitch) * ctx_->height;
+  av_image_copy_plane(frame->data[0], frame->linesize[0], y, int(m.RowPitch), ctx_->width, ctx_->height);
+  if (swFormat_ == AV_PIX_FMT_NV12) {
+    av_image_copy_plane(frame->data[1], frame->linesize[1], uv, int(m.RowPitch), ctx_->width, ctx_->height / 2);
+  } else {
+    // YUV420P (OpenH264): separar U y V.
+    for (int row = 0; row < ctx_->height / 2; ++row) {
+      const uint8_t* src = uv + size_t(row) * m.RowPitch;
+      uint8_t* u = frame->data[1] + size_t(row) * frame->linesize[1];
+      uint8_t* v = frame->data[2] + size_t(row) * frame->linesize[2];
+      for (int col = 0; col < ctx_->width / 2; ++col) {
+        u[col] = src[col * 2];
+        v[col] = src[col * 2 + 1];
       }
     }
+  }
+  {
+    GpuLock lock(GpuMutex());
     context_->Unmap(staging_[index].Get(), 0);
   }
   frame->pts = stagingPts_[index];

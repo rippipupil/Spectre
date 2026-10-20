@@ -31,15 +31,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # El nombre del zip cambia con cada versión de FFmpeg: se elige la
-          # rama estable más reciente publicada en la release "latest".
+          # Rama fija 8.1: BtbN compila la 8.0 y la 8.1 con las cabeceras de
+          # NVENC 13.0 (driver NVIDIA 570 o más) y la 8.2 en adelante con las
+          # 13.1 (driver 610 o más). Con la 9.0, las GTX 900/1000, que se
+          # quedan en la rama de drivers R580, no podían abrir NVENC y Spectre
+          # acababa codificando por CPU, que es justo lo que da lag en el
+          # juego. Si BtbN deja de publicar la 8.1, la CI falla aquí a
+          # propósito: hay que elegir otra rama mirando qué driver exige.
+          $branch = '8.1'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
           $release = Invoke-RestMethod -Headers $headers https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest
           $asset = $release.assets |
-            Where-Object { $_.name -match '^ffmpeg-n(\d+)\.(\d+)-latest-win64-lgpl-shared-.*\.zip$' } |
-            Sort-Object { [int]($_.name -replace '^ffmpeg-n(\d+)\.(\d+).*','$1') * 100 + [int]($_.name -replace '^ffmpeg-n(\d+)\.(\d+).*','$2') } -Descending |
+            Where-Object { $_.name -match "^ffmpeg-n$([regex]::Escape($branch))-latest-win64-lgpl-shared-.*\.zip$" } |
             Select-Object -First 1
-          if (-not $asset) { throw "No se encontró un build LGPL shared de FFmpeg" }
+          if (-not $asset) { throw "BtbN ya no publica FFmpeg $branch (LGPL, shared): elegir otra rama en build.yml" }
           Write-Host "FFmpeg: $($asset.name)"
           Invoke-WebRequest $asset.browser_download_url -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp

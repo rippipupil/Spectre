@@ -20,6 +20,10 @@ struct PacketDeleter {
 };
 using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
 PacketPtr ClonePacket(const AVPacket* p);
+// Paquete de solo lectura que comparten el anillo del replay y quien escribe
+// un clip: copiar la referencia cuesta un incremento atómico, no un clon.
+using SharedPacket = std::shared_ptr<const AVPacket>;
+SharedPacket SharePacket(const AVPacket* p);
 
 struct CodecParDeleter {
   void operator()(AVCodecParameters* p) const { avcodec_parameters_free(&p); }
