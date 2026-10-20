@@ -1,12 +1,17 @@
 #include "app/App.h"
 #include "app/CrashHandler.h"
+#include "app/Screenshot.h"
+#include "app/Sound.h"
 
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
 
 #include <shellscalingapi.h>
+#include <shobjidl.h>
+#include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <thread>
@@ -21,13 +26,16 @@ namespace spectre {
 namespace {
 constexpr wchar_t kMainClass[] = L"SpectreMain";
 
-enum HotkeyId { kHotkeyOverlay = 1, kHotkeySaveClip, kHotkeyRecord, kHotkeyReplay };
+// En el mismo orden que HotkeyText.
+enum HotkeyId { kHotkeyOverlay = 1, kHotkeySaveClip, kHotkeyRecord, kHotkeyReplay, kHotkeyScreenshot, kHotkeyMarker };
+constexpr int kHotkeyCount = 6;
 enum TimerId { kTimerGame = 1, kTimerHealth };
 enum TrayCommand {
-  kCmdOpen = 100,
-  kCmdSettings,
+  kCmdOpenApp = 100,
+  kCmdOpenPanel,
   kCmdSaveClip,
   kCmdRecord,
+  kCmdScreenshot,
   kCmdReplay,
   kCmdFolder,
   kCmdQuit = 199,
@@ -36,12 +44,41 @@ enum TrayCommand {
 constexpr ULONGLONG kGameGraceMs = 15000; // el juego sigue "activo" 15 s después de perder el foco
 constexpr ULONGLONG kToastMs = 2600;
 constexpr size_t kPanelClips = 3;
-constexpr size_t kSettingsClips = 30;
+constexpr double kMaxMarkerAge = 5 * 60 + 10;          // segundos: el clip más largo y un margen
+constexpr uint64_t kLowDiskBytes = uint64_t(1) << 30; // menos de 1 GB libre: se avisa al guardar
+
+const std::string& HotkeyText(const HotkeyConfig& h, int index) {
+  switch (index) {
+  case 0: return h.overlay;
+  case 1: return h.saveClip;
+  case 2: return h.toggleRecording;
+  case 3: return h.toggleReplay;
+  case 4: return h.screenshot;
+  default: return h.marker;
+  }
+}
+
+std::string& HotkeyText(HotkeyConfig& h, int index) {
+  return const_cast<std::string&>(HotkeyText(std::as_const(h), index));
+}
 
 bool SameHotkeys(const HotkeyConfig& a, const HotkeyConfig& b) {
-  return a.overlay == b.overlay && a.saveClip == b.saveClip && a.toggleRecording == b.toggleRecording &&
-         a.toggleReplay == b.toggleReplay;
+  for (int i = 0; i < kHotkeyCount; ++i)
+    if (HotkeyText(a, i) != HotkeyText(b, i)) return false;
+  return true;
 }
+
+bool StartsWith(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
+
+const char* QualityName(const std::string& quality) {
+  if (quality == "baja") return "Baja";
+  if (quality == "media") return "Media";
+  if (quality == "maxima") return "Máxima";
+  if (quality == "personalizada") return "Personalizada";
+  return "Alta";
+}
+
+std::string FileNameOf(const std::string& path) { return Narrow(std::filesystem::path(Widen(path)).filename().wstring()); }
 
 float MonitorScale(HMONITOR monitor) {
   UINT dpiX = 96, dpiY = 96;
@@ -91,6 +128,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
 
   menu_.Init(instance, OverlayWindow::Kind::Menu);
   toast_.Init(instance, OverlayWindow::Kind::Toast);
+  appWindow_.Init(instance);
   // Alt+F4 cierra el menú, siempre a través de la cola de mensajes (nunca
   // dentro del WndProc ni del frame de la ventana). Perder el foco no lo
   // cierra: el panel se queda abierto hasta que el usuario lo cierra con
@@ -98,25 +136,41 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   menu_.onCloseRequested = [this] { PostMessageW(hwnd_, WM_SPECTRE_CLOSE_MENU, menuGeneration_, 0); };
   keyboard_.onCloseRequested = menu_.onCloseRequested;
 
+  // Panel (Alt+Z)
   menuActions_.saveClip = [this] { Defer([this] { SaveClip(); }); };
   menuActions_.toggleRecording = [this] { Defer([this] { ToggleRecording(); }); };
+  menuActions_.screenshot = [this] { Defer([this] { CaptureScreenshot(); }); };
   menuActions_.toggleReplay = [this] { Defer([this] { ToggleReplay(); }); };
   menuActions_.toggleMic = [this] { Defer([this] { ToggleMicrophone(); }); };
   menuActions_.toggleCamera = [this] { Defer([this] { ToggleCamera(); }); };
   menuActions_.setClipSeconds = [this](int seconds) { Defer([this, seconds] { SetClipSeconds(seconds); }); };
-  menuActions_.openSettings = [this] { Defer([this] { OpenSettings(); }); };
-  menuActions_.backToPanel = [this] { Defer([this] { BackToPanel(); }); };
-  menuActions_.close = [this] { Defer([this] { CloseMenu(); }); };
-  menuActions_.quit = [this] { Defer([this] { Quit(); }); };
-  menuActions_.apply = [this](const Config& c) { Defer([this, c] { ApplyConfig(c); }); };
-  menuActions_.refreshClips = [this] {
-    menuModel_.clips = ListClips(ResolveOutputDir(config_), kSettingsClips);
-    menuModel_.selectedClip = -1;
+  menuActions_.setQuality = [this](const std::string& quality) { Defer([this, quality] { SetQuality(quality); }); };
+  // La ventana de Spectre se abre delante: el panel se cierra sin devolver el
+  // foco al juego (si no, la ventana se quedaría detrás).
+  menuActions_.openApp = [this] {
+    Defer([this] {
+      CloseMenu(false);
+      OpenApp();
+    });
   };
-  // Abrir un clip o la carpeta lleva a otra ventana: el panel se cierra, como
-  // hacía al perder el foco (si no, se quedaría encima del reproductor). Sin
-  // devolver el foco al juego: ShellExecute vuelve antes de que exista la
-  // ventana del reproductor y este se abriría detrás.
+  menuActions_.openLibrary = [this] {
+    Defer([this] {
+      CloseMenu(false);
+      OpenApp(AppPage::Library);
+    });
+  };
+  menuActions_.openClip = [this](const std::string& path) {
+    Defer([this, path] {
+      CloseMenu(false);
+      OpenApp();
+      if (appWindow_.Visible()) appUi_.View(appModel_, path, AppPage::Library);
+    });
+  };
+  menuActions_.close = [this] { Defer([this] { CloseMenu(); }); };
+  // Abrir la carpeta lleva a otra ventana: el panel se cierra, como hacía al
+  // perder el foco (si no, se quedaría encima del Explorador). Sin devolver el
+  // foco al juego: ShellExecute vuelve antes de que exista la ventana nueva y
+  // esta se abriría detrás.
   menuActions_.openPath = [this](const std::string& path) {
     Defer([this, path] {
       OpenPath(path);
@@ -129,62 +183,108 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
       CloseMenu(false);
     });
   };
-  menuActions_.probeDuration = [](const std::string& path) {
-    double seconds = 0;
-    return ProbeDuration(path, &seconds) ? seconds : 0.0;
-  };
-  menuActions_.checkUpdates = [this] { updater_.Check(); };
-  menuActions_.installUpdate = [this] { updater_.Download(hwnd_); };
-  menuActions_.cancelUpdate = [this] { updater_.Cancel(); };
-  menuActions_.trim = [this](const std::string& path, double start, double end) {
-    HWND hwnd = hwnd_;
-    auto pending = std::make_shared<PendingWrite>();
-    std::thread([hwnd, path, start, end, pending] {
-      InstallThreadCrashHandler();
-      std::string error;
-      bool ok = false;
-      std::filesystem::path out;
-      try {
-        auto in = std::filesystem::path(Widen(path));
-        std::wstring base = in.stem().wstring() + L"_recorte_" + Widen(TimestampForFile());
-        out = in.parent_path() / (base + L".mp4");
-        std::error_code ec;
-        for (int i = 2; std::filesystem::exists(out, ec); ++i)
-          out = in.parent_path() / (base + L"_" + std::to_wstring(i) + L".mp4");
-        ok = TrimFile(path, Narrow(out.wstring()), start, end, &error);
-      } catch (const std::exception& e) {
-        error = std::string("No se pudo recortar: ") + e.what();
-        Log("Recorte: excepción: %s", e.what());
-      }
-      auto* msg = new std::string(ok ? "Recorte guardado: " + Narrow(out.filename().wstring()) : error);
-      if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
-    }).detach();
-    Defer([this] { Toast("Recortando el clip..."); });
-  };
 
-  if (!RegisterHotkeys()) Toast(menuModel_.hotkeyError, true);
+  // Ventana de Spectre
+  appWindow_.onCloseRequested = [this] { Defer([this] { AppCloseRequested(); }); };
+  appWindow_.onModalFrame = [this] { RenderApp(); };
+  appWindow_.onMinimized = [this] { appUi_.PauseMedia(); };
+  appActions_.saveClip = menuActions_.saveClip;
+  appActions_.toggleRecording = menuActions_.toggleRecording;
+  appActions_.screenshot = menuActions_.screenshot;
+  appActions_.toggleReplay = menuActions_.toggleReplay;
+  appActions_.toggleMic = menuActions_.toggleMic;
+  appActions_.toggleCamera = menuActions_.toggleCamera;
+  appActions_.setClipSeconds = menuActions_.setClipSeconds;
+  appActions_.apply = [this] { Defer([this] { ApplySettings(); }); };
+  appActions_.discard = [this] { Defer([this] { BeginSettingsEdit(); }); };
+  appActions_.loadDevices = [this] { LoadDevices(); };
+  appActions_.rescan = [this] { Defer([this] { RescanLibrary(); }); };
+  appActions_.openPath = [this](const std::string& path) { Defer([path] { OpenPath(path); }); };
+  appActions_.showInFolder = [this](const std::string& path) { Defer([path] { ShowInFolder(path); }); };
+  appActions_.trim = [this](const std::string& path, double start, double end) {
+    Defer([this, path, start, end] { TrimClip(path, start, end); });
+  };
+  appActions_.copyToClipboard = [this](const std::string& path) {
+    Defer([this, path] {
+      if (CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, path))
+        Toast("Copiado. Pégalo con Ctrl+V en Discord, WhatsApp o una carpeta");
+      else
+        Toast("No se pudo copiar el archivo al portapapeles", true);
+    });
+  };
+  appActions_.setFavorite = [this](const std::string& path, bool favorite) {
+    library_->SetFavorite(path, favorite);
+    for (auto& item : appModel_.items)
+      if (item.path == path) item.favorite = favorite;
+    appWindow_.Invalidate();
+  };
+  appActions_.setDuration = [this](const MediaItem& item, double seconds) {
+    library_->SetDuration(item.path, item.size, item.modified, seconds);
+    // Con la duración ya se pueden colocar las marcas de un clip (se guardaron contando desde el final).
+    for (auto& it : appModel_.items)
+      if (it.path == item.path) library_->Annotate(it);
+  };
+  appActions_.rename = [this](const std::string& path, const std::string& stem, std::string* newPath,
+                              std::string* error) {
+    if (!library_->Rename(path, stem, newPath, error)) return false;
+    RescanLibrary();
+    return true;
+  };
+  appActions_.recycle = [this](const std::string& path) {
+    Defer([this, path] {
+      std::string error;
+      if (library_->Recycle(path, &error)) Toast("Movido a la papelera: " + FileNameOf(path));
+      else Toast(error, true);
+      RescanLibrary();
+    });
+  };
+  appActions_.toast = [this](const std::string& text, bool error) { Toast(text, error); };
+  SettingsActions& settings = appActions_.settings;
+  settings.checkUpdates = [this] { updater_.Check(); };
+  settings.installUpdate = [this] { updater_.Download(hwnd_); };
+  settings.cancelUpdate = [this] { updater_.Cancel(); };
+  settings.quit = [this] { Defer([this] { Quit(); }); };
+  settings.openPath = appActions_.openPath;
+  settings.suspendHotkeys = [this](bool suspend) { SuspendHotkeys(suspend); };
+  settings.chooseFolder = [this] { Defer([this] { ChooseOutputFolder(); }); };
+  settings.refreshStorage = appActions_.rescan;
+
+  if (!RegisterHotkeys()) Toast(hotkeyError_, true);
   SetTimer(hwnd_, kTimerGame, 2000, nullptr);
   SetTimer(hwnd_, kTimerHealth, 1000, nullptr);
   CheckGame();
   UpdatePipeline();
-  if (updated)
-    Toast("Spectre se ha actualizado a la versión " SPECTRE_VERSION ". Tus ajustes se conservan.");
-  else if (!startInTray)
-    Toast("Spectre está en la bandeja del sistema. Pulsa " + config_.hotkeys.overlay + " para abrir el panel.");
+  EnforceStorageLimit();
+  if (updated) Toast("Spectre se ha actualizado a la versión " SPECTRE_VERSION ". Tus ajustes se conservan.");
+  // Abrir Spectre (menú Inicio, el exe, el instalador) abre su ventana. Con
+  // Windows (--tray) arranca solo en la bandeja, y tras una actualización
+  // tampoco se abre encima de un juego a pantalla completa.
+  if (!startInTray && !(updated && GameActive())) OpenApp();
 
-  // Bucle de mensajes: bloqueante cuando no hay nada en pantalla (0 % CPU),
-  // ~60 fps solo mientras el menú o un aviso están visibles.
+  // Bucle de mensajes: bloqueante cuando no hay nada en pantalla (0 % CPU).
+  // El menú y los avisos van a ~60 fps mientras se ven; la ventana de Spectre
+  // solo dibuja cuando algo cambia (ratón, teclado, un vídeo, un reloj), como
+  // mucho a ~60 fps, y nunca minimizada.
   MSG msg;
   ULONGLONG lastFrame = 0;
   while (!quitting_) {
-    bool animating = menu_.Visible() || toast_.Visible();
-    if (!animating) {
+    ULONGLONG now = GetTickCount64();
+    DWORD wait = INFINITE;
+    if (menu_.Visible() || toast_.Visible()) wait = now - lastFrame >= 16 ? 0 : DWORD(16 - (now - lastFrame));
+    if (appWindow_.Visible()) {
+      DWORD appWait = appWindow_.WaitMs(now);
+      if (appWait != INFINITE) {
+        ULONGLONG since = now - lastAppFrame_;
+        appWait = std::max<DWORD>(appWait, since >= 16 ? 0 : DWORD(16 - since));
+      }
+      wait = std::min(wait, appWait);
+    }
+    if (!deferred_.empty()) wait = 0;
+    if (wait == INFINITE) {
       if (GetMessageW(&msg, nullptr, 0, 0) <= 0) break;
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
-    } else {
-      ULONGLONG now = GetTickCount64();
-      DWORD wait = now - lastFrame >= 16 ? 0 : DWORD(16 - (now - lastFrame));
+    } else if (wait > 0) {
       MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -193,13 +293,19 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
       DispatchMessageW(&msg);
     }
     if (quitting_) break;
-    ULONGLONG now = GetTickCount64();
+    now = GetTickCount64();
     if ((menu_.Visible() || toast_.Visible()) && now - lastFrame >= 16) {
       lastFrame = now;
       RenderOverlays();
     }
+    if (appWindow_.Visible() && appWindow_.NeedsFrame(now) && now - lastAppFrame_ >= 16) {
+      lastAppFrame_ = now;
+      RenderApp();
+    }
+    RunDeferred();
   }
 
+  CloseApp();
   menu_.Hide();
   toast_.Hide();
   pipeline_.Stop();
@@ -222,17 +328,25 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
 
 // ---------------------------------------------------------------- acciones
 
-std::string App::OutputName(const char* prefix) {
-  bool gameActive = game_ && GetTickCount64() - lastGameSeen_ < kGameGraceMs;
+bool App::GameActive() const { return game_ && GetTickCount64() - lastGameSeen_ < kGameGraceMs; }
+
+std::string App::OutputName(const char* prefix, const char* extension) {
+  bool gameActive = GameActive();
   std::string app = gameActive && !game_->exeName.empty() ? game_->exeName : "Escritorio";
   std::string base = SanitizeFileName(std::string(prefix) + "_" + app + "_" + TimestampForFile());
   auto dir = std::filesystem::path(Widen(ResolveOutputDir(config_)));
+  // Ajustes > Replay > Una carpeta por juego (lo del escritorio va a la principal).
+  if (config_.folderPerGame && gameActive && !game_->exeName.empty()) {
+    dir /= Widen(SanitizeFileName(game_->exeName));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+  }
   // Dos clips en el mismo segundo no pueden compartir archivo: el segundo
   // todavía se está escribiendo cuando se pide el tercero, así que también se
   // recuerdan los nombres entregados.
   std::string path;
   for (int i = 1;; ++i) {
-    std::string name = base + (i > 1 ? "_" + std::to_string(i) : "") + ".mp4";
+    std::string name = base + (i > 1 ? "_" + std::to_string(i) : "") + extension;
     path = Narrow((dir / Widen(name)).wstring());
     std::error_code ec;
     bool used = std::filesystem::exists(Widen(path), ec) ||
@@ -244,19 +358,46 @@ std::string App::OutputName(const char* prefix) {
   return path;
 }
 
+std::string App::LowDiskNote() {
+  uint64_t free = FreeDiskBytes(ResolveOutputDir(config_));
+  if (free == 0 || free >= kLowDiskBytes) return {};
+  return ". Queda poco espacio en el disco (" + FormatBytes(free) + ")";
+}
+
 void App::SaveClip() {
   if (!pipeline_.Running() || !config_.replayEnabled) {
     Toast("El replay no está activo", true);
     return;
   }
-  pipeline_.SaveClip(OutputName("Clip"), double(config_.clipSeconds));
+  std::string path = OutputName("Clip");
+  // Las marcas de los últimos segundos van con el clip, que acaba justo ahora.
+  int64_t now = QpcNow();
+  std::vector<double> tail;
+  for (int64_t at : markers_) {
+    double ago = QpcToSeconds(now - at);
+    if (ago >= 0 && ago <= double(config_.clipSeconds)) tail.push_back(ago);
+  }
+  library_->SetTailMarkers(path, std::move(tail));
+  pipeline_.SaveClip(path, double(config_.clipSeconds));
+}
+
+void App::OnRecordingStopped(const std::string& path) {
+  if (!path.empty() && !recordMarkers_.empty()) library_->SetMarkers(path, recordMarkers_);
+  recordMarkers_.clear();
+  recordStartQpc_ = 0;
+  if (appWindow_.Visible()) RescanLibrary();
+  if (menu_.Visible()) RefreshPanelClips();
+  EnforceStorageLimit();
 }
 
 void App::ToggleRecording() {
   if (pipeline_.Recording()) {
     std::string path = pipeline_.Stats().recordPath;
     pipeline_.StopRecording();
-    Toast("Grabación guardada: " + Narrow(std::filesystem::path(Widen(path)).filename().wstring()));
+    if (config_.soundOnSave) PlayCue(Cue::Saved);
+    std::string note = LowDiskNote();
+    Toast("Grabación guardada: " + FileNameOf(path) + note, !note.empty());
+    OnRecordingStopped(path);
     UpdatePipeline(std::exchange(restartPending_, false));
     InstallPendingUpdate();
     return;
@@ -265,16 +406,21 @@ void App::ToggleRecording() {
     Toast("No se pudo iniciar la captura. Prueba otro método en Ajustes > Vídeo o mira spectre.log", true);
     return;
   }
-  if (pipeline_.StartRecording(OutputName("Grabacion")))
-    Toast("Grabando. Pulsa " + config_.hotkeys.toggleRecording + " para detener.");
-  else
+  if (pipeline_.StartRecording(OutputName("Grabacion"))) {
+    recordStartQpc_ = QpcNow();
+    recordMarkers_.clear();
+    std::string note = LowDiskNote();
+    Toast("Grabando. Pulsa " + config_.hotkeys.toggleRecording + " para detener" + (note.empty() ? "." : note),
+          !note.empty());
+  } else {
     Toast("No se pudo iniciar la grabación", true);
+  }
 }
 
 void App::ToggleReplay() {
   config_.replayEnabled = !config_.replayEnabled;
   SaveConfig(config_);
-  menuModel_.config.replayEnabled = config_.replayEnabled;
+  SyncModels();
   if (pipeline_.Running()) pipeline_.SetReplaySeconds(config_.replayEnabled ? config_.clipSeconds : 3.0);
   UpdatePipeline();
   Toast(config_.replayEnabled ? "Replay activado" : "Replay desactivado");
@@ -287,7 +433,7 @@ void App::ToggleMicrophone() {
     // El micrófono ya se está capturando: se silencia al vuelo y el replay no se pierde.
     config_.captureMic = next.captureMic;
     SaveConfig(config_);
-    menuModel_.config.captureMic = config_.captureMic;
+    SyncModels();
     pipeline_.SetMicMuted(!config_.captureMic);
     Toast(config_.captureMic ? "Micrófono activado" : "Micrófono silenciado");
   } else {
@@ -315,6 +461,81 @@ void App::SetClipSeconds(int seconds) {
   ApplyConfig(next, true);
 }
 
+void App::SetQuality(const std::string& quality) {
+  if (quality == config_.quality) return;
+  Config next = config_;
+  next.quality = quality;
+  bool restarts = pipeline_.Running() && !pipeline_.Recording();
+  ApplyConfig(next, true);
+  if (!restartPending_)
+    Toast(std::string("Calidad ") + QualityName(config_.quality) + (restarts ? ". El replay empieza de cero." : ""));
+}
+
+void App::CaptureScreenshot() {
+  ScreenshotRequest request;
+  if (config_.captureMode == "game" && GameActive() && IsWindow(game_->window)) {
+    request.target.window = game_->window;
+  } else {
+    // El monitor de lo que se está mirando: el juego (también con el panel
+    // abierto encima) o la ventana activa; desde la bandeja, el del cursor.
+    HWND looking = menu_.Visible() && previousForeground_ ? previousForeground_ : GetForegroundWindow();
+    HMONITOR monitor = looking && looking != hwnd_ ? MonitorFromWindow(looking, MONITOR_DEFAULTTONULL) : nullptr;
+    if (!monitor) {
+      POINT cursor{};
+      GetCursorPos(&cursor);
+      monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+    }
+    request.target.monitor = monitor;
+  }
+  request.cursor = config_.captureCursor;
+  request.jpeg = config_.screenshotFormat == "jpg";
+  request.path = OutputName("Captura", request.jpeg ? ".jpg" : ".png");
+  HWND hwnd = hwnd_;
+  TakeScreenshot(std::move(request), [hwnd](bool ok, const std::string& text) {
+    auto* msg = new std::string(ok ? "Captura guardada: " + FileNameOf(text) : text);
+    if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
+  });
+}
+
+void App::AddMarker() {
+  if (!pipeline_.Running()) {
+    Toast("No se está capturando nada: la marca no iría a ningún clip", true);
+    return;
+  }
+  int64_t now = QpcNow();
+  markers_.push_back(now);
+  while (!markers_.empty() && QpcToSeconds(now - markers_.front()) > kMaxMarkerAge) markers_.pop_front();
+  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(QpcToSeconds(now - recordStartQpc_));
+  if (config_.soundOnSave) PlayCue(Cue::Marker);
+  Toast(pipeline_.Recording() ? "Marca añadida a la grabación y al replay" : "Marca añadida: saldrá en el próximo clip");
+}
+
+void App::TrimClip(const std::string& path, double start, double end) {
+  HWND hwnd = hwnd_;
+  auto pending = std::make_shared<PendingWrite>();
+  std::thread([hwnd, path, start, end, pending] {
+    InstallThreadCrashHandler();
+    std::string error;
+    bool ok = false;
+    std::filesystem::path out;
+    try {
+      auto in = std::filesystem::path(Widen(path));
+      std::wstring base = in.stem().wstring() + L"_recorte_" + Widen(TimestampForFile());
+      out = in.parent_path() / (base + L".mp4");
+      std::error_code ec;
+      for (int i = 2; std::filesystem::exists(out, ec); ++i)
+        out = in.parent_path() / (base + L"_" + std::to_wstring(i) + L".mp4");
+      ok = TrimFile(path, Narrow(out.wstring()), start, end, &error);
+    } catch (const std::exception& e) {
+      error = std::string("No se pudo recortar: ") + e.what();
+      Log("Recorte: excepción: %s", e.what());
+    }
+    auto* msg = new std::string(ok ? "Recorte guardado: " + Narrow(out.filename().wstring()) : error);
+    if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
+  }).detach();
+  Toast("Recortando el clip...");
+}
+
 void App::ToggleMenu() {
   if (menu_.Visible()) CloseMenu();
   else OpenMenu();
@@ -331,19 +552,6 @@ RECT App::MenuRect() const {
   // el monitor entero.
   const RECT& work = menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
   float scale = MonitorScale(menuMonitor_);
-  if (menuMode_ == MenuMode::Settings) {
-    // Ajustes: la ventana es solo el cuadro, centrado, y DrawSettings lo llena.
-    // Alrededor no hay ventana: los clics llegan al juego y los búferes son del
-    // tamaño del cuadro, no del monitor.
-    LONG margin = LONG(48 * scale);
-    LONG w = std::clamp<LONG>(LONG(std::ceil(kSettingsWidth * scale)), 1,
-                              std::max<LONG>(1, work.right - work.left - margin));
-    LONG h = std::clamp<LONG>(LONG(std::ceil(kSettingsHeight * scale)), 1,
-                              std::max<LONG>(1, work.bottom - work.top - margin));
-    LONG left = work.left + (work.right - work.left - w) / 2;
-    LONG top = work.top + (work.bottom - work.top - h) / 2;
-    return RECT{left, top, left + w, top + h};
-  }
   // Panel: franja estrecha pegada al borde derecho, como el overlay de NVIDIA.
   // La ventana ocupa todo el alto del área de trabajo; solo el panel recibe
   // clics (SetHitRegion) y el resto de la franja es transparente.
@@ -360,7 +568,6 @@ void App::PlaceMenu(bool activate) {
   // Un juego topmost (GLFW, Unity...) vuelve a subir al activarse: el panel se
   // mantiene por encima mientras esté abierto.
   menu_.StayAbove(menuScreen_.fullscreen ? menuScreen_.window : nullptr);
-  if (menuMode_ == MenuMode::Settings) menu_.SetHitRegion(nullptr); // la ventana es el cuadro entero
 }
 
 void App::OpenMenu() {
@@ -373,13 +580,11 @@ void App::OpenMenu() {
   gameRestored_ = false;
   menuHitValid_ = false;
   mouseWasDown_ = AnyMouseButtonDown();
-  menuMode_ = MenuMode::Panel;
   menuModel_ = MenuModel{};
   menuModel_.config = config_;
   menuModel_.openedAt = GetTickCount64();
-  menuModel_.outputDir = ResolveOutputDir(config_);
-  menuModel_.clips = ListClips(menuModel_.outputDir, kPanelClips);
-  RefreshMenuModel(false);
+  RefreshPanelClips();
+  RefreshMenuModel();
   // El panel va al monitor de la ventana activa (el juego), con su DPI; sin
   // ventana, al del cursor. Sobre un juego a pantalla completa se decide si
   // coge el foco o se abre sin activarse (ShouldActivateMenu).
@@ -387,37 +592,6 @@ void App::OpenMenu() {
   menuMonitor_ = menuScreen_.monitor;
   if (menuScreen_.fullscreen) Log("Panel sobre %s", menuScreen_.Describe().c_str());
   menuActivated_ = ShouldActivateMenu(menuScreen_);
-  PlaceMenu(menuActivated_);
-  SyncKeyboardHook();
-}
-
-void App::OpenSettings() {
-  if (!menu_.Visible()) OpenMenu();
-  menuMode_ = MenuMode::Settings;
-  menuModel_.config = config_;
-  menuModel_.dirty = false;
-  menuModel_.selectedClip = -1;
-  menuModel_.openedAt = GetTickCount64();
-  if (!menuModel_.devicesLoaded) {
-    RefreshMenuModel(true);
-    menuModel_.devicesLoaded = true;
-  }
-  menuModel_.clips = ListClips(menuModel_.outputDir, kSettingsClips);
-  menuHitValid_ = false; // la zona de clic se vuelve a calcular en el siguiente frame
-  PlaceMenu(menuActivated_);
-  SyncKeyboardHook();
-}
-
-void App::BackToPanel() {
-  if (!menu_.Visible()) return;
-  menuMode_ = MenuMode::Panel;
-  menuModel_.config = config_; // descarta lo no aplicado
-  menuModel_.dirty = false;
-  menuModel_.selectedClip = -1;
-  menuModel_.panelHeight = 0;
-  menuModel_.openedAt = GetTickCount64();
-  menuModel_.clips = ListClips(menuModel_.outputDir, kPanelClips);
-  menuHitValid_ = false;
   PlaceMenu(menuActivated_);
   SyncKeyboardHook();
 }
@@ -450,13 +624,10 @@ void App::EndMenuSession(bool giveFocusBack) {
 void App::ApplyConfig(const Config& next, bool quiet) {
   Config old = config_;
   config_ = next;
-  config_.hotkeys.overlay = NormalizeHotkey(config_.hotkeys.overlay);
-  config_.hotkeys.saveClip = NormalizeHotkey(config_.hotkeys.saveClip);
-  config_.hotkeys.toggleRecording = NormalizeHotkey(config_.hotkeys.toggleRecording);
-  config_.hotkeys.toggleReplay = NormalizeHotkey(config_.hotkeys.toggleReplay);
-  if (config_.outputDir != old.outputDir) menuModel_.outputDir = ResolveOutputDir(config_);
+  for (int i = 0; i < kHotkeyCount; ++i)
+    HotkeyText(config_.hotkeys, i) = NormalizeHotkey(HotkeyText(config_.hotkeys, i));
   SaveConfig(config_);
-  menuModel_.config = config_;
+  SyncModels();
 
   if (old.autostart != config_.autostart && !SetAutostart(config_.autostart))
     Toast("No se pudo cambiar el inicio con Windows", true);
@@ -464,15 +635,24 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   bool hotkeysOk = true;
   if (!SameHotkeys(old.hotkeys, config_.hotkeys)) {
     UnregisterHotkeys();
-    menuModel_.hotkeyError.clear();
-    hotkeysOk = RegisterHotkeys();
-    if (!hotkeysOk) {
-      // Se vuelve a los atajos anteriores: mejor eso que quedarse sin Alt+Z.
-      UnregisterHotkeys();
-      config_.hotkeys = old.hotkeys;
-      RegisterHotkeys();
-      SaveConfig(config_);
-      menuModel_.config.hotkeys = config_.hotkeys;
+    if (!RegisterHotkeys()) {
+      // Un atajo nuevo que no se pudo registrar vuelve al anterior: mejor eso
+      // que quedarse sin Alt+Z. Los que ya fallaban antes se quedan como están.
+      std::string error = hotkeyError_;
+      bool reverted = false;
+      for (int i = 0; i < kHotkeyCount; ++i) {
+        if (!(hotkeyFailedMask_ & (1u << i)) || HotkeyText(config_.hotkeys, i) == HotkeyText(old.hotkeys, i)) continue;
+        HotkeyText(config_.hotkeys, i) = HotkeyText(old.hotkeys, i);
+        reverted = true;
+      }
+      if (reverted) {
+        UnregisterHotkeys();
+        RegisterHotkeys();
+        SaveConfig(config_);
+        SyncModels();
+      }
+      hotkeyError_ = error;
+      hotkeysOk = false;
     }
     SyncKeyboardHook(); // el gancho deja pasar los atajos nuevos
   }
@@ -490,7 +670,12 @@ void App::ApplyConfig(const Config& next, bool quiet) {
     pipeline_.SetReplaySeconds(config_.replayEnabled ? config_.clipSeconds : 3.0);
   }
   UpdatePipeline();
-  if (!hotkeysOk) Toast(menuModel_.hotkeyError, true);
+
+  const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
+  if (folderChanged && appWindow_.Visible()) RescanLibrary();
+  if (old.storageLimitGB != config_.storageLimitGB || old.outputDir != config_.outputDir) EnforceStorageLimit();
+
+  if (!hotkeysOk) Toast(hotkeyError_, true);
   else if (deferred) Toast("Se aplicará al terminar la grabación");
   else if (!quiet) Toast("Cambios aplicados");
 }
@@ -512,12 +697,12 @@ bool App::WantPipeline() const {
   if (pipeline_.Recording()) return true;
   if (!config_.replayEnabled) return false;
   if (!config_.onlyInGames) return true;
-  return game_ && GetTickCount64() - lastGameSeen_ < kGameGraceMs;
+  return GameActive();
 }
 
 PipelineSettings App::BuildSettings() const {
   PipelineSettings s;
-  bool gameActive = game_ && GetTickCount64() - lastGameSeen_ < kGameGraceMs && IsWindow(game_->window);
+  bool gameActive = GameActive() && IsWindow(game_->window);
   if (config_.captureMode == "game" && gameActive) {
     s.target.window = game_->window;
   } else {
@@ -583,6 +768,9 @@ void App::CheckGame() {
   if (auto detected = DetectFullscreenApp()) {
     game_ = detected;
     lastGameSeen_ = now;
+    // Un juego (o un vídeo) a pantalla completa delante: el visor de la
+    // biblioteca no se queda sonando detrás.
+    if (appWindow_.Visible()) appUi_.PauseMedia();
   }
   bool gameActive = game_ && now - lastGameSeen_ < kGameGraceMs && IsWindow(game_->window);
   if (pipeline_.Running() && !pipeline_.Recording()) {
@@ -608,36 +796,73 @@ void App::CheckGame() {
 }
 
 bool App::RegisterHotkeys() {
-  struct Entry {
-    int id;
-    const std::string* text;
-  };
-  const Entry entries[] = {{kHotkeyOverlay, &config_.hotkeys.overlay},
-                           {kHotkeySaveClip, &config_.hotkeys.saveClip},
-                           {kHotkeyRecord, &config_.hotkeys.toggleRecording},
-                           {kHotkeyReplay, &config_.hotkeys.toggleReplay}};
+  if (hotkeysSuspended_) return true; // se registran al terminar de grabar el atajo en Ajustes
   std::string failed;
-  for (const auto& e : entries) {
-    if (e.text->empty()) continue;
+  hotkeyFailedMask_ = 0;
+  for (int i = 0; i < kHotkeyCount; ++i) {
+    const std::string& text = HotkeyText(config_.hotkeys, i);
+    if (text.empty()) continue;
     UINT mods = 0, vk = 0;
-    if (!ParseHotkey(*e.text, &mods, &vk) || !RegisterHotKey(hwnd_, e.id, mods, vk))
-      failed += (failed.empty() ? "" : ", ") + *e.text;
+    if (!ParseHotkey(text, &mods, &vk) || !RegisterHotKey(hwnd_, kHotkeyOverlay + i, mods, vk)) {
+      failed += (failed.empty() ? "" : ", ") + text;
+      hotkeyFailedMask_ |= 1u << i;
+    }
   }
   if (!failed.empty()) {
-    menuModel_.hotkeyError = "No se pudo registrar " + failed + " (puede que otra app ya lo use, p. ej. GeForce Experience)";
-    Log("%s", menuModel_.hotkeyError.c_str());
+    hotkeyError_ = "No se pudo registrar " + failed + " (puede que otra app ya lo use, p. ej. GeForce Experience)";
+    Log("%s", hotkeyError_.c_str());
     return false;
   }
+  hotkeyError_.clear();
   return true;
 }
 
 void App::UnregisterHotkeys() {
-  for (int id = kHotkeyOverlay; id <= kHotkeyReplay; ++id) UnregisterHotKey(hwnd_, id);
+  for (int id = kHotkeyOverlay; id < kHotkeyOverlay + kHotkeyCount; ++id) UnregisterHotKey(hwnd_, id);
+}
+
+void App::SuspendHotkeys(bool suspend) {
+  if (suspend == hotkeysSuspended_) return;
+  if (suspend) {
+    UnregisterHotkeys();
+    hotkeysSuspended_ = true;
+  } else {
+    hotkeysSuspended_ = false;
+    RegisterHotkeys(); // si alguno falla, Ajustes > Atajos lo dice
+  }
+}
+
+void App::EnforceStorageLimit() {
+  if (config_.storageLimitGB <= 0) return;
+  // Una pasada cada vez: el hilo escanea la carpeta y borra lo más antiguo.
+  static std::atomic<bool> running{false};
+  if (running.exchange(true)) return;
+  std::string folder = ResolveOutputDir(config_);
+  uint64_t limit = uint64_t(config_.storageLimitGB) << 30;
+  std::shared_ptr<Library> library = library_;
+  HWND hwnd = hwnd_;
+  auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que acabe
+  std::thread([folder, limit, library, hwnd, pending] {
+    InstallThreadCrashHandler();
+    uint64_t freed = 0;
+    int deleted = library->EnforceLimit(folder, limit, &freed);
+    if (deleted > 0) {
+      Log("Límite de espacio: %d archivos borrados, %s liberados", deleted, FormatBytes(freed).c_str());
+      PostMessageW(hwnd, WM_SPECTRE_LIBRARY, 0, 0);
+    }
+    running = false;
+  }).detach();
 }
 
 // ---------------------------------------------------------------------- UI
 
 void App::Toast(const std::string& text, bool error) {
+  // Crear la ventana del aviso cambia el contexto de ImGui: nunca en mitad
+  // del frame de otra ventana.
+  if (inFrame_) {
+    Defer([this, text, error] { Toast(text, error); });
+    return;
+  }
   if (!error && !config_.showNotifications) return;
   toastText_ = text;
   toastError_ = error;
@@ -655,28 +880,43 @@ void App::Toast(const std::string& text, bool error) {
   int lines = std::max<int>(1, int((chars + 41) / 42));
   int w = int(400 * scale), h = int(float(std::max(64, 30 + lines * 22)) * scale), margin = int(20 * scale);
   toastUntil_ = GetTickCount64() + kToastMs + ULONGLONG(std::max(0, lines - 2)) * 1200 + (error ? 1500 : 0);
+  // Esquina de Ajustes > Avisos.
   const RECT& work = mi.rcWork;
-  RECT r{work.right - w - margin, work.top + margin, work.right - margin, work.top + margin + h};
+  const std::string& corner = config_.toastPosition;
+  bool left = corner == "top-left" || corner == "bottom-left";
+  bool bottom = corner == "bottom-left" || corner == "bottom-right";
+  LONG x = left ? work.left + margin : work.right - margin - w;
+  LONG y = bottom ? work.bottom - margin - h : work.top + margin;
+  RECT r{x, y, x + w, y + h};
   if (!toast_.Show(r, false)) return;
   // "Clip guardado" tiene que verse también encima de un juego topmost.
   FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow(), false);
   toast_.StayAbove(under.fullscreen ? under.window : nullptr);
 }
 
-void App::RefreshMenuModel(bool devices) {
+void App::SyncModels() {
+  menuModel_.config = config_;
+  appModel_.config = config_;
+  if (appWindow_.Visible()) appWindow_.Invalidate();
+}
+
+void App::RefreshMenuModel() {
   menuModel_.stats = pipeline_.Stats();
-  menuModel_.usage = SampleProcessUsage();
   menuModel_.replayActive = pipeline_.Running() && config_.replayEnabled;
-  menuModel_.micLive = pipeline_.MicCaptured() && config_.captureMic;
-  menuModel_.gameDetected = game_ && GetTickCount64() - lastGameSeen_ < kGameGraceMs;
+  menuModel_.gameDetected = GameActive();
   menuModel_.gameName = game_ ? game_->exeName : "";
-  if (devices) {
-    menuModel_.outputDir = ResolveOutputDir(config_);
-    menuModel_.monitors = EnumerateMonitors();
-    menuModel_.outputs = EnumerateAudioDevices(false);
-    menuModel_.inputs = EnumerateAudioDevices(true);
-    menuModel_.cameras = EnumerateCameras();
-    menuModel_.encoders = CandidateEncoders(menuModel_.config.codec);
+}
+
+// Los últimos clips y grabaciones para el panel (también los de las carpetas
+// de cada juego). La grabación en curso todavía no es un archivo terminado.
+void App::RefreshPanelClips() {
+  menuModel_.outputDir = ResolveOutputDir(config_);
+  menuModel_.clips.clear();
+  std::string recording = pipeline_.Recording() ? pipeline_.Stats().recordPath : std::string();
+  for (const auto& item : library_->Scan(menuModel_.outputDir, kPanelClips + 1, true)) {
+    if (item.path == recording) continue;
+    if (menuModel_.clips.size() >= kPanelClips) break;
+    menuModel_.clips.push_back(ClipFile{item.path, item.name, item.size, item.when});
   }
 }
 
@@ -702,39 +942,27 @@ void App::RenderOverlays() {
   if (menu_.Visible()) {
     if (now - lastStats_ > 1000) {
       lastStats_ = now;
-      RefreshMenuModel(false);
+      RefreshMenuModel();
     }
-    pipeline_.AudioLevels(&menuModel_.systemLevel, &menuModel_.micLevel);
-    if (menuMode_ == MenuMode::Panel) {
-      menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_); });
-      if (menuModel_.panelHeight > 0) {
-        // Mismo cálculo que la posición del panel en DrawPanel (centrado en la franja).
-        LONG h = LONG(std::ceil(menuModel_.panelHeight));
-        LONG top = std::max<LONG>(0, (LONG(menu_.Height()) - h) / 2);
-        RECT hit{0, top, LONG(menu_.Width()), top + h};
-        menu_.SetHitRegion(&hit);
-        RECT win{};
-        if (GetWindowRect(menu_.Hwnd(), &win)) {
-          menuHitScreen_ = {win.left + hit.left, win.top + hit.top, win.left + hit.right, win.top + hit.bottom};
-          menuHitValid_ = true;
-        }
-      }
-    } else {
-      menuModel_.update = updater_.Status();
-      menu_.Render([this] { DrawSettings(menu_, menuModel_, menuActions_); });
-      // Ajustes no tiene región de clic: su ventana entera es el cuadro, y
-      // fuera de ella es fuera de Ajustes.
+    inFrame_ = true;
+    menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_); });
+    inFrame_ = false;
+    if (menuModel_.panelHeight > 0) {
+      // Mismo cálculo que la posición del panel en DrawPanel (centrado en la franja).
+      LONG h = LONG(std::ceil(menuModel_.panelHeight));
+      LONG top = std::max<LONG>(0, (LONG(menu_.Height()) - h) / 2);
+      RECT hit{0, top, LONG(menu_.Width()), top + h};
+      menu_.SetHitRegion(&hit);
       RECT win{};
       if (GetWindowRect(menu_.Hwnd(), &win)) {
-        menuHitScreen_ = win;
+        menuHitScreen_ = {win.left + hit.left, win.top + hit.top, win.left + hit.right, win.top + hit.bottom};
         menuHitValid_ = true;
       }
     }
   }
   if (menu_.Visible()) {
-    // Un frame largo (abrir un MP4 al elegir un clip en Ajustes, disco lento)
-    // puede pasar del tiempo que Windows da a un gancho de bajo nivel, y
-    // entonces lo quita sin avisar: se vuelve a poner.
+    // Un frame largo (disco lento) puede pasar del tiempo que Windows da a un
+    // gancho de bajo nivel, y entonces lo quita sin avisar: se vuelve a poner.
     ULONGLONG frameMs = GetTickCount64() - now;
     if (frameMs >= 200 && keyboard_.Installed()) {
       Log("Panel: frame de %llu ms; se reinstala el gancho de teclado", frameMs);
@@ -749,7 +977,9 @@ void App::RenderOverlays() {
     } else {
       float remaining = float(toastUntil_ - now);
       float alpha = remaining < 400 ? remaining / 400.0f : 1.0f;
+      inFrame_ = true;
       toast_.Render([&] { DrawToast(toast_, config_, toastText_, toastError_, alpha); });
+      inFrame_ = false;
     }
   }
   RunDeferred();
@@ -801,10 +1031,9 @@ bool App::ShouldActivateMenu(const FullscreenInfo& screen) {
 
 std::vector<KeyboardHook::Hotkey> App::PassThroughHotkeys() const {
   std::vector<KeyboardHook::Hotkey> keys;
-  for (const std::string* text : {&config_.hotkeys.overlay, &config_.hotkeys.saveClip,
-                                  &config_.hotkeys.toggleRecording, &config_.hotkeys.toggleReplay}) {
+  for (int i = 0; i < kHotkeyCount; ++i) {
     UINT mods = 0, vk = 0;
-    if (ParseHotkey(*text, &mods, &vk)) keys.push_back({mods, vk});
+    if (ParseHotkey(HotkeyText(config_.hotkeys, i), &mods, &vk)) keys.push_back({mods, vk});
   }
   return keys;
 }
@@ -837,11 +1066,9 @@ void App::WatchGameWhileOpen() {
   }
 }
 
-// Un clic fuera del panel (o del cuadro de Ajustes) lo cierra; el clic llega
-// también a lo que haya debajo. Se sondea el botón en cada frame en vez de
-// usar un gancho de ratón, que metería la latencia de nuestro frame a todo el
-// ratón del sistema. Ajustes con cambios sin aplicar no se cierra: se
-// perderían (Aplicar o Volver deciden).
+// Un clic fuera del panel lo cierra; el clic llega también a lo que haya
+// debajo. Se sondea el botón en cada frame en vez de usar un gancho de ratón,
+// que metería la latencia de nuestro frame a todo el ratón del sistema.
 void App::PollClickOutside() {
   const bool down = AnyMouseButtonDown();
   const bool pressed = down && !mouseWasDown_;
@@ -849,17 +1076,212 @@ void App::PollClickOutside() {
   if (!pressed || !menuHitValid_) return;
   POINT p{};
   if (!GetCursorPos(&p) || PtInRect(&menuHitScreen_, p)) return;
-  if (menuMode_ == MenuMode::Settings && menuModel_.dirty) {
-    if (!menuActivated_) {
-      Toast("Ajustes tiene cambios sin aplicar");
-      return;
-    }
-    // Con el panel activado ese clic se lleva el foco a otra ventana, y Ajustes
-    // se quedaría abierto detrás, sin foco ni teclado: se cierra igualmente.
-    Toast("Ajustes: cambios sin aplicar descartados");
-  }
   CloseMenu();
 }
+
+// ------------------------------------------------------ la ventana de Spectre
+
+void App::OpenApp(std::optional<AppPage> page) {
+  const bool wasOpen = appWindow_.Visible();
+  if (!appWindow_.Open()) {
+    Toast("No se pudo abrir la ventana de Spectre. Mira spectre.log", true);
+    return;
+  }
+  if (!wasOpen) {
+    appUi_.OnOpened(hwnd_, WM_SPECTRE_MEDIA);
+    appModel_.page = AppPage::Home;
+    BeginSettingsEdit();
+    RefreshAppModel();
+    RescanLibrary();
+  }
+  if (page) appModel_.page = *page;
+  appWindow_.Invalidate();
+}
+
+void App::CloseApp() {
+  if (!appWindow_.Visible()) return;
+  CancelHotkeyCapture(appModel_.settings, appActions_.settings);
+  appUi_.OnClosed();
+  appWindow_.Close();
+  // Cerrada no se queda con nada: ni la lista de la biblioteca ni los dispositivos.
+  appModel_.items.clear();
+  appModel_.items.shrink_to_fit();
+  appModel_.itemsLoaded = false;
+  appModel_.settings = SettingsModel{};
+  appModel_.page = AppPage::Home;
+}
+
+void App::AppCloseRequested() {
+  if (!config_.closeToTray) {
+    Quit();
+    return;
+  }
+  const bool discarded = appModel_.settings.dirty;
+  CloseApp();
+  if (!config_.trayHintShown) {
+    config_.trayHintShown = true;
+    SaveConfig(config_);
+    SyncModels();
+    Toast("Spectre sigue en la bandeja y el replay sigue funcionando. Para salir: clic derecho en el icono, "
+          "Salir de Spectre.");
+  } else if (discarded) {
+    Toast("Ajustes: cambios sin aplicar descartados");
+  }
+}
+
+void App::RenderApp() {
+  if (!appWindow_.Visible()) return;
+  if (appWindow_.Lost()) {
+    // La GPU se reinició (driver nuevo, TDR): se recrea la ventana donde
+    // estaba, en la misma página y sin robar el foco si no lo tenía.
+    const bool focused = appWindow_.Focused();
+    const AppPage page = appModel_.page == AppPage::Viewer ? appModel_.viewBack : appModel_.page;
+    CancelHotkeyCapture(appModel_.settings, appActions_.settings);
+    appUi_.OnClosed();
+    appWindow_.Close();
+    if (!appWindow_.Open(focused)) {
+      Toast("No se pudo volver a abrir la ventana de Spectre tras reiniciarse la GPU", true);
+      CloseApp();
+      return;
+    }
+    appUi_.OnOpened(hwnd_, WM_SPECTRE_MEDIA);
+    appModel_.page = page;
+    return;
+  }
+  ULONGLONG now = GetTickCount64();
+  if (now - lastAppStats_ >= 250) {
+    lastAppStats_ = now;
+    RefreshAppModel();
+  }
+  SettingsModel& s = appModel_.settings;
+  if (appModel_.page == AppPage::Settings) {
+    s.update = updater_.Status();
+    if (appModel_.settingsPage == SettingsPage::Audio) pipeline_.AudioLevels(&s.systemLevel, &s.micLevel);
+  }
+  // Grabando un atajo y el usuario se va a otra ventana: se cancela (si no,
+  // los atajos globales se quedarían sin registrar).
+  if (s.capturing >= 0 && !appWindow_.Focused()) CancelHotkeyCapture(s, appActions_.settings);
+  inFrame_ = true;
+  appWindow_.Render([this] { appUi_.Draw(appWindow_, appModel_, appActions_); });
+  inFrame_ = false;
+  // "Sin aplicar" solo si de verdad difiere de lo que había (cambiar algo y
+  // volverlo a dejar como estaba no cuenta).
+  if (appModel_.page == AppPage::Settings || s.dirty) s.dirty = !SameConfig(s.config, s.base);
+}
+
+void App::RefreshAppModel() {
+  appModel_.config = config_;
+  appModel_.stats = pipeline_.Stats();
+  appModel_.replayActive = pipeline_.Running() && config_.replayEnabled;
+  appModel_.gameDetected = GameActive();
+  appModel_.gameName = game_ ? game_->exeName : "";
+  SettingsModel& s = appModel_.settings;
+  s.stats = appModel_.stats;
+  s.hotkeyError = hotkeyError_;
+  ULONGLONG now = GetTickCount64();
+  if (appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Performance &&
+      now - lastAppUsage_ >= 1000) {
+    lastAppUsage_ = now;
+    s.usage = SampleProcessUsage();
+  }
+  // Sin cambios propios, Ajustes enseña lo que hay ahora (un atajo o el panel
+  // pudieron cambiar el micrófono, la duración...).
+  if (!s.dirty && s.capturing < 0 && !SameConfig(s.base, config_)) {
+    s.config = config_;
+    s.base = config_;
+  }
+}
+
+void App::RescanLibrary() {
+  std::string dir = ResolveOutputDir(config_);
+  std::vector<MediaItem> items = library_->Scan(dir);
+  // La grabación en curso todavía no es un archivo terminado.
+  if (pipeline_.Recording()) {
+    std::string recording = pipeline_.Stats().recordPath;
+    items.erase(std::remove_if(items.begin(), items.end(), [&](const MediaItem& i) { return i.path == recording; }),
+                items.end());
+  }
+  StorageInfo storage;
+  for (const auto& item : items) {
+    storage.usedBytes += item.size;
+    if (item.Video()) ++storage.videos;
+    else ++storage.screenshots;
+    if (item.favorite) ++storage.favorites;
+  }
+  ULARGE_INTEGER avail{}, total{}, totalFree{};
+  if (GetDiskFreeSpaceExW(Widen(dir).c_str(), &avail, &total, &totalFree)) {
+    storage.freeBytes = avail.QuadPart;
+    storage.totalBytes = total.QuadPart;
+    storage.valid = true;
+  }
+  appModel_.items = std::move(items);
+  appModel_.itemsLoaded = true;
+  appModel_.outputDir = dir;
+  appModel_.freeBytes = storage.freeBytes;
+  appModel_.settings.storage = storage;
+  appModel_.settings.outputDir = dir;
+  appWindow_.Invalidate();
+}
+
+void App::BeginSettingsEdit() {
+  SettingsModel& s = appModel_.settings;
+  CancelHotkeyCapture(s, appActions_.settings);
+  // La lista de encoders es la del códec elegido: si se descarta otro códec, vuelve.
+  if (s.devicesLoaded && s.config.codec != config_.codec) s.encoders = CandidateEncoders(config_.codec);
+  s.config = config_;
+  s.base = config_;
+  s.dirty = false;
+  s.hotkeyError = hotkeyError_;
+  s.outputDir = ResolveOutputDir(config_);
+}
+
+void App::ApplySettings() {
+  SettingsModel& s = appModel_.settings;
+  CancelHotkeyCapture(s, appActions_.settings);
+  // Solo lo que se cambió en Ajustes: lo que cambió mientras tanto desde el
+  // panel o un atajo (el micrófono, la duración) no se pisa.
+  ApplyConfig(MergeEdits(config_, s.base, s.config));
+  BeginSettingsEdit();
+}
+
+void App::LoadDevices() {
+  SettingsModel& s = appModel_.settings;
+  s.monitors = EnumerateMonitors();
+  s.outputs = EnumerateAudioDevices(false);
+  s.inputs = EnumerateAudioDevices(true);
+  s.cameras = EnumerateCameras();
+  s.encoders = CandidateEncoders(s.config.codec);
+  s.devicesLoaded = true;
+}
+
+void App::ChooseOutputFolder() {
+  using Microsoft::WRL::ComPtr;
+  ComPtr<IFileOpenDialog> dialog;
+  if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+    Toast("No se pudo abrir el selector de carpetas", true);
+    return;
+  }
+  DWORD options = 0;
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+  dialog->SetTitle(L"Carpeta de los clips, grabaciones y capturas");
+  SettingsModel& s = appModel_.settings;
+  std::wstring current = Widen(s.config.outputDir.empty() ? ResolveOutputDir(config_) : s.config.outputDir);
+  ComPtr<IShellItem> start;
+  if (SUCCEEDED(SHCreateItemFromParsingName(current.c_str(), nullptr, IID_PPV_ARGS(&start))))
+    dialog->SetFolder(start.Get());
+  if (dialog->Show(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_) != S_OK) return; // cancelado
+  ComPtr<IShellItem> item;
+  PWSTR path = nullptr;
+  if (FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) return;
+  s.config.outputDir = Narrow(path);
+  CoTaskMemFree(path);
+  appModel_.page = AppPage::Settings;
+  appModel_.settingsPage = SettingsPage::Storage;
+  appWindow_.Invalidate();
+}
+
+// ---------------------------------------------------------------- bandeja
 
 void App::AddTrayIcon() {
   tray_ = {};
@@ -877,22 +1299,29 @@ void App::AddTrayIcon() {
 void App::RemoveTrayIcon() { Shell_NotifyIconW(NIM_DELETE, &tray_); }
 
 void App::ShowTrayMenu() {
+  auto withKey = [](const wchar_t* text, const std::string& key) {
+    std::wstring s = text;
+    if (!key.empty()) s += L"\t" + Widen(key);
+    return s;
+  };
   HMENU menu = CreatePopupMenu();
-  std::wstring open = L"Abrir panel\t" + Widen(config_.hotkeys.overlay);
-  std::wstring clip = L"Guardar clip\t" + Widen(config_.hotkeys.saveClip);
-  std::wstring rec = (pipeline_.Recording() ? L"Detener grabación\t" : L"Iniciar grabación\t") +
-                     Widen(config_.hotkeys.toggleRecording);
-  AppendMenuW(menu, MF_STRING, kCmdOpen, open.c_str());
-  AppendMenuW(menu, MF_STRING, kCmdSettings, L"Ajustes");
+  std::wstring panel = withKey(L"Abrir panel", config_.hotkeys.overlay);
+  std::wstring clip = withKey(L"Guardar clip", config_.hotkeys.saveClip);
+  std::wstring rec = withKey(pipeline_.Recording() ? L"Detener grabación" : L"Iniciar grabación",
+                             config_.hotkeys.toggleRecording);
+  std::wstring shot = withKey(L"Captura de pantalla", config_.hotkeys.screenshot);
+  AppendMenuW(menu, MF_STRING, kCmdOpenApp, L"Abrir Spectre");
+  AppendMenuW(menu, MF_STRING, kCmdOpenPanel, panel.c_str());
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING | (pipeline_.Running() && config_.replayEnabled ? 0 : MF_GRAYED), kCmdSaveClip,
               clip.c_str());
   AppendMenuW(menu, MF_STRING, kCmdRecord, rec.c_str());
+  AppendMenuW(menu, MF_STRING, kCmdScreenshot, shot.c_str());
   AppendMenuW(menu, MF_STRING | (config_.replayEnabled ? MF_CHECKED : 0), kCmdReplay, L"Replay activado");
   AppendMenuW(menu, MF_STRING, kCmdFolder, L"Abrir carpeta de clips");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kCmdQuit, L"Salir de Spectre");
-  SetMenuDefaultItem(menu, kCmdOpen, FALSE);
+  SetMenuDefaultItem(menu, kCmdOpenApp, FALSE);
   POINT pt;
   GetCursorPos(&pt);
   SetForegroundWindow(hwnd_);
@@ -929,6 +1358,8 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kHotkeySaveClip: SaveClip(); break;
     case kHotkeyRecord: ToggleRecording(); break;
     case kHotkeyReplay: ToggleReplay(); break;
+    case kHotkeyScreenshot: CaptureScreenshot(); break;
+    case kHotkeyMarker: AddMarker(); break;
     default: break;
     }
     return 0;
@@ -941,25 +1372,45 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
       KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
       bool wasRecording = pipeline_.Recording();
+      std::string path = wasRecording ? pipeline_.Stats().recordPath : std::string();
       if (wasRecording) pipeline_.StopRecording();
       Log("Captura perdida: se reinicia");
       pipeline_.Stop();
       restartPending_ = false;
-      if (wasRecording) Toast("La ventana capturada se cerró; la grabación se guardó");
+      if (wasRecording) {
+        Toast("La ventana capturada se cerró; la grabación se guardó");
+        OnRecordingStopped(path);
+      }
       UpdatePipeline();
       InstallPendingUpdate();
     }
     return 0;
   case WM_SPECTRE_NOTIFY: {
     std::unique_ptr<std::string> text(reinterpret_cast<std::string*>(lp));
-    Toast(*text, wp != 0);
-    if (menu_.Visible()) {
-      menuModel_.clips = ListClips(menuModel_.outputDir,
-                                   menuMode_ == MenuMode::Panel ? kPanelClips : kSettingsClips);
-      menuModel_.selectedClip = -1;
+    bool error = wp != 0;
+    std::string message = *text;
+    if (!error && (StartsWith(message, "Clip guardado") || StartsWith(message, "Captura guardada") ||
+                   StartsWith(message, "Recorte guardado"))) {
+      if (config_.soundOnSave && !StartsWith(message, "Recorte")) PlayCue(Cue::Saved);
+      std::string note = LowDiskNote();
+      if (!note.empty()) {
+        message += note;
+        error = true; // se ve aunque los avisos estén apagados
+      }
     }
+    Toast(message, error);
+    if (menu_.Visible()) RefreshPanelClips();
+    if (appWindow_.Visible()) RescanLibrary();
+    EnforceStorageLimit(); // algo nuevo en la carpeta
     return 0;
   }
+  case WM_SPECTRE_LIBRARY:
+    if (menu_.Visible()) RefreshPanelClips();
+    if (appWindow_.Visible()) RescanLibrary();
+    return 0;
+  case WM_SPECTRE_MEDIA:
+    if (appWindow_.Visible()) appUi_.TakeMediaResults(appWindow_, appModel_, appActions_);
+    return 0;
   case WM_SPECTRE_UPDATE_READY: {
     std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
     installerPath_ = *path;
@@ -980,22 +1431,33 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_SHOW_MENU:
     OpenMenu();
     return 0;
+  case WM_SPECTRE_SHOW_APP:
+    // Spectre ya estaba abierto y se volvió a abrir (menú Inicio, el exe).
+    Defer([this] {
+      CloseMenu(false);
+      OpenApp();
+    });
+    return 0;
   case WM_SPECTRE_TRAY:
-    if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowTrayMenu();
-    else if (LOWORD(lp) == WM_LBUTTONUP) {
-      // Al pulsar el icono, el clic fuera del panel lo cierra justo antes
-      // (PollClickOutside): ese clic lo cierra, no lo vuelve a abrir.
-      if (menu_.Visible()) CloseMenu();
-      else if (GetTickCount64() - menuClosedAt_ > 400) OpenMenu();
+    if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
+      ShowTrayMenu();
+    } else if (LOWORD(lp) == WM_LBUTTONUP) {
+      // Clic en el icono: la ventana de Spectre. El clic ya cerró el panel si
+      // estaba abierto (PollClickOutside).
+      Defer([this] {
+        CloseMenu(false);
+        OpenApp();
+      });
     }
     return 0;
   case WM_COMMAND: {
     KeyboardHook::Pause pause(keyboard_);
     switch (LOWORD(wp)) {
-    case kCmdOpen: OpenMenu(); break;
-    case kCmdSettings: OpenSettings(); break;
+    case kCmdOpenApp: Defer([this] { OpenApp(); }); break;
+    case kCmdOpenPanel: OpenMenu(); break;
     case kCmdSaveClip: SaveClip(); break;
     case kCmdRecord: ToggleRecording(); break;
+    case kCmdScreenshot: CaptureScreenshot(); break;
     case kCmdReplay: ToggleReplay(); break;
     case kCmdFolder: OpenPath(ResolveOutputDir(config_)); break;
     case kCmdQuit: Quit(); break;

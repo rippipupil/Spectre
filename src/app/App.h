@@ -2,9 +2,12 @@
 
 #include "app/Config.h"
 #include "app/Fullscreen.h"
+#include "app/Library.h"
 #include "app/System.h"
 #include "app/Updater.h"
 #include "core/Pipeline.h"
+#include "ui/AppUi.h"
+#include "ui/AppWindow.h"
 #include "ui/KeyboardHook.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
@@ -13,6 +16,7 @@
 
 #include <deque>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -34,12 +38,15 @@ private:
   void ToggleMicrophone();
   void ToggleCamera();
   void SetClipSeconds(int seconds);
+  void SetQuality(const std::string& quality);
+  void CaptureScreenshot();
+  void AddMarker();
+  void TrimClip(const std::string& path, double start, double end);
   void ToggleMenu();
   void OpenMenu();
-  void OpenSettings();
-  void BackToPanel();
   // restoreFocus=false: el programa que se acaba de abrir desde el panel
-  // (reproductor, Explorador) se queda con el foco en vez del juego.
+  // (reproductor, Explorador, la ventana de Spectre) se queda con el foco en
+  // vez del juego.
   void CloseMenu(bool restoreFocus = true);
   void EndMenuSession(bool giveFocusBack); // la parte de CloseMenu que no depende de la ventana
   void ApplyConfig(const Config& next, bool quiet = false);
@@ -52,14 +59,26 @@ private:
   void UpdatePipeline(bool forceRestart = false);
   bool StartPipeline();
   PipelineSettings BuildSettings() const;
-  std::string OutputName(const char* prefix);
+  bool GameActive() const;
+  // Ruta nueva en la carpeta de destino (o en la del juego): Clip_<juego>_<fecha>.mp4
+  std::string OutputName(const char* prefix, const char* extension = ".mp4");
   bool RegisterHotkeys();
   void UnregisterHotkeys();
+  // Mientras se graba un atajo en Ajustes, los globales no se quedan con la combinación.
+  void SuspendHotkeys(bool suspend);
   void CheckGame();
+  // Límite de espacio de Ajustes > Almacenamiento, en un hilo aparte.
+  void EnforceStorageLimit();
+  // " Queda poco espacio..." para añadir al aviso de un clip o una grabación (vacío si sobra).
+  std::string LowDiskNote();
+  // La grabación terminó (atajo, panel o captura perdida): marcas, biblioteca y límite de espacio.
+  void OnRecordingStopped(const std::string& path);
 
   // UI
   void Toast(const std::string& text, bool error = false);
-  void RefreshMenuModel(bool devices);
+  void SyncModels(); // el config activo cambió: panel y ventana lo muestran
+  void RefreshMenuModel();
+  void RefreshPanelClips();
   void AddTrayIcon();
   void RemoveTrayIcon();
   void ShowTrayMenu();
@@ -75,10 +94,23 @@ private:
   std::vector<KeyboardHook::Hotkey> PassThroughHotkeys() const;
   void WatchGameWhileOpen();
   void PollClickOutside();
-  // Las acciones del menú se ejecutan después del frame de ImGui: cerrar o
-  // redimensionar la ventana en mitad del frame tumbaba la app.
+  // Las acciones del menú y de la ventana se ejecutan después del frame de
+  // ImGui: cerrar o redimensionar una ventana (o crear la de un aviso) en
+  // mitad del frame tumbaba la app.
   void Defer(std::function<void()> action) { deferred_.push_back(std::move(action)); }
   void RunDeferred();
+
+  // Ventana de Spectre (la app). Solo existe mientras está abierta.
+  void OpenApp(std::optional<AppPage> page = std::nullopt);
+  void CloseApp();
+  void AppCloseRequested(); // X o Alt+F4: a la bandeja o salir, según Ajustes > General
+  void RenderApp();
+  void RefreshAppModel();
+  void RescanLibrary();
+  void BeginSettingsEdit(); // copia de trabajo de Ajustes = config activo
+  void ApplySettings();
+  void LoadDevices();
+  void ChooseOutputFolder();
 
   HINSTANCE instance_ = nullptr;
   HWND hwnd_ = nullptr;
@@ -91,14 +123,12 @@ private:
   std::optional<ForegroundApp> game_;
   ULONGLONG lastGameSeen_ = 0;
 
-  enum class MenuMode { Panel, Settings };
-
   OverlayWindow menu_;
   OverlayWindow toast_;
-  MenuMode menuMode_ = MenuMode::Panel;
   MenuModel menuModel_;
   MenuActions menuActions_;
   std::vector<std::function<void()>> deferred_;
+  bool inFrame_ = false;        // dentro de un frame de ImGui (ver Toast)
   HWND previousForeground_ = nullptr;
   HMONITOR menuMonitor_ = nullptr;
   FullscreenInfo menuScreen_;   // lo que había debajo al abrir el panel (juego a pantalla completa, su monitor)
@@ -113,9 +143,19 @@ private:
   bool toastError_ = false;
   ULONGLONG toastUntil_ = 0;
   ULONGLONG lastStats_ = 0;
+  std::string hotkeyError_;     // atajos que no se pudieron registrar
+  unsigned hotkeyFailedMask_ = 0; // bit i: el atajo i de HotkeyConfig no se pudo registrar
+  bool hotkeysSuspended_ = false;
   Updater updater_;
   std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
   bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
+
+  // Marcas (atajo de marca): momentos de la partida en QPC. Al guardar un clip
+  // entran las de sus últimos segundos; las de una grabación, desde que empezó.
+  std::deque<int64_t> markers_;
+  int64_t recordStartQpc_ = 0;
+  std::vector<double> recordMarkers_;
+  ULONGLONG lowDiskWarnedAt_ = 0;
 
   // Panel sobre el juego. Abierto sin foco (juego a pantalla completa), el
   // teclado llega por el gancho; con foco, el gancho no se instala.
@@ -124,9 +164,19 @@ private:
   ULONGLONG menuOpenedAt_ = 0;
   bool menuFocusChecked_ = false; // ya se comprobó que el foco llegó al panel tras abrirlo
   bool gameRestored_ = false;     // el juego minimizado al perder el foco ya se restauró
-  bool mouseWasDown_ = false;     // sondeo del clic fuera del panel o de Ajustes
-  RECT menuHitScreen_{};          // zona del panel (o la ventana de Ajustes) que recibe clics, en pantalla
+  bool mouseWasDown_ = false;     // sondeo del clic fuera del panel
+  RECT menuHitScreen_{};          // zona del panel que recibe clics, en pantalla
   bool menuHitValid_ = false;
+
+  // Ventana de Spectre
+  std::shared_ptr<Library> library_ = std::make_shared<Library>(); // también la usa el hilo del límite de espacio
+  AppWindow appWindow_;
+  AppUi appUi_;
+  AppModel appModel_;
+  AppActions appActions_;
+  ULONGLONG lastAppStats_ = 0;
+  ULONGLONG lastAppUsage_ = 0;
+  ULONGLONG lastAppFrame_ = 0;
 };
 
 } // namespace spectre

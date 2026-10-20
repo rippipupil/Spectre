@@ -11,15 +11,18 @@
 
 namespace spectre {
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HotkeyConfig, overlay, saveClip, toggleRecording, toggleReplay)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HotkeyConfig, overlay, saveClip, toggleRecording, toggleReplay,
+                                                screenshot, marker)
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSeconds, onlyInGames, captureMode,
-                                                monitorIndex, captureApi, captureCursor, fps, outputHeight,
-                                                quality, bitrateKbps, codec, encoder, gpuPriority, captureSystemAudio,
-                                                outputDeviceId, gameAudioOnly, captureMic, micDeviceId,
-                                                systemVolume, micVolume, separateTracks, cameraEnabled, cameraId,
-                                                cameraCorner, cameraSizePercent, outputDir, autostart,
-                                                showNotifications, maxBufferMB, theme, themeMotion, hotkeys)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSeconds, onlyInGames, folderPerGame,
+                                                captureMode, monitorIndex, captureApi, captureCursor, fps,
+                                                outputHeight, quality, bitrateKbps, codec, encoder, gpuPriority,
+                                                captureSystemAudio, outputDeviceId, gameAudioOnly, captureMic,
+                                                micDeviceId, systemVolume, micVolume, separateTracks, cameraEnabled,
+                                                cameraId, cameraCorner, cameraSizePercent, screenshotFormat,
+                                                outputDir, storageLimitGB, showNotifications, soundOnSave,
+                                                toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
+                                                theme, themeMotion, hotkeys)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 
@@ -37,6 +40,11 @@ static void Sanitize(Config& c) {
   if (c.outputHeight != 0) c.outputHeight = std::clamp(c.outputHeight, 360, 2160);
   if (c.monitorIndex < 0) c.monitorIndex = 0;
   if (!IsKnownTheme(c.theme)) c.theme = "negro";
+  if (c.screenshotFormat != "png" && c.screenshotFormat != "jpg") c.screenshotFormat = "png";
+  c.storageLimitGB = std::clamp(c.storageLimitGB, 0, 100000);
+  if (c.toastPosition != "top-right" && c.toastPosition != "top-left" && c.toastPosition != "bottom-right" &&
+      c.toastPosition != "bottom-left")
+    c.toastPosition = "top-right";
 }
 
 Config LoadConfig() {
@@ -73,6 +81,24 @@ bool SaveConfig(const Config& config) {
   }
   return true;
 }
+
+Config MergeEdits(const Config& current, const Config& base, const Config& edited) {
+  nlohmann::json out = current, from = base, to = edited;
+  for (auto it = to.begin(); it != to.end(); ++it) {
+    const std::string& key = it.key();
+    if (it->is_object() && from.contains(key) && from[key].is_object() && out.contains(key)) {
+      for (auto sub = it->begin(); sub != it->end(); ++sub)
+        if (!from[key].contains(sub.key()) || from[key][sub.key()] != *sub) out[key][sub.key()] = *sub;
+    } else if (!from.contains(key) || from[key] != *it) {
+      out[key] = *it;
+    }
+  }
+  Config merged = out.get<Config>();
+  Sanitize(merged);
+  return merged;
+}
+
+bool SameConfig(const Config& a, const Config& b) { return nlohmann::json(a) == nlohmann::json(b); }
 
 std::string ResolveOutputDir(const Config& config) {
   std::filesystem::path dir = config.outputDir.empty() ? DefaultOutputDir() : std::filesystem::path(Widen(config.outputDir));

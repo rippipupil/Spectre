@@ -8,16 +8,22 @@ El instalador incluye todo lo necesario y no pide permisos de administrador. Si 
 
 ## Uso
 
-Spectre se queda en la bandeja del sistema, junto al reloj. Cerrar el panel no lo cierra: para salir, usa *Salir de Spectre* en el menú del icono de la bandeja.
+Al abrir Spectre (desde el menú Inicio, el exe o el icono de la bandeja) se abre su ventana: *Inicio* con lo último que has guardado, la *Biblioteca* con todos tus clips, grabaciones y capturas, un reproductor y todos los ajustes. Cerrar la ventana deja Spectre en la bandeja del sistema, junto al reloj, guardando el replay y con los atajos activos; para salir del todo, usa *Salir de Spectre* en el menú del icono de la bandeja o en *Ajustes > General*.
 
 | Atajo | Qué hace |
 | --- | --- |
-| `Alt+Z` | Abre el panel lateral |
+| `Alt+Z` | Abre el panel sobre el juego |
 | `Alt+F10` | Guarda un clip con los últimos segundos |
 | `Alt+F9` | Empieza o detiene una grabación |
+| `Alt+F1` | Hace una captura de pantalla |
+| `Alt+F8` | Marca un momento para encontrarlo luego en el clip |
 | `Alt+Shift+F10` | Activa o pausa el replay |
 
-Desde el panel puedes guardar un clip, cambiar su duración (de 15 segundos a 5 minutos), grabar, silenciar el micrófono, encender la cámara y abrir los últimos clips. En *Ajustes* están la calidad de vídeo, los dispositivos de audio, la posición de la webcam, los atajos, un recortador de clips que no recodifica y, en *General*, el tema de la interfaz: *Negro* (negro, gris oscuro y blanco) o *Psíquico* (negro violáceo y magenta, con animaciones que se pueden apagar).
+Todos los atajos se cambian en *Ajustes > Atajos*.
+
+El panel de `Alt+Z` es una versión pequeña de la app para usar en mitad de la partida: guardar un clip, cambiar su duración (de 15 segundos a 5 minutos), grabar, hacer una captura, apagar el replay, el micrófono o la cámara, cambiar la calidad y abrir los últimos clips. *Abrir Spectre* lleva a la ventana completa.
+
+En la biblioteca puedes filtrar por tipo y por juego, buscar, marcar favoritos, renombrar, mandar a la papelera y copiar un clip para pegarlo en Discord o WhatsApp. El reproductor muestra las marcas en la línea de tiempo y recorta clips sin recodificarlos. En los ajustes están la calidad de vídeo, los dispositivos de audio, la webcam, una carpeta por juego, un límite de espacio que borra lo más antiguo (nunca los favoritos), los avisos y, en *General*, el tema de la interfaz: *Negro* (negro, gris oscuro y blanco) o *Psíquico* (negro violáceo y magenta, con animaciones que se pueden apagar).
 
 El panel se abre encima del juego, también a pantalla completa, sin quitarle el foco: el juego no se minimiza y el panel se queda abierto hasta que lo cierras con `Alt+Z`, `Esc` o un clic fuera. Mientras está abierto, el teclado va al panel y no al juego. Solo hay un caso en el que nada puede dibujarse encima sin meterse dentro del juego (cosa que Spectre no hace, por los anticheats): la pantalla completa *exclusiva* de Direct3D con las optimizaciones de pantalla completa de Windows desactivadas en el exe del juego. Ahí el panel coge el foco para verse: el juego sale de la pantalla completa mientras el panel está abierto (muchos se minimizan, como con `Alt+Tab`) y vuelve a ella al cerrarlo. Para seguir viendo el juego detrás del panel, ponlo en ventana sin bordes o vuelve a activar las optimizaciones.
 
@@ -25,7 +31,7 @@ Los vídeos se guardan en `Vídeos\Spectre`. La configuración y el registro de 
 
 ## Por qué consume poco
 
-La imagen se captura con Windows Graphics Capture y se convierte en la propia GPU, que también la comprime con su chip de vídeo (NVENC, AMF o Quick Sync). El replay guarda vídeo ya comprimido en memoria, así que 30 segundos a 1080p ocupan unos 80 MB, y los clips se escriben sin volver a comprimir. El panel solo existe mientras está abierto. La investigación detrás del diseño está en [docs/investigacion.md](docs/investigacion.md).
+La imagen se captura con Windows Graphics Capture y se convierte en la propia GPU, que también la comprime con su chip de vídeo (NVENC, AMF o Quick Sync). El replay guarda vídeo ya comprimido en memoria, así que 30 segundos a 1080p ocupan unos 80 MB, y los clips se escriben sin volver a comprimir. El panel solo existe mientras está abierto, y la ventana de la app no gasta nada cerrada ni minimizada. La investigación detrás del diseño está en [docs/investigacion.md](docs/investigacion.md).
 
 ## Compilar
 

@@ -18,15 +18,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   using namespace spectre;
   InstallCrashHandler();
 
-  // Una sola instancia: si ya hay una, le pedimos que abra el menú.
+  std::wstring commandLine = cmdLine ? cmdLine : L"";
+  bool tray = commandLine.find(L"--tray") != std::wstring::npos;          // inicio con Windows
+  bool updated = commandLine.find(L"--updated") != std::wstring::npos;    // lo pasa el instalador tras actualizar
+
+  // Una sola instancia: si ya hay una, se le pide que traiga su ventana al
+  // frente (abrir Spectre otra vez desde el menú Inicio o el exe).
   HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\SpectreSingleInstance");
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
-    if (HWND other = FindWindowW(L"SpectreMain", nullptr)) {
-      // Le cedemos el primer plano: si no, Windows no deja que su panel coja el foco.
+    if (tray) return 0;
+    // Recién abierta (doble clic dos veces seguidas), su ventana oculta puede
+    // no existir todavía: se espera un poco.
+    HWND other = FindWindowW(L"SpectreMain", nullptr);
+    for (int i = 0; !other && i < 40; ++i) {
+      Sleep(50);
+      other = FindWindowW(L"SpectreMain", nullptr);
+    }
+    if (other) {
+      // Le cedemos el primer plano: si no, Windows no deja que su ventana se ponga delante.
       DWORD pid = 0;
       GetWindowThreadProcessId(other, &pid);
       AllowSetForegroundWindow(pid);
-      PostMessageW(other, WM_SPECTRE_SHOW_MENU, 0, 0);
+      PostMessageW(other, WM_SPECTRE_SHOW_APP, 0, 0);
     }
     return 0;
   }
@@ -46,10 +59,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     if (!text.empty()) Log("ffmpeg: %s", text.c_str());
   });
 
-  std::wstring args = cmdLine ? cmdLine : L"";
-  bool tray = args.find(L"--tray") != std::wstring::npos;
-  bool updated = args.find(L"--updated") != std::wstring::npos; // lo pasa el instalador tras actualizar
-  Log("Spectre %s iniciado", SPECTRE_VERSION);
+  Log("Spectre %s iniciado%s", SPECTRE_VERSION, tray ? " (con Windows)" : updated ? " (tras actualizar)" : "");
 
   int code;
   {

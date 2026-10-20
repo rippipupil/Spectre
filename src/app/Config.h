@@ -9,6 +9,8 @@ struct HotkeyConfig {
   std::string saveClip = "Alt+F10";
   std::string toggleRecording = "Alt+F9";
   std::string toggleReplay = "Alt+Shift+F10";
+  std::string screenshot = "Alt+F1"; // captura de pantalla (PNG o JPG)
+  std::string marker = "Alt+F8";     // marca un momento de la partida en el clip o la grabación
 };
 
 struct Config {
@@ -16,6 +18,7 @@ struct Config {
   bool replayEnabled = true;
   int clipSeconds = 30;       // duración del clip = tamaño del buffer
   bool onlyInGames = false;   // activa el buffer solo con una app a pantalla completa
+  bool folderPerGame = false; // guarda cada juego en su propia subcarpeta
 
   // Vídeo
   std::string captureMode = "monitor"; // "monitor" | "game" (ventana en primer plano)
@@ -46,10 +49,22 @@ struct Config {
   std::string cameraCorner = "bottom-right"; // top-left | top-right | bottom-left | bottom-right
   int cameraSizePercent = 25;          // ancho de la cámara respecto al vídeo
 
-  // General
+  // Capturas de pantalla
+  std::string screenshotFormat = "png"; // "png" (sin pérdida) | "jpg" (ocupa menos)
+
+  // Almacenamiento
   std::string outputDir;               // vacío = Vídeos\Spectre
-  bool autostart = false;
+  int storageLimitGB = 0;              // 0 = sin límite; si se pasa, se borran los más antiguos (nunca los favoritos)
+
+  // Avisos
   bool showNotifications = true;
+  bool soundOnSave = false;            // pitido corto al guardar un clip o una captura
+  std::string toastPosition = "top-right"; // top-right | top-left | bottom-right | bottom-left
+
+  // General
+  bool autostart = false;
+  bool closeToTray = true;             // cerrar la ventana deja Spectre en la bandeja
+  bool trayHintShown = false;          // ya se avisó de que cerrar la ventana no cierra Spectre
   int maxBufferMB = 1024;
 
   // Apariencia (ver ui/Theme.h)
@@ -61,6 +76,11 @@ struct Config {
 
 Config LoadConfig();
 bool SaveConfig(const Config& config);
+// Aplica sobre `current` solo lo que se cambió en `edited` respecto a `base`
+// (la configuración que había al empezar a editar los ajustes): lo que cambió
+// mientras tanto por otro lado (un atajo, el panel Alt+Z) no se pisa.
+Config MergeEdits(const Config& current, const Config& base, const Config& edited);
+bool SameConfig(const Config& a, const Config& b);
 std::string ResolveOutputDir(const Config& config);
 
 } // namespace spectre

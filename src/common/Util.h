@@ -60,5 +60,8 @@ constexpr UINT WM_SPECTRE_TRAY = WM_APP + 12;
 constexpr UINT WM_SPECTRE_PIPELINE_ERROR = WM_APP + 13; // lParam = new std::string*
 constexpr UINT WM_SPECTRE_CLOSE_MENU = WM_APP + 14;     // wParam = generación del menú
 constexpr UINT WM_SPECTRE_UPDATE_READY = WM_APP + 15;   // lParam = new std::wstring* (instalador descargado)
+constexpr UINT WM_SPECTRE_SHOW_APP = WM_APP + 16;       // otra instancia (abrir el exe otra vez) pide la ventana
+constexpr UINT WM_SPECTRE_MEDIA = WM_APP + 17;          // miniaturas o duraciones listas para la ventana
+constexpr UINT WM_SPECTRE_LIBRARY = WM_APP + 18;        // la carpeta cambió (límite de espacio)
 
 } // namespace spectre
