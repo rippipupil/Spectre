@@ -678,8 +678,11 @@ void PageGeneral(SettingsModel& m, const SettingsActions& a) {
   FieldLabel("Al cerrar la ventana");
   m.dirty |= ChoiceCombo<bool>("##close", c.closeToTray,
                                {{true, "Seguir en la bandeja"}, {false, "Salir de Spectre"}});
-  Help("En la bandeja Spectre sigue guardando el replay y los atajos funcionan. Alt+Z abre el panel sobre el "
-       "juego y el icono de la bandeja vuelve a abrir esta ventana.");
+  std::string tray = "En la bandeja Spectre sigue guardando el replay y los atajos funcionan. " +
+                     (c.hotkeys.overlay.empty() ? std::string("El panel") : c.hotkeys.overlay + " abre el panel") +
+                     (c.hotkeys.overlay.empty() ? " se abre desde el menú de la bandeja" : " sobre el juego") +
+                     " y el icono de la bandeja vuelve a abrir esta ventana.";
+  Help(tray.c_str());
 
   UpdatesSection(m, a);
 

@@ -284,6 +284,11 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   const Palette& p = Colors();
   w.SetTitleColors(p);
   ImGuiIO& io = ImGui::GetIO();
+  // En el visor el teclado es del reproductor (espacio, flechas). La
+  // navegación de ImGui usa las mismas teclas: el espacio pulsaría además el
+  // botón con el foco y la pausa se anularía.
+  if (m.page == AppPage::Viewer) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+  else io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -1019,7 +1024,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
   int index = -1;
   for (size_t i = 0; i < list.size(); ++i)
     if (list[i]->path == item.path) index = int(i);
-  const float controlsH = video ? Px(trimMode_ ? 128 : 92) + (item.markers.empty() ? 0 : Px(36)) : Px(10);
+  const float controlsH = video ? Px(trimMode_ ? 128.0f : 92.0f) + (item.markers.empty() ? 0.0f : Px(36)) : Px(10);
   float areaW = ImGui::GetContentRegionAvail().x;
   float areaH = std::max(Px(160), ImGui::GetContentRegionAvail().y - controlsH);
   ImVec2 va = ImGui::GetCursorScreenPos(), vb(va.x + areaW, va.y + areaH);

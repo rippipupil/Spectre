@@ -153,6 +153,7 @@ void AppWindow::Close() {
   hwnd_ = nullptr;
   lost_ = false;
   sizing_ = false;
+  titleSet_ = false;
   framesPending_ = 0;
   animateAt_ = nextAnimate_ = ~0ull;
   DestroyWindow(h);
@@ -389,6 +390,12 @@ void AppWindow::Render(const std::function<void()>& draw) {
 void AppWindow::SetTitleColors(const Palette& palette) {
   if (!hwnd_) return;
   COLORREF caption = ToColorRef(palette.bg), text = ToColorRef(palette.text), border = ToColorRef(palette.line);
+  // Se llama en cada frame: DWM solo se toca cuando cambia el tema.
+  if (titleSet_ && caption == title_[0] && text == title_[1] && border == title_[2]) return;
+  titleSet_ = true;
+  title_[0] = caption;
+  title_[1] = text;
+  title_[2] = border;
   DwmSetWindowAttribute(hwnd_, kDwmCaptionColor, &caption, sizeof(caption));
   DwmSetWindowAttribute(hwnd_, kDwmTextColor, &text, sizeof(text));
   DwmSetWindowAttribute(hwnd_, kDwmBorderColor, &border, sizeof(border));

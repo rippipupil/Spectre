@@ -44,6 +44,8 @@ public:
   HWND Hwnd() const { return hwnd_; }
   // La GPU se reinició: hay que cerrarla y volver a abrirla.
   bool Lost() const { return lost_; }
+  // Arrastrando o redimensionando: Windows está dentro de su bucle modal.
+  bool Sizing() const { return sizing_; }
 
   // Frames bajo demanda.
   bool NeedsFrame(unsigned long long now) const;
@@ -99,6 +101,8 @@ private:
   RECT lastRect_{};       // posición al cerrar, para reabrir en el mismo sitio
   bool hasLastRect_ = false;
   bool lastMaximized_ = false;
+  COLORREF title_[3] = {};  // colores de la barra de título ya aplicados
+  bool titleSet_ = false;
 
   int framesPending_ = 0;
   unsigned long long inputUntil_ = 0;

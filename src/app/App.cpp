@@ -1133,7 +1133,10 @@ void App::RenderApp() {
   if (!appWindow_.Visible()) return;
   if (appWindow_.Lost()) {
     // La GPU se reinició (driver nuevo, TDR): se recrea la ventana donde
-    // estaba, en la misma página y sin robar el foco si no lo tenía.
+    // estaba, en la misma página y sin robar el foco si no lo tenía. No en
+    // mitad de un arrastre: destruirla dentro del bucle modal de Windows es
+    // buscarse problemas; al soltar llega otro frame.
+    if (appWindow_.Sizing()) return;
     const bool focused = appWindow_.Focused();
     const AppPage page = appModel_.page == AppPage::Viewer ? appModel_.viewBack : appModel_.page;
     CancelHotkeyCapture(appModel_.settings, appActions_.settings);
@@ -1193,6 +1196,12 @@ void App::RefreshAppModel() {
 }
 
 void App::RescanLibrary() {
+  // La lista nueva sustituye a la que está dibujando el frame en curso: nunca
+  // en mitad de uno (renombrar se llama desde dentro).
+  if (inFrame_) {
+    Defer([this] { RescanLibrary(); });
+    return;
+  }
   std::string dir = ResolveOutputDir(config_);
   std::vector<MediaItem> items = library_->Scan(dir);
   // La grabación en curso todavía no es un archivo terminado.
