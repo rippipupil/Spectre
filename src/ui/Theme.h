@@ -1,5 +1,10 @@
 #pragma once
 
+// Los operadores de ImVec2 (a + b, a * k) solo existen si se piden antes de la
+// primera inclusión de imgui.h.
+#ifndef IMGUI_DEFINE_MATH_OPERATORS
+#define IMGUI_DEFINE_MATH_OPERATORS
+#endif
 #include <imgui.h>
 
 #include <string>
