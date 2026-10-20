@@ -19,7 +19,8 @@
 
 namespace spectre {
 
-enum class MediaKind { Clip, Recording, Trim, Screenshot };
+// Export: la copia de menos de 20 MB para Discord (<nombre>_discord.mp4).
+enum class MediaKind { Clip, Recording, Trim, Export, Screenshot };
 
 struct MediaItem {
   std::string path; // UTF-8, ruta completa

@@ -63,7 +63,7 @@ std::string FormatClipLength(int seconds);  // 30 s, 2 min
 // Iconos de trazo fino y constante, sin fondos ni círculos detrás.
 enum class Icon {
   Replay, Mic, Camera, Close, Back, Play, Pause, Folder, Trash, Star, StarFilled, Scissors, Copy, Pencil,
-  Shot, Marker, Search, Volume, Muted, Next, Prev, External
+  Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share
 };
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float radius, ImU32 color);
 // Marca de estado: cuadrado en Negro, rombo en Psíquico. Nunca un círculo de

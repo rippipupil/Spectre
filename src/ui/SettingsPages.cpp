@@ -580,7 +580,8 @@ void PageNotifications(SettingsModel& m) {
   Heading("AVISOS EN PANTALLA");
   m.dirty |= SwitchField("Mostrar avisos", &c.showNotifications,
                          "Avisos breves al guardar un clip, una captura o empezar a grabar. Los errores se muestran "
-                         "siempre.");
+                         "siempre. Sobre un juego a pantalla completa, un aviso puede añadir un frame de retraso "
+                         "mientras se ve: si lo notas, apágalos y usa el sonido de abajo.");
   FieldLabel("Posición");
   m.dirty |= ChoiceCombo<std::string>("##pos", c.toastPosition,
                                       {{"top-right", "Arriba a la derecha"},

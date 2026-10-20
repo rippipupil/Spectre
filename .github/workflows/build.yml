@@ -76,7 +76,7 @@ jobs:
           $deps = dumpbin /dependents dist\spectre.exe | Out-String
           Write-Host $deps
           if ($deps -match '(?i)(vcruntime|msvcp)\d*\.dll') { throw "spectre.exe depende del runtime de VC++" }
-          foreach ($dll in 'avcodec','avformat','avutil','swresample') {
+          foreach ($dll in 'avcodec','avformat','avutil','swresample','swscale') {
             if (-not (Get-ChildItem dist -Filter "$dll-*.dll")) { throw "Falta $dll en dist" }
           }
 

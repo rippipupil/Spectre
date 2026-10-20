@@ -63,5 +63,7 @@ constexpr UINT WM_SPECTRE_UPDATE_READY = WM_APP + 15;   // lParam = new std::wst
 constexpr UINT WM_SPECTRE_SHOW_APP = WM_APP + 16;       // otra instancia (abrir el exe otra vez) pide la ventana
 constexpr UINT WM_SPECTRE_MEDIA = WM_APP + 17;          // miniaturas o duraciones listas para la ventana
 constexpr UINT WM_SPECTRE_LIBRARY = WM_APP + 18;        // la carpeta cambió (límite de espacio)
+constexpr UINT WM_SPECTRE_EXPORT = WM_APP + 19;         // wParam = % de la exportación, o kExportDone
+constexpr WPARAM kExportDone = 1000;
 
 } // namespace spectre

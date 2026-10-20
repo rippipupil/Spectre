@@ -54,6 +54,7 @@ std::string KindUpper(MediaKind kind) {
   case MediaKind::Clip: return "CLIP";
   case MediaKind::Recording: return "GRABACIÓN";
   case MediaKind::Trim: return "RECORTE";
+  case MediaKind::Export: return "DISCORD";
   case MediaKind::Screenshot: return "CAPTURA";
   }
   return "";
@@ -252,7 +253,9 @@ std::vector<const MediaItem*> AppUi::Filtered(const AppModel& m) const {
   std::string needle = Lower(search_);
   for (const auto& item : m.items) {
     switch (filter_) {
-    case 1: if (item.kind != MediaKind::Clip && item.kind != MediaKind::Trim) continue; break;
+    case 1:
+      if (item.kind != MediaKind::Clip && item.kind != MediaKind::Trim && item.kind != MediaKind::Export) continue;
+      break;
     case 2: if (item.kind != MediaKind::Recording) continue; break;
     case 3: if (item.kind != MediaKind::Screenshot) continue; break;
     case 4: if (!item.favorite) continue; break;
@@ -630,6 +633,14 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   if (ImGui::MenuItem("Abrir con Windows")) a.openPath(path);
   if (ImGui::MenuItem("Mostrar en la carpeta")) a.showInFolder(path);
   if (ImGui::MenuItem("Copiar para pegar en Discord")) a.copyToClipboard(path);
+  if (item->Video()) {
+    if (m.exportPercent >= 0 && m.exportPath == path) {
+      std::string label = "Cancelar la exportación (" + std::to_string(m.exportPercent) + " %)";
+      if (ImGui::MenuItem(label.c_str())) a.cancelExport();
+    } else if (ImGui::MenuItem("Exportar para Discord (menos de 20 MB)", nullptr, false, m.exportPercent < 0)) {
+      a.exportForDiscord(path);
+    }
+  }
   ImGui::Separator();
   if (ImGui::MenuItem(item->favorite ? "Quitar de favoritos" : "Añadir a favoritos")) a.setFavorite(path, !item->favorite);
   if (ImGui::MenuItem("Renombrar...")) {
@@ -994,8 +1005,12 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
       sub += res;
     }
     sub += "  ·  " + item.name;
-    float actionsW = rowH * 6 + Px(4) * 5;
-    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(p.textMuted),
+    const bool exporting = m.exportPercent >= 0;
+    const bool exportingThis = exporting && m.exportPath == item.path;
+    if (exportingThis) sub = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %";
+    const int actions = video ? 7 : 6;
+    float actionsW = rowH * float(actions) + Px(4) * float(actions - 1);
+    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(exportingThis ? p.accent : p.textMuted),
          Ellipsize(ImGui::GetFont(), Px(kSmall), sub, ImGui::GetContentRegionAvail().x - rowH - actionsW - Px(30)).c_str());
     ImGui::SetCursorScreenPos(ImVec2(q.x + ImGui::GetContentRegionAvail().x - actionsW, q.y));
     if (IconButton("fav", item.favorite ? Icon::StarFilled : Icon::Star, rowH,
@@ -1013,6 +1028,18 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     if (IconButton("copy", Icon::Copy, rowH, "Copiar el archivo para pegarlo en Discord o WhatsApp"))
       a.copyToClipboard(item.path);
     ImGui::SameLine(0, Px(4));
+    if (video) {
+      if (exportingThis) {
+        std::string tip = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %. Clic para cancelar.";
+        if (IconButton("export", Icon::Share, rowH, tip.c_str(), true)) a.cancelExport();
+      } else if (IconButton("export", Icon::Share, rowH,
+                            exporting ? "Ya se está exportando otro vídeo"
+                                      : "Exportar para Discord: una copia de menos de 20 MB que se ve en el chat. "
+                                        "El original no cambia.")) {
+        a.exportForDiscord(item.path); // si hay otra en marcha, el aviso lo dice
+      }
+      ImGui::SameLine(0, Px(4));
+    }
     if (IconButton("folder", Icon::Folder, rowH, "Mostrar en la carpeta")) a.showInFolder(item.path);
     ImGui::SameLine(0, Px(4));
     if (IconButton("external", Icon::External, rowH, "Abrir con Windows")) {
@@ -1023,6 +1050,13 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     if (IconButton("trash", Icon::Trash, rowH, "Mover a la papelera (Supr)")) {
       deletePath_ = item.path;
       openDelete_ = true;
+    }
+    if (exportingThis) {
+      // 1 px a lo ancho, con la parte hecha en el acento.
+      float x0 = q.x, x1 = q.x + ImGui::GetContentRegionAvail().x, y = q.y + rowH + Px(7);
+      float done = x0 + (x1 - x0) * float(m.exportPercent) / 100.0f;
+      dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + Px(1)), C(p.line));
+      dl->AddRectFilled(ImVec2(x0, y), ImVec2(done, y + Px(1)), C(p.accent));
     }
     ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(14)));
   }

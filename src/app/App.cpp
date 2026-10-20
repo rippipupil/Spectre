@@ -212,6 +212,8 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
         Toast("No se pudo copiar el archivo al portapapeles", true);
     });
   };
+  appActions_.exportForDiscord = [this](const std::string& path) { Defer([this, path] { ExportForDiscord(path); }); };
+  appActions_.cancelExport = [this] { exporter_.Cancel(); };
   appActions_.setFavorite = [this](const std::string& path, bool favorite) {
     library_->SetFavorite(path, favorite);
     for (auto& item : appModel_.items)
@@ -312,6 +314,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   CloseApp();
   menu_.Hide();
   toast_.Hide();
+  exporter_.Stop(); // una exportación a medias se cancela y se borra
   pipeline_.Stop();
   // Clips o recortes que se están escribiendo. Antes de actualizar se espera
   // lo que haga falta: el instalador no debe encontrar un MP4 a medias.
@@ -546,6 +549,54 @@ void App::TrimClip(const std::string& path, double start, double end) {
     if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
   }).detach();
   Toast("Recortando el clip...");
+}
+
+void App::ExportForDiscord(const std::string& path) {
+  if (exporter_.Busy()) {
+    Toast("Ya se está exportando otro vídeo: espera a que termine", true);
+    return;
+  }
+  ExportOptions options;
+  // Con un juego abierto se exporta sin prisa, para no quitarle CPU.
+  options.gentle = GameActive() || pipeline_.Recording();
+  HWND hwnd = hwnd_;
+  exporter_.Start(
+      path, options, [hwnd](int percent) { PostMessageW(hwnd, WM_SPECTRE_EXPORT, WPARAM(percent), 0); },
+      [hwnd] { PostMessageW(hwnd, WM_SPECTRE_EXPORT, kExportDone, 0); });
+  appModel_.exportPath = path;
+  appModel_.exportPercent = 0;
+  appWindow_.Invalidate();
+  Toast("Exportando para Discord...");
+}
+
+void App::FinishExport() {
+  ExportResult r;
+  if (!exporter_.TakeResult(&r)) return;
+  appModel_.exportPath.clear();
+  appModel_.exportPercent = -1;
+  appWindow_.Invalidate();
+  if (r.cancelled) {
+    Toast("Exportación cancelada");
+    return;
+  }
+  if (!r.ok) {
+    Toast(r.error, true);
+    return;
+  }
+  Log("Exportado para Discord: %s, %s (%s)", r.output.c_str(), FormatBytes(r.bytes).c_str(),
+      r.alreadyFits ? "ya cabía, sin recodificar" : r.encoder.c_str());
+  const bool copied = CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, r.output);
+  const std::string size = FormatBytes(r.bytes);
+  if (r.alreadyFits) {
+    Toast(copied ? "Ya cabe en Discord (" + size + "): copiado, pégalo con Ctrl+V"
+                 : "Ya cabe en Discord (" + size + "): no hace falta exportarlo");
+    return;
+  }
+  Toast(copied ? "Lista para Discord (" + size + ") y copiada: pégala con Ctrl+V"
+               : "Copia para Discord guardada (" + size + ")");
+  if (menu_.Visible()) RefreshPanelClips();
+  if (appWindow_.Visible()) RescanLibrary();
+  EnforceStorageLimit(); // algo nuevo en la carpeta
 }
 
 void App::ToggleMenu() {
@@ -889,6 +940,7 @@ std::string DeletedText(const LimitResult& r) {
     case MediaKind::Clip: n = {"clip", "clips", false}; break;
     case MediaKind::Recording: n = {"grabación", "grabaciones", true}; break;
     case MediaKind::Trim: n = {"recorte", "recortes", false}; break;
+    case MediaKind::Export: n = {"vídeo para Discord", "vídeos para Discord", false}; break;
     case MediaKind::Screenshot: n = {"captura", "capturas", true}; break;
     }
   std::string text = r.deleted == 1 ? std::string("se borró ") + (n.female ? "una " : "un ") + n.one +
@@ -1263,6 +1315,8 @@ void App::RefreshAppModel() {
   appModel_.replayActive = pipeline_.Running() && config_.replayEnabled;
   appModel_.gameDetected = GameActive();
   appModel_.gameName = game_ ? game_->exeName : "";
+  appModel_.exportPath = exporter_.Busy() ? exporter_.Input() : std::string();
+  appModel_.exportPercent = exporter_.Busy() ? exporter_.Percent() : -1;
   SettingsModel& s = appModel_.settings;
   s.stats = appModel_.stats;
   s.hotkeyError = hotkeyError_;
@@ -1490,6 +1544,14 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     EnforceStorageLimit(); // algo nuevo en la carpeta
     return 0;
   }
+  case WM_SPECTRE_EXPORT:
+    if (wp == kExportDone) {
+      FinishExport();
+    } else if (exporter_.Busy()) {
+      appModel_.exportPercent = int(wp);
+      appWindow_.Invalidate();
+    }
+    return 0;
   case WM_SPECTRE_LIBRARY: {
     std::unique_ptr<LimitResult> result(reinterpret_cast<LimitResult*>(lp));
     if (result) ReportStorageLimit(*result);
@@ -1566,6 +1628,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // bien el archivo de una grabación en curso y se sale.
     if (wp) {
       installerPath_.clear(); // nunca instalar mientras Windows cierra la sesión
+      exporter_.Stop();
       pipeline_.Stop();
       WaitForPendingWrites(3000);
       Quit();

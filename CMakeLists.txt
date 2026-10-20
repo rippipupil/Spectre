@@ -33,7 +33,8 @@ target_link_libraries(ffmpeg INTERFACE
   ${SPECTRE_FFMPEG_DIR}/lib/avcodec.lib
   ${SPECTRE_FFMPEG_DIR}/lib/avformat.lib
   ${SPECTRE_FFMPEG_DIR}/lib/avutil.lib
-  ${SPECTRE_FFMPEG_DIR}/lib/swresample.lib)
+  ${SPECTRE_FFMPEG_DIR}/lib/swresample.lib
+  ${SPECTRE_FFMPEG_DIR}/lib/swscale.lib)
 
 set(SPECTRE_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Versión que muestra la app (CI pone la de la release)")
 # "Buscar actualizaciones" compara esta versión con la etiqueta de la release:
@@ -60,6 +61,6 @@ target_link_options(spectre PRIVATE /MANIFEST:NO /DELAYLOAD:mfplat.dll /DELAYLOA
 install(TARGETS spectre RUNTIME DESTINATION .)
 install(DIRECTORY ${SPECTRE_FFMPEG_DIR}/bin/ DESTINATION . FILES_MATCHING
   PATTERN "avcodec-*.dll" PATTERN "avformat-*.dll" PATTERN "avutil-*.dll"
-  PATTERN "swresample-*.dll")
+  PATTERN "swresample-*.dll" PATTERN "swscale-*.dll")
 install(FILES THIRD_PARTY.md DESTINATION .)
 install(FILES ${SPECTRE_FFMPEG_DIR}/LICENSE.txt DESTINATION . RENAME FFMPEG-LICENSE.txt OPTIONAL)

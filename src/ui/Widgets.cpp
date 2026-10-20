@@ -261,6 +261,12 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     line(-0.05f, 0.10f, 0.78f, -0.73f);
     poly({{0.28f, -0.78f}, {0.78f, -0.78f}, {0.78f, -0.28f}}, false);
     break;
+  case Icon::Share:
+    // Bandeja con una flecha hacia arriba: enviar (exportar para Discord).
+    poly({{-0.80f, 0.15f}, {-0.80f, 0.78f}, {0.80f, 0.78f}, {0.80f, 0.15f}}, false);
+    line(0.0f, 0.42f, 0.0f, -0.80f);
+    poly({{-0.40f, -0.40f}, {0.0f, -0.80f}, {0.40f, -0.40f}}, false);
+    break;
   }
 }
 

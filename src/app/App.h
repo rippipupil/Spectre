@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Config.h"
+#include "app/Export.h"
 #include "app/Fullscreen.h"
 #include "app/Library.h"
 #include "app/System.h"
@@ -42,6 +43,10 @@ private:
   void CaptureScreenshot();
   void AddMarker();
   void TrimClip(const std::string& path, double start, double end);
+  // Copia de menos de 20 MB en H.264 para Discord, en otro hilo; al acabar se
+  // copia al portapapeles.
+  void ExportForDiscord(const std::string& path);
+  void FinishExport();
   void ToggleMenu();
   void OpenMenu();
   // restoreFocus=false: el programa que se acaba de abrir desde el panel
@@ -183,6 +188,7 @@ private:
   ULONGLONG lastAppStats_ = 0;
   ULONGLONG lastAppUsage_ = 0;
   ULONGLONG lastAppFrame_ = 0;
+  Exporter exporter_;
 };
 
 } // namespace spectre
