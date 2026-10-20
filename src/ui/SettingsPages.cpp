@@ -68,6 +68,33 @@ int EstimatedKbps(const SettingsModel& m) {
   return PlanQuality(c.quality, c.bitrateKbps, width, height, c.fps, c.codec).maxKbps;
 }
 
+// Config::maxBufferMB == 1024 es «automático»: el pipeline calcula el tope con
+// la calidad, la duración y la RAM (Pipeline::BufferLimit).
+constexpr int kAutoBufferMB = 1024;
+
+// Lo que puede llegar a ocupar el replay: todo el rato al bitrate máximo del
+// preset, más los segundos de margen del anillo, como Pipeline::BufferLimit.
+double ReplayPeakBytes(const SettingsModel& m) {
+  return double(EstimatedKbps(m)) * 125.0 * (double(m.config.clipSeconds) + ReplayBuffer::kExtraSeconds) * 1.1;
+}
+
+// El tope automático: lo que pide la duración, sin pasar de la cuarta parte de
+// la RAM. Con la captura en marcha y los mismos ajustes, el que usa de verdad.
+double AutoBufferBytes(const SettingsModel& m) {
+  const Config &c = m.config, &b = m.base;
+  bool same = m.stats.running && m.stats.bufferLimitBytes > 0 && b.maxBufferMB == kAutoBufferMB && b.replayEnabled &&
+              c.replayEnabled && c.clipSeconds == b.clipSeconds && c.quality == b.quality &&
+              c.bitrateKbps == b.bitrateKbps && c.outputHeight == b.outputHeight && c.fps == b.fps &&
+              c.codec == b.codec;
+  if (same) return double(m.stats.bufferLimitBytes);
+  static const double quarter = [] {
+    MEMORYSTATUSEX mem{};
+    mem.dwLength = sizeof(mem);
+    return GlobalMemoryStatusEx(&mem) ? double(mem.ullTotalPhys) / 4.0 : double(1u << 30);
+  }();
+  return std::max(std::min(ReplayPeakBytes(m), quarter), double(64u << 20));
+}
+
 // Medidor de nivel: barra en la columna de controles, con el dispositivo y
 // formato reales debajo. Si la barra no se mueve con el juego sonando, se
 // está escuchando el dispositivo equivocado.
@@ -108,21 +135,45 @@ void PageReplay(SettingsModel& m) {
   m.dirty |= ChoiceCombo<int>("##len", c.clipSeconds,
                               {{15, "15 segundos"}, {30, "30 segundos"}, {60, "1 minuto"},
                                {120, "2 minutos"}, {300, "5 minutos"}});
-  FieldLabel("Límite de memoria");
-  m.dirty |= ImGui::SliderInt("##mem", &c.maxBufferMB, 64, 4096, "%d MB");
-  double estimate = double(EstimatedKbps(m)) * 1000.0 / 8.0 * c.clipSeconds * 1.1;
-  double limit = double(c.maxBufferMB) * 1024.0 * 1024.0;
-  char hint[360];
-  if (estimate > limit) {
-    snprintf(hint, sizeof(hint),
-             "Con esta calidad y duración el replay puede necesitar hasta %s de RAM, más que el límite de %d MB. "
-             "En escenas de mucho movimiento el clip saldría más corto: sube el límite o baja la calidad.",
-             FormatBytes(uint64_t(estimate)).c_str(), c.maxBufferMB);
+  FieldLabel("Límite de memoria", "Automático reserva lo que pide la duración del clip con esta calidad, sin pasar "
+                                  "de la cuarta parte de la RAM.");
+  const double peak = ReplayPeakBytes(m);
+  const double autoBytes = AutoBufferBytes(m);
+  // Los topes fijos se saltan 1024 MB, que es «automático».
+  std::string autoName = "Automático (hasta " + FormatBytes(uint64_t(autoBytes)) + ")";
+  std::string ownName = std::to_string(c.maxBufferMB) + " MB";
+  std::vector<std::pair<int, const char*>> limits = {{kAutoBufferMB, autoName.c_str()},
+                                                     {256, "256 MB"},
+                                                     {512, "512 MB"},
+                                                     {768, "768 MB"},
+                                                     {1536, "1.5 GB"},
+                                                     {2048, "2 GB"},
+                                                     {3072, "3 GB"},
+                                                     {4096, "4 GB"}};
+  if (std::none_of(limits.begin(), limits.end(), [&](const auto& o) { return o.first == c.maxBufferMB; }))
+    limits.push_back({c.maxBufferMB, ownName.c_str()}); // uno del deslizador de antes
+  m.dirty |= ChoiceCombo<int>("##mem", c.maxBufferMB, limits);
+  const bool automatic = c.maxBufferMB == kAutoBufferMB;
+  const double limit = automatic ? autoBytes : double(c.maxBufferMB) * 1024.0 * 1024.0;
+  char hint[400];
+  if (peak > limit * 1.02) {
+    if (automatic)
+      snprintf(hint, sizeof(hint),
+               "Con esta calidad y duración el replay puede necesitar hasta %s de RAM, más que la cuarta parte de "
+               "la RAM del PC (%s), que es el tope automático. En escenas de mucho movimiento el clip saldría más "
+               "corto: baja la calidad o la duración.",
+               FormatBytes(uint64_t(peak)).c_str(), FormatBytes(uint64_t(limit)).c_str());
+    else
+      snprintf(hint, sizeof(hint),
+               "Con esta calidad y duración el replay puede necesitar hasta %s de RAM, más que el límite de %s. En "
+               "escenas de mucho movimiento el clip saldría más corto: sube el límite, ponlo en automático o baja "
+               "la calidad.",
+               FormatBytes(uint64_t(peak)).c_str(), FormatBytes(uint64_t(limit)).c_str());
     Warning(hint);
   } else {
     snprintf(hint, sizeof(hint),
              "El replay guarda vídeo ya comprimido en la RAM. Con esta calidad ocupa como mucho unos %s.",
-             FormatBytes(uint64_t(estimate)).c_str());
+             FormatBytes(uint64_t(peak)).c_str());
     Help(hint);
   }
 
@@ -728,13 +779,19 @@ void PagePerformance(SettingsModel& m) {
     Help("La captura está parada, así que Spectre no usa la GPU ni el encoder.");
     return;
   }
-  snprintf(buf, sizeof(buf), "%s, %.0f s", FormatBytes(s.bufferBytes).c_str(), s.bufferSeconds);
+  std::string replay = FormatBytes(s.bufferBytes);
+  if (s.bufferLimitBytes > 0) replay += " de " + FormatBytes(s.bufferLimitBytes) + " como mucho";
+  snprintf(buf, sizeof(buf), "%s, %.0f s", replay.c_str(), s.bufferSeconds);
   ValueRow("Replay en memoria", buf);
 
   Heading("CAPTURA");
   ValueRow("GPU", s.gpu);
   ValueRow("Método", s.capture);
   ValueRow("Encoder", s.encoder);
+  if (s.encoderSoftware) {
+    Gap(2);
+    Warning("La gráfica no pudo codificar el vídeo: se codifica con la CPU, a 720p30 como mucho. Actualiza su driver.");
+  }
   snprintf(buf, sizeof(buf), "%d x %d a %d fps", s.width, s.height, s.fps);
   ValueRow("Vídeo", buf);
   snprintf(buf, sizeof(buf), "hasta %d Mbps", s.maxKbps / 1000);
