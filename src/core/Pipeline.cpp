@@ -417,6 +417,12 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
       t0 = QpcNow();
       ok = WriteClip(path, streams, packets);
       Log("Clip: escrito en %.0f ms", QpcToSeconds(QpcNow() - t0) * 1000.0);
+      // Los paquetes que el anillo soltó mientras se escribía se liberan aquí,
+      // y liberar toma el lock del heap, que el hilo de vídeo necesita en cada
+      // frame: con prioridad normal, por lo mismo que la copia.
+      SetThreadEcoQoS(false);
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+      packets.clear();
     } catch (const std::exception& e) {
       Log("Clip: excepción al guardar: %s", e.what());
     }

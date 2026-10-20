@@ -297,7 +297,7 @@ void PerfMonitor::LogEnvironment(HMONITOR captured) {
     Log("CPU: %s, %lu hilos; RAM %s", Narrow(cpu).c_str(), GetActiveProcessorCount(ALL_PROCESSOR_GROUPS),
         Mb(ram.ullTotalPhys).c_str());
 
-    // «Grabar lo que ha pasado» de la Game Bar es otro replay como el nuestro:
+    // «Grabar lo ocurrido» de la Game Bar es otro replay como el nuestro:
     // con los dos a la vez el encoder de la GPU trabaja el doble. El modo de
     // juego, según Medal, puede dejar sin turno a los programas de fondo.
     const wchar_t* dvr = L"Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR";

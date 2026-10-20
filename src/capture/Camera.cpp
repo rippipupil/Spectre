@@ -109,17 +109,18 @@ void Camera::Run(std::wstring id, UINT wantWidth) {
   }
   const DWORD stream = DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
   if (SUCCEEDED(hr)) {
-    // Formato nativo: el más pequeño que llegue a wantWidth (si ninguno llega,
-    // el más grande), sin pasar de 1280x720. A igual tamaño, con 24 fps o más
-    // y sin comprimir (MJPEG hay que decodificarlo en la CPU).
+    // Formato nativo: el más pequeño que llegue a wantWidth con 24 fps o más
+    // (si ninguno llega, el más grande), sin pasar de 1280x720. A igual
+    // tamaño, sin comprimir (MJPEG hay que decodificarlo en la CPU). Muchas
+    // cámaras USB 2 dan los tamaños grandes sin comprimir a 5-10 fps.
     struct Score {
       bool fits = false, fluid = false, raw = false;
       UINT64 area = 0;
     };
     auto better = [](const Score& a, const Score& b) { // a mejor que b
       if (a.fits != b.fits) return a.fits;
-      if (a.area != b.area) return a.fits ? a.area < b.area : a.area > b.area;
       if (a.fluid != b.fluid) return a.fluid;
+      if (a.area != b.area) return a.fits ? a.area < b.area : a.area > b.area;
       return a.raw && !b.raw;
     };
     ComPtr<IMFMediaType> best;
