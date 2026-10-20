@@ -74,6 +74,9 @@ private:
   std::string name_;
   std::string label_;
   bool software_ = false;
+  // Hay abierto un encoder de Media Foundation y un MFStartup nuestro que se
+  // suelta al cerrarlo (ver TryOpen).
+  bool mfStarted_ = false;
   AVPixelFormat swFormat_ = AV_PIX_FMT_NV12;
 
   // Camino por memoria de sistema.

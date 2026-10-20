@@ -319,7 +319,8 @@ void Recorder::Run() {
   SetThreadEcoQoS(true);
   // Con la cola al día, E/S y memoria en prioridad de fondo; si se acumulan
   // más de 32 MB (el juego está leyendo mucho del disco, o el disco es lento),
-  // prioridad normal hasta bajar de 4 MB.
+  // prioridad normal hasta bajar de 4 MB. Al parar, también normal: Stop()
+  // espera a que se vacíe la cola en el hilo de la interfaz.
   BackgroundMode background;
   for (;;) {
     std::deque<std::pair<PacketPtr, int>> batch;
@@ -333,8 +334,9 @@ void Recorder::Run() {
       if (batch.empty() && (!running_ || overflowed_)) break;
     }
     size_t backlog = pendingBytes_;
-    if (background.Active() && backlog > (32u << 20)) background.Leave();
-    else if (!background.Active() && backlog < (4u << 20)) background.Enter();
+    bool hurry = !running_ || backlog > (32u << 20);
+    if (background.Active() && hurry) background.Leave();
+    else if (!background.Active() && !hurry && backlog < (4u << 20)) background.Enter();
     size_t written = 0;
     for (auto& [pkt, stream] : batch) {
       written += size_t(pkt->size);

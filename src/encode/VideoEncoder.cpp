@@ -1,5 +1,6 @@
 #include "encode/VideoEncoder.h"
 
+#include "app/CrashHandler.h"
 #include "common/Util.h"
 
 extern "C" {
@@ -8,8 +9,12 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 
+#include <mfapi.h>
+#include <objbase.h>
+
 #include <algorithm>
 #include <cstring>
+#include <thread>
 
 namespace spectre {
 
@@ -269,7 +274,27 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
   }
 
   if (ok) {
-    int err = avcodec_open2(ctx_, codec, &opts);
+    int err = 0;
+    if (n.find("_mf") != std::string::npos) {
+      // Media Foundation. FFmpeg pone en el MTA de COM el hilo que abre: en el
+      // de la interfaz, que es STA, el open falla («COM must not be in STA
+      // mode») y aun así su limpieza hace MFShutdown() y CoUninitialize(), que
+      // dejan sin COM a la interfaz y sin Media Foundation al proceso (webcam,
+      // listas de audio). Por eso se abre en un hilo propio y Close() cierra
+      // en otro. Si el open falla al buscar el MFT, FFmpeg 8.1 hace además un
+      // MFShutdown() de más: se lleva este MFStartup y no el de main. Si falla
+      // después, este se queda sin soltar y Media Foundation sigue arrancada,
+      // que no molesta.
+      bool mf = MediaFoundationAvailable();
+      if (mf) MFStartup(MF_VERSION, MFSTARTUP_LITE);
+      std::thread([&] {
+        InstallThreadCrashHandler();
+        err = avcodec_open2(ctx_, codec, &opts);
+      }).join();
+      mfStarted_ = mf && err >= 0;
+    } else {
+      err = avcodec_open2(ctx_, codec, &opts);
+    }
     if (err < 0) {
       Log("No se pudo abrir %s (%s): %s", codec->name, simple ? "simple" : "calidad", AvError(err).c_str());
       ok = false;
@@ -351,6 +376,18 @@ bool VideoEncoder::SetupStaging(const VideoEncoderSettings& s) {
 }
 
 void VideoEncoder::Close() {
+  if (mfStarted_) {
+    // Media Foundation (ver TryOpen): la limpieza de FFmpeg hace su
+    // CoUninitialize() en el hilo que cierra. Este hilo entra en el MTA para
+    // que esa llamada cierre lo suyo.
+    std::thread([this] {
+      InstallThreadCrashHandler();
+      CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      avcodec_free_context(&ctx_);
+    }).join();
+    MFShutdown();
+    mfStarted_ = false;
+  }
   avcodec_free_context(&ctx_);
   av_buffer_unref(&hwFrames_);
   av_buffer_unref(&hwDevice_);

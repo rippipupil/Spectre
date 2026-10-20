@@ -206,16 +206,19 @@ size_t Pipeline::BufferLimit(double seconds) const {
   return size_t(std::max(std::min(bytes, quarter), double(64u << 20)));
 }
 
+Pipeline::~Pipeline() {
+  Stop();
+  // Al salir sí se espera a que terminen de escribirse las grabaciones
+  // cortadas (ver ReleaseRecorder), como antes del corte por la cola.
+  for (auto& t : recorderDrains_) t.join();
+}
+
 void Pipeline::Stop() {
   perf_.Stop();
   running_ = false;
   if (videoThread_.joinable()) videoThread_.join();
   audio_.Stop();
-  if (recorder_) {
-    if (buffer_) buffer_->DetachLive();
-    recorder_->Stop();
-    recorder_.reset();
-  }
+  ReleaseRecorder();
   if (camera_) camera_->Stop();
   camera_.reset();
   if (capture_) capture_->Stop();
@@ -464,9 +467,27 @@ bool Pipeline::StartRecording(const std::string& path) {
   return true;
 }
 
-void Pipeline::StopRecording() {
+void Pipeline::StopRecording() { ReleaseRecorder(); }
+
+void Pipeline::ReleaseRecorder() {
   if (!recorder_) return;
   if (buffer_) buffer_->DetachLive();
+  if (recorder_->Overflowed() && !recorder_->Finished()) {
+    // Se cortó porque el disco no daba abasto: su hilo aún vacía hasta 256 MB
+    // de cola a la velocidad de ese disco (a 5 MB/s, casi un minuto) y cierra
+    // el archivo él solo. Esperarle aquí congelaría la interfaz, que es quien
+    // para el pipeline al cambiar un ajuste o al cerrarse el juego: se le
+    // espera en otro hilo, contado como escritura pendiente para que una
+    // actualización no se instale antes de que acabe.
+    recorderDrains_.emplace_back(
+        [rec = std::move(recorder_), pending = std::make_shared<PendingWrite>()]() mutable {
+          InstallThreadCrashHandler();
+          rec->Stop();
+          rec.reset();
+          pending.reset();
+        });
+    return;
+  }
   recorder_->Stop();
   recorder_.reset();
 }

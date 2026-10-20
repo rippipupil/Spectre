@@ -936,7 +936,10 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   }
   case WM_TIMER:
-    // La grabación pudo acabar sola (error de disco, etc.): la actualización pendiente no se queda colgada.
+    // La grabación pudo acabar sola (disco lento o con errores): ni los ajustes ni la actualización pendientes se
+    // quedan colgados.
+    if (wp == kTimerHealth && restartPending_ && !pipeline_.Recording())
+      UpdatePipeline(std::exchange(restartPending_, false));
     if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerGame) {
       CheckGame();

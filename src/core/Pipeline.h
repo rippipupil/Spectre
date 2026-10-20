@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace spectre {
 
@@ -69,7 +70,7 @@ public:
   // Mensajes para el usuario (clip guardado, errores...). Se llama desde otros hilos.
   using Notify = std::function<void(const std::string& message, bool error)>;
 
-  ~Pipeline() { Stop(); }
+  ~Pipeline();
   bool Start(const PipelineSettings& settings, Notify notify);
   void Stop();
   bool Running() const { return running_; }
@@ -106,6 +107,7 @@ private:
   bool Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& frame);
   RECT CameraRect(UINT camWidth, UINT camHeight) const;
   size_t BufferLimit(double seconds) const;
+  void ReleaseRecorder();
 
   PipelineSettings settings_;
   Notify notify_;
@@ -117,6 +119,7 @@ private:
   std::unique_ptr<Camera> camera_;
   std::shared_ptr<ReplayBuffer> buffer_;
   std::unique_ptr<Recorder> recorder_;
+  std::vector<std::thread> recorderDrains_; // grabaciones cortadas que aún vacían su cola
   StreamList streams_;
 
   std::atomic<bool> running_{false};
