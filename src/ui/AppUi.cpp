@@ -26,6 +26,8 @@ constexpr float kSidebarWidth = 224.0f;
 constexpr float kFooterHeight = 60.0f;
 constexpr int kThumbWidth = 384, kThumbHeight = 216;
 constexpr size_t kMaxThumbs = 180; // texturas de miniatura vivas (unos 60 MB de VRAM como mucho)
+constexpr const char* kTrimHelp = "Se guarda como un clip nuevo y el original no cambia. Como no se recodifica, "
+                                  "empieza en el fotograma clave anterior al inicio elegido: hasta 2 s antes.";
 
 std::string Lower(std::string s) {
   for (auto& c : s) c = char(tolower((unsigned char)c));
@@ -146,7 +148,7 @@ void AppUi::OnOpened(HWND notifyWindow, UINT notifyMsg) {
 }
 
 void AppUi::OnClosed() {
-  worker_.Stop();
+  worker_.Stop(false); // una miniatura lenta (carpeta de red) no retrasa el cierre
   thumbs_.clear();
   durationsAsked_.clear();
   player_.Close();
@@ -654,6 +656,7 @@ void AppUi::Dialogs(AppModel& m, const AppActions& a) {
   if (openDelete_) {
     ImGui::OpenPopup("Mover a la papelera");
     openDelete_ = false;
+    deleteHasBin_ = HasRecycleBin(deletePath_);
   }
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(24), Px(20)));
   ImGui::PushStyleColor(ImGuiCol_PopupBg, V(p.bg));
@@ -701,19 +704,24 @@ void AppUi::Dialogs(AppModel& m, const AppActions& a) {
     const MediaItem* item = Find(m, deletePath_);
     std::string name = item ? item->name : deletePath_;
     Text(ImGui::GetWindowDrawList(), Bold(), Px(kBody) + Px(2), ImGui::GetCursorScreenPos(), C(p.text),
-         "¿Mover a la papelera?");
+         deleteHasBin_ ? "¿Mover a la papelera?" : "¿Borrar para siempre?");
     Gap(30);
     ImGui::PushTextWrapPos(0);
     ImGui::TextWrapped("%s", name.c_str());
     ImGui::PopTextWrapPos();
     Gap(4);
-    Help("Podrás recuperarlo desde la papelera de reciclaje de Windows.");
+    Help(deleteHasBin_ ? "Podrás recuperarlo desde la papelera de reciclaje de Windows."
+                       : "Esta unidad no tiene papelera (memoria USB o carpeta de red): Windows te pedirá "
+                         "confirmarlo y no se podrá recuperar.");
     Gap(14);
     float bw = Px(150);
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - bw * 2 - Px(8));
     bool cancel = GhostButton("cancel", "Cancelar", bw) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
     ImGui::SameLine(0, Px(8));
-    bool ok = GhostButton("ok", "Mover a la papelera", bw, Tone::Danger) || ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+    // Intro no cuenta en el frame en que se abre: si no, el Intro que eligió
+    // «Mover a la papelera...» en el menú con el teclado lo confirmaría sin verlo.
+    bool ok = GhostButton("ok", deleteHasBin_ ? "Mover a la papelera" : "Borrar para siempre", bw, Tone::Danger) ||
+              (!ImGui::IsWindowAppearing() && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
     if (cancel) {
       ImGui::CloseCurrentPopup();
     } else if (ok) {
@@ -1024,7 +1032,13 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
   int index = -1;
   for (size_t i = 0; i < list.size(); ++i)
     if (list[i]->path == item.path) index = int(i);
-  const float controlsH = video ? Px(trimMode_ ? 128.0f : 92.0f) + (item.markers.empty() ? 0.0f : Px(36)) : Px(10);
+  // El texto del recorte va en una línea aparte (Help: hasta 560 px de ancho).
+  const float trimHelpH =
+      trimMode_ ? ImGui::CalcTextSize(kTrimHelp, nullptr, false, std::min(ImGui::GetContentRegionAvail().x, Px(560))).y +
+                      Px(2) + ImGui::GetStyle().ItemSpacing.y * 2
+                : 0.0f;
+  const float controlsH =
+      video ? Px(trimMode_ ? 128.0f : 92.0f) + trimHelpH + (item.markers.empty() ? 0.0f : Px(36)) : Px(10);
   float areaW = ImGui::GetContentRegionAvail().x;
   float areaH = std::max(Px(160), ImGui::GetContentRegionAvail().y - controlsH);
   ImVec2 va = ImGui::GetCursorScreenPos(), vb(va.x + areaW, va.y + areaH);
@@ -1148,11 +1162,8 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
         trimMode_ = false;
       }
       ImGui::EndDisabled();
-      ImGui::SameLine(0, Px(10));
-      ImGui::PushStyleColor(ImGuiCol_Text, V(p.textFaint));
-      ImGui::AlignTextToFramePadding();
-      ImGui::TextUnformatted("Se guarda como un clip nuevo; el original no cambia.");
-      ImGui::PopStyleColor();
+      Gap(2);
+      Help(kTrimHelp);
     }
     if (!item.markers.empty()) {
       Gap(8);

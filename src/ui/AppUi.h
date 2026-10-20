@@ -135,6 +135,7 @@ private:
   bool openRename_ = false;
   std::string deletePath_;
   bool openDelete_ = false;
+  bool deleteHasBin_ = true; // la unidad del archivo tiene papelera
   std::string starToggle_; // estrella pulsada en una tarjeta este frame
 };
 

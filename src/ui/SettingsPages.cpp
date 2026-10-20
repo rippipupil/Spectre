@@ -468,9 +468,14 @@ void PageStorage(SettingsModel& m, const SettingsActions& a) {
                       C(p.accent));
     ImGui::Dummy(ImVec2(w, h));
     Gap(6);
-    snprintf(buf, sizeof(buf), "%s en Spectre (%zu vídeos, %zu capturas)", FormatBytes(s.usedBytes).c_str(),
+    snprintf(buf, sizeof(buf), "%s de Spectre (%zu vídeos, %zu capturas)", FormatBytes(s.usedBytes).c_str(),
              s.videos, s.screenshots);
     ValueRow("Biblioteca", buf);
+    if (s.others > 0) {
+      snprintf(buf, sizeof(buf), "%s en %zu %s renombrados o de otros programas", FormatBytes(s.otherBytes).c_str(),
+               s.others, s.others == 1 ? "archivo" : "archivos");
+      ValueRow("Otros", buf);
+    }
     ValueRow("Libre en el disco", FormatBytes(s.freeBytes) + " de " + FormatBytes(s.totalBytes));
     if (s.freeBytes < (uint64_t(2) << 30)) {
       Gap(4);
@@ -481,16 +486,34 @@ void PageStorage(SettingsModel& m, const SettingsActions& a) {
   }
 
   Heading("LÍMITE DE ESPACIO");
-  FieldLabel("Espacio máximo", "Tope para todo lo que guarda Spectre en la carpeta de destino.");
+  FieldLabel("Espacio máximo", "Tope para lo que guarda Spectre en la carpeta de destino.");
   m.dirty |= ChoiceCombo<int>("##limit", c.storageLimitGB,
                               {{0, "Sin límite"}, {10, "10 GB"}, {25, "25 GB"}, {50, "50 GB"}, {100, "100 GB"},
                                {250, "250 GB"}, {500, "500 GB"}});
-  if (c.storageLimitGB > 0)
+  if (c.storageLimitGB > 0) {
     Warning("Al pasar del límite, Spectre borra para siempre los clips, grabaciones y capturas más antiguos al "
-            "guardar uno nuevo. Nunca borra los favoritos ni archivos que no haya creado él. Marca con la estrella "
-            "lo que quieras conservar.");
-  else
+            "guardar uno nuevo, y te avisa. Solo cuenta y borra los archivos con el nombre que les pone Spectre "
+            "(Clip_, Grabacion_, Captura_): los de otros programas y los que renombres no cuentan. Los favoritos "
+            "cuentan, pero nunca se borran: marca con la estrella lo que quieras conservar.");
+    // Con lo que hay ahora en la carpeta (si es la misma que se está editando).
+    uint64_t limit = uint64_t(c.storageLimitGB) << 30;
+    if (s.valid && c.outputDir == m.base.outputDir) {
+      Gap(4);
+      std::string now = FormatBytes(s.usedBytes) + " de " + std::to_string(c.storageLimitGB) + " GB";
+      if (s.favoriteBytes > 0) now += ", " + FormatBytes(s.favoriteBytes) + " en favoritos";
+      ValueRow("Ahora", now);
+      if (s.favoriteBytes > limit) {
+        Warning("Los favoritos ya ocupan más que este límite, así que Spectre no borrará nada: súbelo o quita "
+                "alguna estrella.");
+      } else if (s.usedBytes > limit && c.storageLimitGB != m.base.storageLimitGB) {
+        std::string text = "Al aplicar se borrarán para siempre unos " + FormatBytes(s.usedBytes - limit) +
+                           " de lo más antiguo.";
+        Warning(text.c_str());
+      }
+    }
+  } else {
     Help("Sin límite, Spectre no borra nada por su cuenta.");
+  }
 
   Heading("CAPTURAS DE PANTALLA");
   FieldLabel("Formato");

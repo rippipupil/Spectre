@@ -233,8 +233,12 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   appActions_.recycle = [this](const std::string& path) {
     Defer([this, path] {
       std::string error;
-      if (library_->Recycle(path, &error)) Toast("Movido a la papelera: " + FileNameOf(path));
-      else Toast(error, true);
+      bool cancelled = false;
+      bool bin = HasRecycleBin(path);
+      if (library_->Recycle(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, path, &error, &cancelled))
+        Toast((bin ? "Movido a la papelera: " : "Borrado: ") + FileNameOf(path));
+      else if (!cancelled)
+        Toast(error, true);
       RescanLibrary();
     });
   };
@@ -382,7 +386,14 @@ void App::SaveClip() {
 }
 
 void App::OnRecordingStopped(const std::string& path) {
-  if (!path.empty() && !recordMarkers_.empty()) library_->SetMarkers(path, recordMarkers_);
+  if (!path.empty() && !recordMarkers_.empty()) {
+    // Desde el final, como en los clips: la grabación acaba al detenerla, pero
+    // empieza en el keyframe anterior a pulsar el atajo (hasta 2 s antes).
+    int64_t now = QpcNow();
+    std::vector<double> tail;
+    for (int64_t at : recordMarkers_) tail.push_back(QpcToSeconds(now - at));
+    library_->SetTailMarkers(path, std::move(tail));
+  }
   recordMarkers_.clear();
   recordStartQpc_ = 0;
   if (appWindow_.Visible()) RescanLibrary();
@@ -505,7 +516,7 @@ void App::AddMarker() {
   int64_t now = QpcNow();
   markers_.push_back(now);
   while (!markers_.empty() && QpcToSeconds(now - markers_.front()) > kMaxMarkerAge) markers_.pop_front();
-  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(QpcToSeconds(now - recordStartQpc_));
+  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(now);
   if (config_.soundOnSave) PlayCue(Cue::Marker);
   Toast(pipeline_.Recording() ? "Marca añadida a la grabación y al replay" : "Marca añadida: saldrá en el próximo clip");
 }
@@ -833,25 +844,86 @@ void App::SuspendHotkeys(bool suspend) {
 }
 
 void App::EnforceStorageLimit() {
-  if (config_.storageLimitGB <= 0) return;
+  if (config_.storageLimitGB <= 0) {
+    limitWarned_.clear();
+    return;
+  }
   // Una pasada cada vez: el hilo escanea la carpeta y borra lo más antiguo.
   static std::atomic<bool> running{false};
   if (running.exchange(true)) return;
   std::string folder = ResolveOutputDir(config_);
   uint64_t limit = uint64_t(config_.storageLimitGB) << 30;
+  // La grabación en curso cuenta, pero no se toca.
+  std::string recording = pipeline_.Recording() ? pipeline_.Stats().recordPath : std::string();
   std::shared_ptr<Library> library = library_;
   HWND hwnd = hwnd_;
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que acabe
-  std::thread([folder, limit, library, hwnd, pending] {
+  std::thread([folder, limit, recording, library, hwnd, pending] {
     InstallThreadCrashHandler();
-    uint64_t freed = 0;
-    int deleted = library->EnforceLimit(folder, limit, &freed);
-    if (deleted > 0) {
-      Log("Límite de espacio: %d archivos borrados, %s liberados", deleted, FormatBytes(freed).c_str());
-      PostMessageW(hwnd, WM_SPECTRE_LIBRARY, 0, 0);
-    }
+    auto result = std::make_unique<LimitResult>(library->EnforceLimit(folder, limit, recording));
+    if (result->deleted > 0)
+      Log("Límite de espacio: %d archivos borrados, %s liberados", result->deleted,
+          FormatBytes(result->freedBytes).c_str());
+    if (result->blocked)
+      Log("Límite de espacio: lo que no se puede borrar (%s, %s en favoritos) ya pasa de %s: no se borra nada",
+          FormatBytes(result->keptBytes).c_str(), FormatBytes(result->favoriteBytes).c_str(),
+          FormatBytes(limit).c_str());
     running = false;
+    if (PostMessageW(hwnd, WM_SPECTRE_LIBRARY, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
   }).detach();
+}
+
+namespace {
+
+// «se borraron 3 clips antiguos (2.10 GB)»
+std::string DeletedText(const LimitResult& r) {
+  struct Noun {
+    const char *one, *many;
+    bool female;
+  };
+  Noun n{"archivo", "archivos", false};
+  if (!r.mixed) switch (r.kind) {
+    case MediaKind::Clip: n = {"clip", "clips", false}; break;
+    case MediaKind::Recording: n = {"grabación", "grabaciones", true}; break;
+    case MediaKind::Trim: n = {"recorte", "recortes", false}; break;
+    case MediaKind::Screenshot: n = {"captura", "capturas", true}; break;
+    }
+  std::string text = r.deleted == 1 ? std::string("se borró ") + (n.female ? "una " : "un ") + n.one +
+                                           (n.female ? " antigua" : " antiguo")
+                                     : "se borraron " + std::to_string(r.deleted) + " " + n.many +
+                                           (n.female ? " antiguas" : " antiguos");
+  return text + " (" + FormatBytes(r.freedBytes) + ")";
+}
+
+} // namespace
+
+void App::ReportStorageLimit(const LimitResult& r) {
+  std::string limit = std::to_string(r.limitBytes >> 30) + " GB";
+  if (r.blocked) {
+    // Una vez: sale otra vez si cambia algo (el límite, los favoritos, lo guardado).
+    bool favorites = r.favoriteBytes > r.limitBytes;
+    std::string key = (favorites ? "fav " : "new ") + std::to_string(r.limitBytes) + " " +
+                      std::to_string(favorites ? r.favoriteBytes : r.keptBytes);
+    if (key == limitWarned_) return;
+    limitWarned_ = key;
+    if (favorites)
+      ToastAfter("Tus favoritos ya ocupan " + FormatBytes(r.favoriteBytes) + ", más que el límite de espacio (" +
+                     limit + "), así que no se borra nada. Sube el límite en Ajustes > Almacenamiento o quita "
+                     "alguna estrella.",
+                 true);
+    else if (r.favoriteBytes == 0)
+      ToastAfter("Lo más reciente ya ocupa más que el límite de espacio (" + limit +
+                     "), así que por ahora no se borra nada. Si quieres conservarlo, márcalo como favorito.",
+                 true);
+    else
+      ToastAfter("Tus favoritos y lo más reciente ya ocupan más que el límite de espacio (" + limit +
+                     "), así que por ahora no se borra nada. Sube el límite en Ajustes > Almacenamiento o quita "
+                     "alguna estrella.",
+                 true);
+    return;
+  }
+  limitWarned_.clear();
+  if (r.deleted > 0) ToastAfter("Límite de espacio (" + limit + "): " + DeletedText(r));
 }
 
 // ---------------------------------------------------------------------- UI
@@ -892,6 +964,16 @@ void App::Toast(const std::string& text, bool error) {
   // "Clip guardado" tiene que verse también encima de un juego topmost.
   FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow(), false);
   toast_.StayAbove(under.fullscreen ? under.window : nullptr);
+}
+
+void App::ToastAfter(const std::string& text, bool error) {
+  if (!toast_.Visible() || GetTickCount64() >= toastUntil_ || toastText_.empty()) {
+    Toast(text, error);
+    return;
+  }
+  std::string joined = toastText_;
+  if (joined.back() != '.') joined += '.';
+  Toast(joined + " " + text, error || toastError_);
 }
 
 void App::SyncModels() {
@@ -1210,19 +1292,7 @@ void App::RescanLibrary() {
     items.erase(std::remove_if(items.begin(), items.end(), [&](const MediaItem& i) { return i.path == recording; }),
                 items.end());
   }
-  StorageInfo storage;
-  for (const auto& item : items) {
-    storage.usedBytes += item.size;
-    if (item.Video()) ++storage.videos;
-    else ++storage.screenshots;
-    if (item.favorite) ++storage.favorites;
-  }
-  ULARGE_INTEGER avail{}, total{}, totalFree{};
-  if (GetDiskFreeSpaceExW(Widen(dir).c_str(), &avail, &total, &totalFree)) {
-    storage.freeBytes = avail.QuadPart;
-    storage.totalBytes = total.QuadPart;
-    storage.valid = true;
-  }
+  StorageInfo storage = SummarizeStorage(items, dir);
   appModel_.items = std::move(items);
   appModel_.itemsLoaded = true;
   appModel_.outputDir = dir;
@@ -1413,12 +1483,20 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     EnforceStorageLimit(); // algo nuevo en la carpeta
     return 0;
   }
-  case WM_SPECTRE_LIBRARY:
-    if (menu_.Visible()) RefreshPanelClips();
-    if (appWindow_.Visible()) RescanLibrary();
+  case WM_SPECTRE_LIBRARY: {
+    std::unique_ptr<LimitResult> result(reinterpret_cast<LimitResult*>(lp));
+    if (result) ReportStorageLimit(*result);
+    if (!result || result->deleted > 0) {
+      if (menu_.Visible()) RefreshPanelClips();
+      if (appWindow_.Visible()) RescanLibrary();
+    }
     return 0;
+  }
   case WM_SPECTRE_MEDIA:
-    if (appWindow_.Visible()) appUi_.TakeMediaResults(appWindow_, appModel_, appActions_);
+    if (appWindow_.Visible()) {
+      appUi_.TakeMediaResults(appWindow_, appModel_, appActions_);
+      library_->Flush(); // las duraciones medidas, de una vez
+    }
     return 0;
   case WM_SPECTRE_UPDATE_READY: {
     std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));

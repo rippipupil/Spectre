@@ -167,6 +167,7 @@ void Library::Save() {
     items[key] = std::move(v);
   }
   nlohmann::json j = {{"version", 1}, {"items", std::move(items)}};
+  dirty_ = false;
   auto path = LibraryPath();
   auto tmp = path;
   tmp += L".tmp";
@@ -238,23 +239,6 @@ std::vector<MediaItem> Library::Scan(const std::string& folder, size_t max, bool
   return items;
 }
 
-StorageInfo Library::Storage(const std::string& folder) {
-  StorageInfo info;
-  for (const auto& item : Scan(folder)) {
-    info.usedBytes += item.size;
-    if (item.Video()) ++info.videos;
-    else ++info.screenshots;
-    if (item.favorite) ++info.favorites;
-  }
-  ULARGE_INTEGER avail{}, total{}, totalFree{};
-  if (GetDiskFreeSpaceExW(Widen(folder).c_str(), &avail, &total, &totalFree)) {
-    info.freeBytes = avail.QuadPart;
-    info.totalBytes = total.QuadPart;
-    info.valid = true;
-  }
-  return info;
-}
-
 void Library::SetFavorite(const std::string& path, bool favorite) {
   std::lock_guard lock(mutex_);
   Load();
@@ -270,14 +254,6 @@ void Library::SetTailMarkers(const std::string& path, std::vector<double> second
   Save();
 }
 
-void Library::SetMarkers(const std::string& path, std::vector<double> seconds) {
-  if (seconds.empty()) return;
-  std::lock_guard lock(mutex_);
-  Load();
-  meta_[Key(path)].markers = std::move(seconds);
-  Save();
-}
-
 void Library::SetDuration(const std::string& path, uint64_t size, int64_t modified, double seconds) {
   if (seconds <= 0) return;
   std::lock_guard lock(mutex_);
@@ -287,7 +263,12 @@ void Library::SetDuration(const std::string& path, uint64_t size, int64_t modifi
   m.duration = seconds;
   m.size = size;
   m.modified = modified;
-  Save();
+  dirty_ = true;
+}
+
+void Library::Flush() {
+  std::lock_guard lock(mutex_);
+  if (dirty_) Save();
 }
 
 void Library::Annotate(MediaItem& item) {
@@ -337,16 +318,31 @@ bool Library::Rename(const std::string& path, const std::string& newStem, std::s
   return true;
 }
 
-bool Library::Recycle(const std::string& path, std::string* error) {
-  std::wstring from = Widen(path);
+bool Library::Recycle(HWND owner, const std::string& path, std::string* error, bool* cancelled) {
+  *cancelled = false;
+  std::wstring file = Widen(path);
+  std::wstring from = file;
   from.push_back(L'\0'); // doble terminador
   SHFILEOPSTRUCTW op{};
+  op.hwnd = owner;
   op.wFunc = FO_DELETE;
   op.pFrom = from.c_str();
-  op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+  // Cuando el archivo no puede ir a la papelera, NOCONFIRMATION solo lo
+  // borraría para siempre sin preguntar; WANTNUKEWARNING hace que Windows
+  // pregunte antes. Sin NOERRORUI: si el archivo está abierto, Windows dice
+  // en qué programa.
+  op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT;
   int r = SHFileOperationW(&op);
-  if (r != 0 || op.fAnyOperationsAborted) {
-    *error = "No se pudo mover a la papelera (¿está abierto en otro programa?).";
+  bool exists = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES ||
+                (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND);
+  if (exists) {
+    // Sigue ahí: se dijo que no (aquí o en el aviso de archivo abierto) o falló.
+    if (op.fAnyOperationsAborted || r == ERROR_CANCELLED || r == 0x75 /* DE_OPCANCELLED */) {
+      *cancelled = true;
+      *error = "No se ha borrado.";
+    } else {
+      *error = "No se pudo mover a la papelera (¿está abierto en otro programa?).";
+    }
     return false;
   }
   std::lock_guard lock(mutex_);
@@ -355,35 +351,55 @@ bool Library::Recycle(const std::string& path, std::string* error) {
   return true;
 }
 
-int Library::EnforceLimit(const std::string& folder, uint64_t limitBytes, uint64_t* freedBytes) {
-  if (freedBytes) *freedBytes = 0;
-  if (limitBytes == 0) return 0;
+LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath) {
+  LimitResult r;
+  r.limitBytes = limitBytes;
+  if (limitBytes == 0) return r;
   auto items = Scan(folder);
-  uint64_t total = 0;
-  for (const auto& item : items) total += item.size;
-  if (total <= limitBytes) return 0;
-  // Del más antiguo al más reciente. Lo de los últimos 2 minutos puede estar
-  // escribiéndose todavía y no se toca.
+  // Lo de los últimos 2 minutos puede estar escribiéndose todavía y no se toca.
   FILETIME nowFt;
   GetSystemTimeAsFileTime(&nowFt);
   int64_t now = int64_t((uint64_t(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime);
   const int64_t recent = int64_t(2) * 60 * 10000000;
-  int deleted = 0;
-  for (auto it = items.rbegin(); it != items.rend() && total > limitBytes; ++it) {
-    if (!it->spectre || it->favorite || now - it->modified < recent) continue;
+  const std::string keep = keepPath.empty() ? std::string() : Key(keepPath);
+  auto kept = [&](const MediaItem& item) {
+    return item.favorite || now - item.modified < recent || (!keep.empty() && Key(item.path) == keep);
+  };
+  // Solo cuenta lo que lleva el nombre de Spectre: lo renombrado y lo de
+  // otros programas no se puede borrar, y si contara, el tope no bajaría
+  // nunca y se acabaría borrando todo lo demás.
+  for (const auto& item : items) {
+    if (!item.spectre) continue;
+    r.usedBytes += item.size;
+    if (!kept(item)) continue;
+    r.keptBytes += item.size;
+    if (item.favorite) r.favoriteBytes += item.size;
+  }
+  if (r.usedBytes <= limitBytes) return r;
+  // Si lo que no se puede borrar ya pasa del tope, borrar el resto tampoco
+  // bastaría: no se borra nada y App avisa.
+  if (r.keptBytes > limitBytes) {
+    r.blocked = true;
+    return r;
+  }
+  // Del más antiguo al más reciente.
+  for (auto it = items.rbegin(); it != items.rend() && r.usedBytes > limitBytes; ++it) {
+    if (!it->spectre || kept(*it)) continue;
     if (!DeleteFileW(Widen(it->path).c_str())) continue; // abierto en otro programa
-    total -= it->size;
-    if (freedBytes) *freedBytes += it->size;
-    ++deleted;
+    r.usedBytes -= it->size;
+    r.freedBytes += it->size;
+    if (r.deleted == 0) r.kind = it->kind;
+    else if (it->kind != r.kind) r.mixed = true;
+    ++r.deleted;
     Log("Límite de espacio: borrado %s (%s)", it->name.c_str(), FormatBytes(it->size).c_str());
     std::lock_guard lock(mutex_);
     meta_.erase(Key(it->path));
   }
-  if (deleted > 0) {
+  if (r.deleted > 0) {
     std::lock_guard lock(mutex_);
     Save();
   }
-  return deleted;
+  return r;
 }
 
 // ------------------------------------------------------------------ utilidades
@@ -417,33 +433,69 @@ bool CopyFileToClipboard(HWND owner, const std::string& path) {
   return ok;
 }
 
+StorageInfo SummarizeStorage(const std::vector<MediaItem>& items, const std::string& folder) {
+  StorageInfo info;
+  for (const auto& item : items) {
+    if (!item.spectre) {
+      info.otherBytes += item.size;
+      ++info.others;
+      continue;
+    }
+    info.usedBytes += item.size;
+    if (item.favorite) info.favoriteBytes += item.size;
+    if (item.Video()) ++info.videos;
+    else ++info.screenshots;
+  }
+  ULARGE_INTEGER avail{}, total{}, totalFree{};
+  if (GetDiskFreeSpaceExW(Widen(folder).c_str(), &avail, &total, &totalFree)) {
+    info.freeBytes = avail.QuadPart;
+    info.totalBytes = total.QuadPart;
+    info.valid = true;
+  }
+  return info;
+}
+
 uint64_t FreeDiskBytes(const std::string& folder) {
   ULARGE_INTEGER avail{}, total{}, totalFree{};
   if (!GetDiskFreeSpaceExW(Widen(folder).c_str(), &avail, &total, &totalFree)) return 0;
   return avail.QuadPart;
 }
 
+bool HasRecycleBin(const std::string& path) {
+  std::wstring w = Widen(path);
+  if (w.size() >= 2 && w[0] == L'\\' && w[1] == L'\\') return false; // \\servidor\carpeta
+  wchar_t root[MAX_PATH];
+  if (!GetVolumePathNameW(w.c_str(), root, MAX_PATH)) return true; // no se sabe: Windows avisará si hace falta
+  return GetDriveTypeW(root) == DRIVE_FIXED;
+}
+
 // ------------------------------------------------------------------ trabajador
 
 void MediaWorker::Start(HWND notifyWindow, UINT notifyMsg) {
-  if (thread_.joinable()) return;
+  if (thread_.joinable()) {
+    {
+      std::lock_guard lock(mutex_);
+      if (!stop_) return; // ya está en marcha
+    }
+    thread_.join(); // el de la vez anterior, que estaba acabando su último trabajo
+  }
   notify_ = notifyWindow;
   msg_ = notifyMsg;
   stop_ = false;
+  results_.clear();
   thread_ = std::thread([this] { Loop(); });
 }
 
-void MediaWorker::Stop() {
+void MediaWorker::Stop(bool wait) {
   if (!thread_.joinable()) return;
   {
     std::lock_guard lock(mutex_);
     stop_ = true;
     queue_.clear();
+    results_.clear(); // después de stop_ el hilo ya no añade nada
   }
   cv_.notify_all();
-  thread_.join();
-  std::lock_guard lock(mutex_);
-  results_.clear();
+  if (wait) thread_.join();
 }
 
 void MediaWorker::Request(Job job, const std::string& path, int width, int height) {

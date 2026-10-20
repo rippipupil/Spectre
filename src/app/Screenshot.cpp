@@ -132,6 +132,11 @@ bool Encode(const std::wstring& path, bool jpeg, const std::vector<uint8_t>& bgr
     char buf[96];
     snprintf(buf, sizeof(buf), "No se pudo guardar la captura (0x%08X)", unsigned(hr));
     *error = buf;
+    // El frame y el encoder también tienen el archivo abierto: si no se
+    // sueltan antes, no se puede borrar y queda uno a medias.
+    props.Reset();
+    frame.Reset();
+    encoder.Reset();
     stream.Reset();
     DeleteFileW(path.c_str());
     return false;
@@ -170,6 +175,9 @@ bool Capture(const ScreenshotRequest& request, std::string* error) {
     *error = "No se pudo hacer la captura de pantalla. Mira spectre.log.";
     return false;
   }
+  // Ya se tiene el fotograma: comprimir un PNG a 4K son cientos de ms de CPU
+  // y no deben quitárselos al juego.
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
   if (!Encode(Widen(request.path), request.jpeg, bgr, w, h, error)) return false;
   Log("Captura de pantalla guardada: %s (%ux%u)", request.path.c_str(), w, h);
   return true;

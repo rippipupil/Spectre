@@ -69,6 +69,8 @@ private:
   void CheckGame();
   // Límite de espacio de Ajustes > Almacenamiento, en un hilo aparte.
   void EnforceStorageLimit();
+  // Avisa de lo que borró el límite, o de que no puede borrar nada.
+  void ReportStorageLimit(const LimitResult& result);
   // " Queda poco espacio..." para añadir al aviso de un clip o una grabación (vacío si sobra).
   std::string LowDiskNote();
   // La grabación terminó (atajo, panel o captura perdida): marcas, biblioteca y límite de espacio.
@@ -76,6 +78,8 @@ private:
 
   // UI
   void Toast(const std::string& text, bool error = false);
+  // Lo añade al aviso que se está viendo (como «Clip guardado») en vez de taparlo.
+  void ToastAfter(const std::string& text, bool error = false);
   void SyncModels(); // el config activo cambió: panel y ventana lo muestran
   void RefreshMenuModel();
   void RefreshPanelClips();
@@ -151,11 +155,12 @@ private:
   bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
 
   // Marcas (atajo de marca): momentos de la partida en QPC. Al guardar un clip
-  // entran las de sus últimos segundos; las de una grabación, desde que empezó.
+  // entran las de sus últimos segundos; las de una grabación, al detenerla.
   std::deque<int64_t> markers_;
   int64_t recordStartQpc_ = 0;
-  std::vector<double> recordMarkers_;
+  std::vector<int64_t> recordMarkers_; // QPC de las marcas de la grabación en curso
   ULONGLONG lowDiskWarnedAt_ = 0;
+  std::string limitWarned_; // el último «el límite no puede borrar nada» avisado
 
   // Panel sobre el juego. Abierto sin foco (juego a pantalla completa), el
   // teclado llega por el gancho; con foco, el gancho no se instala.
