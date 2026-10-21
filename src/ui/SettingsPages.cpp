@@ -32,6 +32,7 @@ const char* SettingsPageName(SettingsPage page) {
   case SettingsPage::Notifications: return "Avisos";
   case SettingsPage::General: return "General";
   case SettingsPage::Performance: return "Rendimiento";
+  case SettingsPage::Projects: return "Más proyectos";
   default: return "";
   }
 }
@@ -726,7 +727,8 @@ void PageNotifications(SettingsModel& m) {
   Heading("AVISOS EN PANTALLA");
   m.dirty |= SwitchField("Mostrar avisos", &c.showNotifications,
                          "Avisos breves al guardar un clip, una captura o empezar a grabar. Los errores se muestran "
-                         "siempre.");
+                         "siempre. Sobre un juego a pantalla completa, un aviso puede añadir un frame de retraso "
+                         "mientras se ve: si lo notas, apágalos y usa el sonido de abajo.");
   FieldLabel("Posición");
   m.dirty |= ChoiceCombo<std::string>("##pos", c.toastPosition,
                                       {{"top-right", "Arriba a la derecha"},
@@ -951,6 +953,27 @@ void PagePerformance(SettingsModel& m) {
   ValueRow("Pistas de audio", buf);
 }
 
+// Enlace a una web: el nombre a la izquierda y la dirección en un botón que la
+// abre en el navegador.
+void LinkRow(const char* name, const char* url, const SettingsActions& a) {
+  FieldLabel(name);
+  const char* shown = std::strncmp(url, "https://", 8) == 0 ? url + 8 : url;
+  ImGui::PushID(url);
+  const bool open = GhostButton("link", shown, ControlWidth(), Tone::Normal, 28);
+  ImGui::PopID();
+  ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+  DrawIcon(ImGui::GetWindowDrawList(), Icon::External, ImVec2(hi.x - Px(16), (lo.y + hi.y) * 0.5f), Px(5),
+           C(ImGui::IsItemHovered() ? Colors().text : Colors().textMuted));
+  if (open) a.openPath(url);
+}
+
+void PageProjects(const SettingsActions& a) {
+  Heading("GITHUB");
+  LinkRow("marieteffk", "https://github.com/marieteffk", a);
+  LinkRow("rippipupil", "https://github.com/rippipupil", a);
+  Help("Se abren en el navegador.");
+}
+
 } // namespace
 
 void CancelHotkeyCapture(SettingsModel& model, const SettingsActions& actions) {
@@ -969,6 +992,7 @@ void DrawSettingsPage(SettingsPage page, SettingsModel& m, const SettingsActions
   case SettingsPage::Storage: PageStorage(m, a); break;
   case SettingsPage::Notifications: PageNotifications(m); break;
   case SettingsPage::General: PageGeneral(m, a); break;
+  case SettingsPage::Projects: PageProjects(a); break;
   default: PagePerformance(m); break;
   }
 }

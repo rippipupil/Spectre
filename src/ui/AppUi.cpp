@@ -54,6 +54,7 @@ std::string KindUpper(MediaKind kind) {
   case MediaKind::Clip: return "CLIP";
   case MediaKind::Recording: return "GRABACIÓN";
   case MediaKind::Trim: return "RECORTE";
+  case MediaKind::Export: return "DISCORD";
   case MediaKind::Screenshot: return "CAPTURA";
   }
   return "";
@@ -252,7 +253,9 @@ std::vector<const MediaItem*> AppUi::Filtered(const AppModel& m) const {
   std::string needle = Lower(search_);
   for (const auto& item : m.items) {
     switch (filter_) {
-    case 1: if (item.kind != MediaKind::Clip && item.kind != MediaKind::Trim) continue; break;
+    case 1:
+      if (item.kind != MediaKind::Clip && item.kind != MediaKind::Trim && item.kind != MediaKind::Export) continue;
+      break;
     case 2: if (item.kind != MediaKind::Recording) continue; break;
     case 3: if (item.kind != MediaKind::Screenshot) continue; break;
     case 4: if (!item.favorite) continue; break;
@@ -388,21 +391,36 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
     ImGui::Dummy(ImVec2(0, y + ss - q.y + Px(22)));
   }
 
-  if (NavItem(1, "Inicio", m.page == AppPage::Home)) Navigate(m, AppPage::Home);
+  // Filas de 34 px con el hueco normal. Con la ventana baja se juntan (hasta
+  // 28 px y sin hueco) para no pisar el pie; si ni así cabe, el pie no se
+  // dibuja (la versión y el atajo del panel también están en General).
+  const float unit = Px(1);
+  const float footerTop = win.y + winH - Px(kHint) * 2 - Px(26);
+  const float spacing = ImGui::GetStyle().ItemSpacing.y / unit;
+  const float room = (footerTop - Px(14) - ImGui::GetCursorScreenPos().y) / unit - (12 + kLabel + 6);
+  const int rows = 2 + int(SettingsPage::Count);
+  float pitch = (room + 2 * 34) / float(rows + 2); // filas de 34 y el hueco también en el rótulo
+  if (pitch < 34) pitch = room / float(rows);      // sin hueco
+  pitch = std::clamp(pitch, 28.0f, 34 + spacing);
+  const float rowH = std::min(pitch, 34.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, Px(pitch - rowH)));
+  if (NavItem(1, "Inicio", m.page == AppPage::Home, rowH)) Navigate(m, AppPage::Home);
   char library[48];
   snprintf(library, sizeof(library), "Biblioteca");
-  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer)) Navigate(m, AppPage::Library);
+  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer, rowH))
+    Navigate(m, AppPage::Library);
   NavLabel(m.settings.dirty ? "AJUSTES  (SIN APLICAR)" : "AJUSTES");
   for (int i = 0; i < int(SettingsPage::Count); ++i) {
     auto page = SettingsPage(i);
-    if (NavItem(10 + i, SettingsPageName(page), m.page == AppPage::Settings && m.settingsPage == page)) {
+    if (NavItem(10 + i, SettingsPageName(page), m.page == AppPage::Settings && m.settingsPage == page, rowH)) {
       Navigate(m, AppPage::Settings);
       m.settingsPage = page;
     }
   }
+  ImGui::PopStyleVar();
 
   // Pie: versión y recordatorio del panel
-  {
+  if (ImGui::GetItemRectMax().y + Px(8) <= footerTop) {
     float ss = Px(kHint);
     std::string hint = (m.config.hotkeys.overlay.empty() ? std::string("El panel") : m.config.hotkeys.overlay) +
                        " abre el panel en el juego";
@@ -630,6 +648,14 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   if (ImGui::MenuItem("Abrir con Windows")) a.openPath(path);
   if (ImGui::MenuItem("Mostrar en la carpeta")) a.showInFolder(path);
   if (ImGui::MenuItem("Copiar para pegar en Discord")) a.copyToClipboard(path);
+  if (item->Video()) {
+    if (m.exportPercent >= 0 && m.exportPath == path) {
+      std::string label = "Cancelar la exportación (" + std::to_string(m.exportPercent) + " %)";
+      if (ImGui::MenuItem(label.c_str())) a.cancelExport();
+    } else if (ImGui::MenuItem("Exportar para Discord (menos de 20 MB)", nullptr, false, m.exportPercent < 0)) {
+      a.exportForDiscord(path);
+    }
+  }
   ImGui::Separator();
   if (ImGui::MenuItem(item->favorite ? "Quitar de favoritos" : "Añadir a favoritos")) a.setFavorite(path, !item->favorite);
   if (ImGui::MenuItem("Renombrar...")) {
@@ -994,8 +1020,12 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
       sub += res;
     }
     sub += "  ·  " + item.name;
-    float actionsW = rowH * 6 + Px(4) * 5;
-    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(p.textMuted),
+    const bool exporting = m.exportPercent >= 0;
+    const bool exportingThis = exporting && m.exportPath == item.path;
+    if (exportingThis) sub = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %";
+    const int actions = video ? 7 : 6;
+    float actionsW = rowH * float(actions) + Px(4) * float(actions - 1);
+    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(exportingThis ? p.accent : p.textMuted),
          Ellipsize(ImGui::GetFont(), Px(kSmall), sub, ImGui::GetContentRegionAvail().x - rowH - actionsW - Px(30)).c_str());
     ImGui::SetCursorScreenPos(ImVec2(q.x + ImGui::GetContentRegionAvail().x - actionsW, q.y));
     if (IconButton("fav", item.favorite ? Icon::StarFilled : Icon::Star, rowH,
@@ -1013,6 +1043,18 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     if (IconButton("copy", Icon::Copy, rowH, "Copiar el archivo para pegarlo en Discord o WhatsApp"))
       a.copyToClipboard(item.path);
     ImGui::SameLine(0, Px(4));
+    if (video) {
+      if (exportingThis) {
+        std::string tip = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %. Clic para cancelar.";
+        if (IconButton("export", Icon::Share, rowH, tip.c_str(), true)) a.cancelExport();
+      } else if (IconButton("export", Icon::Share, rowH,
+                            exporting ? "Ya se está exportando otro vídeo"
+                                      : "Exportar para Discord: una copia de menos de 20 MB que se ve en el chat. "
+                                        "El original no cambia.")) {
+        a.exportForDiscord(item.path); // si hay otra en marcha, el aviso lo dice
+      }
+      ImGui::SameLine(0, Px(4));
+    }
     if (IconButton("folder", Icon::Folder, rowH, "Mostrar en la carpeta")) a.showInFolder(item.path);
     ImGui::SameLine(0, Px(4));
     if (IconButton("external", Icon::External, rowH, "Abrir con Windows")) {
@@ -1023,6 +1065,13 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     if (IconButton("trash", Icon::Trash, rowH, "Mover a la papelera (Supr)")) {
       deletePath_ = item.path;
       openDelete_ = true;
+    }
+    if (exportingThis) {
+      // 1 px a lo ancho, con la parte hecha en el acento.
+      float x0 = q.x, x1 = q.x + ImGui::GetContentRegionAvail().x, y = q.y + rowH + Px(7);
+      float done = x0 + (x1 - x0) * float(m.exportPercent) / 100.0f;
+      dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + Px(1)), C(p.line));
+      dl->AddRectFilled(ImVec2(x0, y), ImVec2(done, y + Px(1)), C(p.accent));
     }
     ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(14)));
   }

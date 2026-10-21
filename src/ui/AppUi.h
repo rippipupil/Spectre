@@ -38,6 +38,9 @@ struct AppModel {
   SettingsPage settingsPage = SettingsPage::Replay;
   std::string viewPath; // archivo abierto en el visor
   AppPage viewBack = AppPage::Library;
+  // Exportación para Discord en marcha (una cada vez): archivo y porcentaje; -1 = ninguna.
+  std::string exportPath;
+  int exportPercent = -1;
 };
 
 struct AppActions {
@@ -56,6 +59,8 @@ struct AppActions {
   std::function<void(const std::string&)> showInFolder;
   std::function<void(const std::string&, double, double)> trim;
   std::function<void(const std::string&)> copyToClipboard;
+  std::function<void(const std::string&)> exportForDiscord;
+  std::function<void()> cancelExport;
   std::function<void(const std::string&, bool)> setFavorite;
   std::function<void(const MediaItem&, double)> setDuration;
   std::function<bool(const std::string&, const std::string&, std::string*, std::string*)> rename;

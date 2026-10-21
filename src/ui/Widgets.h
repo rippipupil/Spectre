@@ -63,7 +63,7 @@ std::string FormatClipLength(int seconds);  // 30 s, 2 min
 // Iconos de trazo fino y constante, sin fondos ni círculos detrás.
 enum class Icon {
   Replay, Mic, Camera, Close, Back, Play, Pause, Folder, Trash, Star, StarFilled, Scissors, Copy, Pencil,
-  Shot, Marker, Search, Volume, Muted, Next, Prev, External
+  Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share
 };
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float radius, ImU32 color);
 // Marca de estado: cuadrado en Negro, rombo en Psíquico. Nunca un círculo de
@@ -150,7 +150,7 @@ bool ChoiceCombo(const char* id, T& value, const std::vector<std::pair<T, const 
 }
 
 // Entrada de la columna de navegación (Ajustes de la app).
-bool NavItem(int index, const char* name, bool selected);
+bool NavItem(int index, const char* name, bool selected, float height = 34);
 // Rótulo de grupo en la columna de navegación.
 void NavLabel(const char* text);
 

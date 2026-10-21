@@ -76,6 +76,18 @@ void FillDates(MediaItem& item) {
 
 std::filesystem::path LibraryPath() { return AppDataDir() / L"library.json"; }
 
+// "..._discord" o "..._discord_2" (ver ExportPathFor).
+bool IsExportStem(const std::string& stem) {
+  size_t at = stem.rfind("_discord");
+  if (at == std::string::npos) return false;
+  size_t end = at + 8;
+  if (end == stem.size()) return true;
+  if (stem[end] != '_' || end + 1 == stem.size()) return false;
+  for (size_t i = end + 1; i < stem.size(); ++i)
+    if (!isdigit((unsigned char)stem[i])) return false;
+  return true;
+}
+
 } // namespace
 
 void ParseMediaName(const std::string& fileName, MediaItem* item) {
@@ -110,6 +122,7 @@ void ParseMediaName(const std::string& fileName, MediaItem* item) {
   }
   if (item->spectre && item->kind != MediaKind::Screenshot && stem.find("_recorte_") != std::string::npos)
     item->kind = MediaKind::Trim;
+  if (item->spectre && item->kind != MediaKind::Screenshot && IsExportStem(stem)) item->kind = MediaKind::Export;
   if (item->game == "Escritorio") item->game.clear();
 }
 
@@ -118,6 +131,7 @@ const char* MediaKindName(MediaKind kind) {
   case MediaKind::Clip: return "Clip";
   case MediaKind::Recording: return "Grabación";
   case MediaKind::Trim: return "Recorte";
+  case MediaKind::Export: return "Para Discord";
   case MediaKind::Screenshot: return "Captura";
   }
   return "";

@@ -19,7 +19,9 @@
 
 namespace spectre {
 
-enum class SettingsPage { Replay, Video, Audio, Camera, Hotkeys, Storage, Notifications, General, Performance, Count };
+enum class SettingsPage {
+  Replay, Video, Audio, Camera, Hotkeys, Storage, Notifications, General, Performance, Projects, Count
+};
 const char* SettingsPageName(SettingsPage page);
 
 struct SettingsModel {

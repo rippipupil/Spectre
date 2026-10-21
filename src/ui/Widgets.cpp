@@ -261,6 +261,12 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     line(-0.05f, 0.10f, 0.78f, -0.73f);
     poly({{0.28f, -0.78f}, {0.78f, -0.78f}, {0.78f, -0.28f}}, false);
     break;
+  case Icon::Share:
+    // Bandeja con una flecha hacia arriba: enviar (exportar para Discord).
+    poly({{-0.80f, 0.15f}, {-0.80f, 0.78f}, {0.80f, 0.78f}, {0.80f, 0.15f}}, false);
+    line(0.0f, 0.42f, 0.0f, -0.80f);
+    poly({{-0.40f, -0.40f}, {0.0f, -0.80f}, {0.40f, -0.40f}}, false);
+    break;
   }
 }
 
@@ -642,10 +648,10 @@ void ValueRow(const char* label, const std::string& value) {
   ImGui::TextUnformatted(value.c_str());
 }
 
-bool NavItem(int index, const char* name, bool selected) {
+bool NavItem(int index, const char* name, bool selected, float height) {
   const Palette& p = Colors();
   ImGui::PushID(index);
-  const float h = Px(34);
+  const float h = Px(height);
   bool pressed = ImGui::InvisibleButton("nav", ImVec2(ImGui::GetContentRegionAvail().x, h));
   bool hov = ImGui::IsItemHovered();
   ImGui::PopID();
