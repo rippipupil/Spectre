@@ -148,7 +148,9 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
       Log("Calidad Fuente: %dx%d@%d (la fuente es %ldx%ld)", width_, height_, settings_.fps, src.cx, src.cy);
     // Solo pasa con un encoder por CPU elegido a mano: se respeta, pero la
     // nativa a los Hz del monitor en la CPU le quita el procesador al juego.
-    if (opened > 0 && encoder_.Software() && notify_)
+    // Una vez por sesión: la captura se reinicia al abrir o cerrar el juego.
+    static std::atomic<bool> warnedCpu{false};
+    if (opened > 0 && encoder_.Software() && notify_ && !warnedCpu.exchange(true))
       notify_("Fuente con el encoder por CPU elegido en Ajustes puede dar lag: pon Encoder en Automático para usar "
               "la gráfica",
               true);
