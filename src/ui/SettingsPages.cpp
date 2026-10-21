@@ -341,7 +341,7 @@ void PageVideo(SettingsModel& m) {
   if (IsSourceQuality(c.quality)) {
     // Fuente usa los Hz del monitor; los fps elegidos vuelven al cambiar de calidad.
     int fps = 0;
-    const int hz = SelectedRefreshHz(m);
+    const int hz = NormalizedRefreshHz(SelectedRefreshHz(m));
     std::string name = std::to_string(EstimatedFps(m, c.quality)) + " fps" +
                        (hz > 0 ? " (monitor a " + std::to_string(hz) + " Hz)" : std::string(" (los fija Fuente)"));
     ImGui::BeginDisabled();

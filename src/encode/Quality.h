@@ -33,8 +33,11 @@ struct QualityPlan {
   int level = 2;          // nivel 0..4 (-1 = personalizada)
 };
 
-// Fps de Fuente: los Hz del monitor (59,94 Hz, que Windows da como 59, cuenta
-// como 60), como mucho 144 y hasta unas 5 veces el trabajo de 1080p60 para
+// Hz que da Windows con los fraccionarios redondeados: 59,94 Hz llega como 59
+// y cuenta como 60 (igual 143 -> 144, 239 -> 240...).
+int NormalizedRefreshHz(int refreshHz);
+
+// Fps de Fuente: los Hz del monitor (ya normalizados), como mucho 144 y hasta unas 5 veces el trabajo de 1080p60 para
 // que el encoder siga en tiempo real con el juego usando la GPU (1440p a 144
 // sí, 4K a 144 no); si no caben, 144, 120 o 60. Una fracción exacta de los
 // Hz cuando no pierde fps de verdad (240 Hz: 120; 4K a 144 Hz: 72, no 60;

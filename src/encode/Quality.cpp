@@ -14,11 +14,15 @@ int QualityLevel(const std::string& quality) {
   return 2;
 }
 
+int NormalizedRefreshHz(int refreshHz) {
+  for (int rate : {30, 60, 75, 90, 100, 120, 144, 165, 240, 360})
+    if (refreshHz == rate - 1) return rate;
+  return refreshHz;
+}
+
 int SourceFps(int refreshHz, int width, int height, int fallbackFps) {
   if (refreshHz < 24) return fallbackFps;
-  int hz = refreshHz;
-  for (int rate : {30, 60, 75, 90, 100, 120, 144, 165, 240, 360})
-    if (hz == rate - 1) hz = rate;
+  const int hz = NormalizedRefreshHz(refreshHz);
   const double frame = double(std::max(width, 16)) * double(std::max(height, 16)) / (1920.0 * 1080.0);
   auto fits = [&](int fps) { return fps <= kSourceMaxFps && frame * fps / 60.0 <= 5.0; };
   // Lo más alto que quepa: los Hz, o si no 144, 120 o 60.
