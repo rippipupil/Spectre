@@ -59,14 +59,38 @@ bool DeviceCombo(const char* id, std::string& value, const std::vector<AudioDevi
   return changed;
 }
 
-// Bitrate máximo que usará la configuración en edición (para las estimaciones).
-int EstimatedKbps(const SettingsModel& m) {
+// Resolución de salida de la configuración en edición con esa calidad (para
+// las estimaciones). Fuente graba a la nativa: la de la captura si ya está en
+// Fuente o, si no, la del monitor elegido (la que suele tener un juego a
+// pantalla completa).
+void EstimatedSize(const SettingsModel& m, const std::string& quality, int* width, int* height) {
   const auto& c = m.config;
-  int height = c.outputHeight > 0 ? c.outputHeight : (m.stats.running && m.stats.height > 0 ? m.stats.height : 1080);
-  int width = height * 16 / 9;
-  if (m.stats.running && m.stats.height > 0) width = height * m.stats.width / m.stats.height;
-  return PlanQuality(c.quality, c.bitrateKbps, width, height, c.fps, c.codec).maxKbps;
+  const bool running = m.stats.running && m.stats.height > 0;
+  if (IsSourceQuality(quality)) {
+    if (running && IsSourceQuality(m.base.quality)) {
+      *width = m.stats.width;
+      *height = m.stats.height;
+      return;
+    }
+    if (!m.monitors.empty()) {
+      const RECT& r = m.monitors[size_t(std::clamp<int>(c.monitorIndex, 0, int(m.monitors.size()) - 1))].rect;
+      *width = std::max<int>(r.right - r.left, 2);
+      *height = std::max<int>(r.bottom - r.top, 2);
+      return;
+    }
+  }
+  *height = c.outputHeight > 0 ? c.outputHeight : (running ? m.stats.height : 1080);
+  *width = running ? *height * m.stats.width / m.stats.height : *height * 16 / 9;
 }
+
+// Bitrate máximo que usará la configuración en edición (para las estimaciones).
+int EstimatedKbps(const SettingsModel& m, const std::string& quality) {
+  const auto& c = m.config;
+  int width = 0, height = 0;
+  EstimatedSize(m, quality, &width, &height);
+  return PlanQuality(quality, c.bitrateKbps, width, height, c.fps, c.codec).maxKbps;
+}
+int EstimatedKbps(const SettingsModel& m) { return EstimatedKbps(m, m.config.quality); }
 
 // Config::maxBufferMB == 1024 es «automático»: el pipeline calcula el tope con
 // la calidad, la duración y la RAM (Pipeline::BufferLimit).
@@ -74,9 +98,10 @@ constexpr int kAutoBufferMB = 1024;
 
 // Lo que puede llegar a ocupar el replay: todo el rato al bitrate máximo del
 // preset, más los segundos de margen del anillo, como Pipeline::BufferLimit.
-double ReplayPeakBytes(const SettingsModel& m) {
-  return double(EstimatedKbps(m)) * 125.0 * (double(m.config.clipSeconds) + ReplayBuffer::kExtraSeconds) * 1.1;
+double ReplayPeakBytes(const SettingsModel& m, int kbps) {
+  return double(kbps) * 125.0 * (double(m.config.clipSeconds) + ReplayBuffer::kExtraSeconds) * 1.1;
 }
+double ReplayPeakBytes(const SettingsModel& m) { return ReplayPeakBytes(m, EstimatedKbps(m)); }
 
 // El tope automático: lo que pide la duración, sin pasar de la cuarta parte de
 // la RAM. Con la captura en marcha y los mismos ajustes, el que usa de verdad.
@@ -191,6 +216,80 @@ void PageReplay(SettingsModel& m) {
                          "biblioteca los muestra todos igual.");
 }
 
+// Aviso al elegir Fuente: qué consume con los ajustes de ahora. Cancelar
+// devuelve la calidad que había; la elección se aplica con Aplicar, como todo.
+void SourceDialog(SettingsModel& m) {
+  auto& c = m.config;
+  const Palette& p = Colors();
+  ImGuiIO& io = ImGui::GetIO();
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(24), Px(20)));
+  ImGui::PushStyleColor(ImGuiCol_PopupBg, V(p.bg));
+  ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, V(IM_COL32(0, 0, 0, 140)));
+  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(Px(500), 0));
+  if (ImGui::BeginPopupModal("Calidad Fuente", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoSavedSettings)) {
+    Text(ImGui::GetWindowDrawList(), Bold(), Px(kBody) + Px(2), ImGui::GetCursorScreenPos(), C(p.text),
+         "Fuente consume mucho");
+    Gap(30);
+    const std::string before = m.qualityBeforeSource.empty() ? std::string("alta") : m.qualityBeforeSource;
+    int width = 0, height = 0;
+    EstimatedSize(m, "fuente", &width, &height);
+    const int kbps = EstimatedKbps(m, "fuente");
+    const int beforeKbps = EstimatedKbps(m, before);
+    const double peak = ReplayPeakBytes(m, kbps);
+    const double limit =
+        c.maxBufferMB == kAutoBufferMB ? AutoBufferBytes(m) : double(c.maxBufferMB) * 1024.0 * 1024.0;
+    char text[700];
+    snprintf(text, sizeof(text),
+             "Graba siempre a la resolución nativa (%dx%d), con hasta %d Mbps y las opciones de más calidad que "
+             "tu gráfica hace en tiempo real. Es el modo que más gasta de todos:",
+             width, height, kbps / 1000);
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopTextWrapPos();
+    Gap(8);
+    snprintf(text, sizeof(text), "RAM: el replay de %s puede ocupar hasta %s (ahora, %s).",
+             FormatClipLength(c.clipSeconds).c_str(), FormatBytes(uint64_t(peak)).c_str(),
+             FormatBytes(uint64_t(ReplayPeakBytes(m, beforeKbps))).c_str());
+    Help(text);
+    Help("GPU: el encoder trabaja más, sobre todo en 1440p o 4K. En un PC justo puede bajar los fps del juego.");
+    snprintf(text, sizeof(text), "Disco: los clips y las grabaciones ocupan hasta %.1f veces más que ahora.",
+             double(kbps) / double(std::max(beforeKbps, 1)));
+    Help(text);
+    if (peak > limit * 1.02) {
+      Gap(4);
+      snprintf(text, sizeof(text),
+               "Con clips de %s no cabe en el límite de memoria (%s): en escenas de mucho movimiento el clip "
+               "saldría más corto. Baja la duración o sube el límite en Ajustes > Replay.",
+               FormatClipLength(c.clipSeconds).c_str(), FormatBytes(uint64_t(limit)).c_str());
+      Warning(text);
+    }
+    Gap(4);
+    Help("Si notas tirones en el juego, vuelve a Máxima o Alta.");
+    Gap(14);
+    float bw = Px(150);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - bw * 2 - Px(8));
+    bool cancel = GhostButton("cancel", "Cancelar", bw) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    ImGui::SameLine(0, Px(8));
+    // Intro no cuenta en el frame en que se abre: el combo pudo elegirse con él.
+    bool ok = SolidButton("ok", "Usar Fuente", bw) ||
+              (!ImGui::IsWindowAppearing() && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
+    if (cancel) {
+      c.quality = before;
+      m.qualityBeforeSource.clear();
+      ImGui::CloseCurrentPopup();
+    } else if (ok) {
+      m.qualityBeforeSource.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+  ImGui::PopStyleColor(2);
+  ImGui::PopStyleVar();
+}
+
 void PageVideo(SettingsModel& m) {
   auto& c = m.config;
   Heading("QUÉ CAPTURAR");
@@ -209,14 +308,38 @@ void PageVideo(SettingsModel& m) {
 
   Heading("CALIDAD");
   FieldLabel("Resolución");
-  m.dirty |= ChoiceCombo<int>("##res", c.outputHeight,
-                              {{0, "Nativa"}, {2160, "2160p (4K)"}, {1440, "1440p"}, {1080, "1080p"},
-                               {720, "720p"}, {480, "480p"}});
+  if (IsSourceQuality(c.quality)) {
+    // Fuente fija la nativa; la resolución elegida vuelve al cambiar de calidad.
+    int native = 0;
+    ImGui::BeginDisabled();
+    ChoiceCombo<int>("##res", native, {{0, "Nativa (la fija Fuente)"}});
+    ImGui::EndDisabled();
+  } else {
+    m.dirty |= ChoiceCombo<int>("##res", c.outputHeight,
+                                {{0, "Nativa"}, {2160, "2160p (4K)"}, {1440, "1440p"}, {1080, "1080p"},
+                                 {720, "720p"}, {480, "480p"}});
+  }
   FieldLabel("Fotogramas por segundo");
   m.dirty |= ChoiceCombo<int>("##fps", c.fps, {{30, "30 fps"}, {60, "60 fps"}, {120, "120 fps"}});
   FieldLabel("Calidad");
-  m.dirty |= ChoiceCombo<std::string>("##quality", c.quality, QualityOptions());
-  if (c.quality == "personalizada") {
+  const std::string previous = c.quality;
+  if (ChoiceCombo<std::string>("##quality", c.quality, QualityOptions())) {
+    m.dirty = true;
+    // Fuente gasta mucho más que el resto: al elegirla sale el aviso.
+    if (IsSourceQuality(c.quality) && !IsSourceQuality(previous)) {
+      m.qualityBeforeSource = previous;
+      ImGui::OpenPopup("Calidad Fuente");
+    }
+  }
+  SourceDialog(m);
+  if (IsSourceQuality(c.quality)) {
+    char hint[300];
+    snprintf(hint, sizeof(hint),
+             "Resolución nativa y hasta %d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo "
+             "que más RAM, GPU y disco gasta.",
+             EstimatedKbps(m) / 1000);
+    Warning(hint);
+  } else if (c.quality == "personalizada") {
     FieldLabel("Bitrate");
     int mbps = c.bitrateKbps / 1000;
     if (ImGui::SliderInt("##br", &mbps, 2, 100, "%d Mbps")) {

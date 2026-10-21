@@ -201,12 +201,43 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   {
     // Cambiarla reinicia la captura (el aviso lo dice). Personalizada se elige en la app.
     static const std::vector<std::pair<int, std::string>> qualities = {
-        {1, "Baja"}, {2, "Media"}, {3, "Alta"}, {4, "Máx."}};
-    static const char* ids[] = {"", "baja", "media", "alta", "maxima"};
+        {1, "Baja"}, {2, "Media"}, {3, "Alta"}, {4, "Máx."}, {5, "Fuente"}};
+    static const char* ids[] = {"", "baja", "media", "alta", "maxima", "fuente"};
+    constexpr int kSource = 5;
     int current = 0;
-    for (int i = 1; i <= 4; ++i)
+    for (int i = 1; i <= kSource; ++i)
       if (c.quality == ids[i]) current = i;
-    if (int v = Segmented("quality", qualities, current); v > 0 && v != current) a.setQuality(ids[v]);
+    if (int v = Segmented("quality", qualities, current); v > 0) {
+      // Fuente gasta mucho más que el resto: antes de activarla, el aviso de
+      // debajo lo explica. Cualquier otro segmento lo descarta.
+      m.confirmSource = v == kSource && current != kSource;
+      if (!m.confirmSource && v != current) a.setQuality(ids[v]);
+    }
+    if (m.confirmSource) {
+      Gap(8);
+      const char* text = "Fuente graba a la resolución nativa con el bitrate más alto que da tu gráfica. Gasta "
+                         "mucha más RAM, GPU y disco: si el juego va a tirones, vuelve a Alta.";
+      const float w = ImGui::GetContentRegionAvail().x;
+      const float pad = Px(10), bar = Px(3), fs = Px(kSmall);
+      const float wrap = w - bar - pad * 2;
+      ImVec2 q = ImGui::GetCursorScreenPos();
+      ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrap, text);
+      ImVec2 end(q.x + w, q.y + ts.y + pad * 2);
+      // Como los avisos: plano, borde de 1 px y una barra a la izquierda.
+      dl->AddRectFilled(q, end, C(p.surface));
+      dl->AddRect(q + ImVec2(0.5f, 0.5f), end - ImVec2(0.5f, 0.5f), C(p.line), 0, 0, Px(1));
+      dl->AddRectFilled(q, ImVec2(q.x + bar, end.y), C(p.warning));
+      dl->AddText(ImGui::GetFont(), fs, ImVec2(q.x + bar + pad, q.y + pad), C(p.text), text, nullptr, wrap);
+      ImGui::Dummy(ImVec2(w, end.y - q.y));
+      Gap(6);
+      float half = (w - Px(8)) * 0.5f;
+      if (GhostButton("source-cancel", "Cancelar", half)) m.confirmSource = false;
+      ImGui::SameLine(0, Px(8));
+      if (SolidButton("source-ok", "Activar Fuente", half)) {
+        m.confirmSource = false;
+        a.setQuality(ids[kSource]);
+      }
+    }
   }
 
   Divider(12, 6);

@@ -119,8 +119,13 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
   if (settings.codec != "h264")
     for (const auto& c : CandidatesFor("h264")) add(c);
 
+  const bool source = settings.quality.level == kSourceLevel;
+  // Un encoder por CPU elegido a mano se respeta también con hardwareOnly.
+  const bool manualSoftware = settings.preferred != "auto" && !settings.preferred.empty() && !order.front().hardware;
+  const bool hardwareOnly = settings.hardwareOnly && !manualSoftware;
   bool triedHardware = false;
   for (const auto& cand : order) {
+    if (hardwareOnly && !cand.hardware) continue;
     const AVCodec* codec = avcodec_find_encoder_by_name(cand.codec.c_str());
     if (!codec) continue;
     if (!cand.hardware && triedHardware)
@@ -129,19 +134,29 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
           cand.id.c_str());
     triedHardware |= cand.hardware;
     // Primero con las opciones de calidad; si el driver las rechaza, el mismo
-    // encoder en modo simple antes que bajar a uno peor.
-    bool ok = TryOpen(codec, cand, settings, false);
+    // encoder con menos antes que bajar a uno peor. Con Fuente, NVENC prueba
+    // antes la AQ temporal, que no todas las gráficas tienen (los demás
+    // encoders no tienen nada de Fuente que pueda hacer fallar el open).
+    const bool extras = source && cand.codec.find("nvenc") != std::string::npos;
+    const char* opened = "Fuente";
+    bool ok = extras && TryOpen(codec, cand, settings, Options::Source);
+    if (!ok) {
+      if (extras) Log("%s no abrió con AQ temporal; se prueba sin ella", cand.id.c_str());
+      opened = extras ? "Fuente sin AQ temporal" : source ? "Fuente" : "calidad";
+      ok = TryOpen(codec, cand, settings, Options::Quality);
+    }
     if (!ok) {
       Log("%s no aceptó las opciones de calidad; se abre en modo simple", cand.id.c_str());
-      ok = TryOpen(codec, cand, settings, true);
+      opened = "simple";
+      ok = TryOpen(codec, cand, settings, Options::Simple);
     }
     if (ok) {
       name_ = cand.id;
       label_ = cand.label;
       software_ = !cand.hardware;
-      Log("Encoder de vídeo: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s%s)", name_.c_str(), settings.width,
-          settings.height, settings.fps, settings.quality.targetKbps, settings.quality.maxKbps,
-          settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema", software_ ? ", CPU" : "");
+      Log("Encoder de vídeo: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s%s, opciones %s)", name_.c_str(),
+          settings.width, settings.height, settings.fps, settings.quality.targetKbps, settings.quality.maxKbps,
+          settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema", software_ ? ", CPU" : "", opened);
       return true;
     }
   }
@@ -151,10 +166,18 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
 }
 
 bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const VideoEncoderSettings& s,
-                           bool simple) {
+                           Options options) {
+  const bool simple = options == Options::Simple;
   const bool zeroCopy = cand.zeroCopy && SupportsPixFmt(codec, AV_PIX_FMT_D3D11);
   const QualityPlan& q = s.quality;
-  const int level = q.level < 0 ? 2 : q.level; // personalizada usa las opciones de "alta"
+  // Personalizada usa las opciones de "alta"; Fuente parte de las de "máxima".
+  const int level = q.level < 0 ? 2 : std::min(q.level, 3);
+  const bool source = q.level == kSourceLevel;
+  const bool h264 = codec->id == AV_CODEC_ID_H264;
+  // Trabajo del encoder respecto a 1080p60. Con Fuente la salida es la nativa
+  // y el preset más lento puede no llegar a tiempo con la GPU ocupada por el
+  // juego: según NVIDIA, P7 hace ~210 fps de 1080p, y 1440p60 pide ~107.
+  const double load = double(s.width) * double(s.height) * double(s.fps) / (1920.0 * 1080.0 * 60.0);
   const int64_t target = int64_t(q.targetKbps) * 1000;
   const int64_t cap = int64_t(std::max(q.maxKbps, q.targetKbps)) * 1000;
 
@@ -199,11 +222,19 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
       // bits donde la imagen es más compleja; multipass afina el control de
       // tasa a un cuarto de resolución, casi gratis en NVENC.
       static const char* kPreset[] = {"p4", "p4", "p5", "p6"};
-      av_dict_set(&opts, "preset", kPreset[level], 0);
+      const char* preset = kPreset[level];
+      if (source) preset = load <= 1.8 ? "p6" : load <= 4.5 ? "p5" : "p4";
+      av_dict_set(&opts, "preset", preset, 0);
       av_dict_set(&opts, "rc", "vbr", 0);
       av_dict_set(&opts, "spatial-aq", "1", 0);
       av_dict_set(&opts, "aq-strength", "8", 0);
-      if (level >= 2) av_dict_set(&opts, "multipass", "qres", 0);
+      if (level >= 2 && !(source && load > 4.5)) av_dict_set(&opts, "multipass", "qres", 0);
+      // Fuente: perfil High (8x8 y CABAC completo; por defecto FFmpeg pide
+      // Main) y AQ temporal, que reparte mejor los bits en escenas con
+      // movimiento. Si la gráfica no tiene AQ temporal, NVENC no abre y se
+      // reintenta sin ella.
+      if (source && h264) av_dict_set(&opts, "profile", "high", 0);
+      if (options == Options::Source) av_dict_set(&opts, "temporal-aq", "1", 0);
       // Bitrate manual: VBR clásico alrededor del valor elegido. Preajuste:
       // calidad objetivo (cq) y NVENC decide el bitrate hasta el tope.
       if (q.level >= 0) {
@@ -229,6 +260,13 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
       av_dict_set(&opts, "rc", "vbr_peak", 0);
       av_dict_set(&opts, "enforce_hrd", "0", 0);
       if (level >= 1) av_dict_set(&opts, "vbaq", "1", 0);
+      // Fuente: perfil High (con transcoding AMF usa Main) y control de tasa
+      // con una precodificación a baja resolución, que hace el propio VCN y no
+      // los shaders del juego. Si el driver no la admite, AMF solo avisa.
+      if (source) {
+        if (h264) ctx_->profile = AV_PROFILE_H264_HIGH;
+        av_dict_set(&opts, "preencode", "1", 0);
+      }
     }
   } else if (n.find("qsv") != std::string::npos) {
     av_dict_set(&opts, "look_ahead", "0", 0);
@@ -296,7 +334,8 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
       err = avcodec_open2(ctx_, codec, &opts);
     }
     if (err < 0) {
-      Log("No se pudo abrir %s (%s): %s", codec->name, simple ? "simple" : "calidad", AvError(err).c_str());
+      Log("No se pudo abrir %s (%s): %s", codec->name,
+          simple ? "simple" : options == Options::Source ? "Fuente" : "calidad", AvError(err).c_str());
       ok = false;
     }
   }

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 
@@ -83,19 +84,14 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
                                   : MonitorFromWindow(settings_.target.window, MONITOR_DEFAULTTONEAREST));
 
   SIZE src = TargetSize(settings_.target);
-  for (int pass = 0;; ++pass) {
-    // 2. Tamaño de salida: nunca se escala hacia arriba; dimensiones pares.
-    int h = settings_.outputHeight > 0 ? std::min<int>(settings_.outputHeight, src.cy) : src.cy;
-    int w = int(std::lround(double(h) * src.cx / src.cy));
+  // Conversor y encoder para una salida de w x h (pares; quien llama nunca
+  // pide más que la fuente). 1: abiertos; 0: ningún encoder se pudo abrir y
+  // el conversor queda libre para otro intento; -1: falló el conversor.
+  auto openVideo = [&](int w, int h, bool hardwareOnly) {
     width_ = std::max(w & ~1, 2);
     height_ = std::max(h & ~1, 2);
-
-    if (!converter_.Init(gpu_.Device(), gpu_.Context(), UINT(width_), UINT(height_), UINT(settings_.fps))) {
-      Stop();
-      return false;
-    }
-
-    // 3. Encoder de vídeo.
+    if (!converter_.Init(gpu_.Device(), gpu_.Context(), UINT(width_), UINT(height_), UINT(settings_.fps)))
+      return -1;
     VideoEncoderSettings es;
     es.width = width_;
     es.height = height_;
@@ -104,11 +100,47 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     es.quality = plan_;
     es.codec = settings_.codec;
     es.preferred = settings_.encoder;
-    if (!encoder_.Open(es, gpu_.Device())) {
-      if (notify_) notify_("No hay ningún encoder de vídeo disponible", true);
-      Stop();
-      return false;
+    es.hardwareOnly = hardwareOnly;
+    if (encoder_.Open(es, gpu_.Device())) return 1;
+    GpuLock lock(GpuMutex());
+    converter_.Reset();
+    return 0;
+  };
+
+  int opened = 0;
+  if (IsSourceQuality(settings_.quality)) {
+    // 2-3. Fuente: siempre la resolución nativa, sea cual sea la elegida en
+    // Resolución. Si ningún encoder por GPU la admite (H.264 llega a 4096 de
+    // ancho en NVENC y a 4096x2160 en muchas AMD, así que un monitor 5120x1440
+    // no entra), se prueba en cajas cada vez más pequeñas antes que codificar
+    // en la CPU, que a esa resolución le quitaría el procesador al juego.
+    settings_.outputHeight = 0;
+    static const SIZE kBoxes[] = {{LONG_MAX, LONG_MAX}, {4096, 2304}, {2560, 1440}, {1920, 1080}};
+    LONG lastHeight = LONG_MAX;
+    for (const SIZE& box : kBoxes) {
+      double fit = std::min({1.0, double(box.cx) / double(src.cx), double(box.cy) / double(src.cy)});
+      LONG h = LONG(double(src.cy) * fit);
+      if (h >= lastHeight) continue; // esta caja no la hace más pequeña
+      lastHeight = h;
+      opened = openVideo(int(double(src.cx) * fit), int(h), true);
+      if (opened != 0) break;
     }
+    if (opened > 0)
+      Log("Calidad Fuente: %dx%d@%d (la fuente es %ldx%ld)", width_, height_, settings_.fps, src.cx, src.cy);
+    if (opened == 0) {
+      // Sin encoder por GPU, lo máximo que da el PC sin lag es lo de abajo:
+      // Máxima, y a 720p30 si acaba en la CPU.
+      Log("Calidad Fuente: ningún encoder por GPU se pudo abrir; se sigue como Máxima");
+      settings_.quality = "maxima";
+    }
+  }
+  for (int pass = 0; opened == 0; ++pass) {
+    // 2. Tamaño de salida: nunca se escala hacia arriba.
+    int h = settings_.outputHeight > 0 ? std::min<int>(settings_.outputHeight, src.cy) : src.cy;
+    int w = int(std::lround(double(h) * src.cx / src.cy));
+    // 3. Encoder de vídeo.
+    opened = openVideo(w, h, false);
+    if (opened <= 0) break;
 
     // Sin encoder por GPU, codificar 1080p60 en la CPU le quita al juego
     // varios núcleos: se baja a 720p30, que cuesta unas 4,5 veces menos. Si
@@ -127,9 +159,15 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
       GpuLock lock(GpuMutex());
       converter_.Reset();
     }
+    opened = 0;
     static std::atomic<bool> warned{false};
     if (notify_ && !warned.exchange(true))
       notify_("La gráfica no pudo codificar el vídeo: se graba a 720p30 por CPU. Actualiza su driver", true);
+  }
+  if (opened <= 0) {
+    if (opened == 0 && notify_) notify_("No hay ningún encoder de vídeo disponible", true);
+    Stop();
+    return false;
   }
 
   buffer_ = std::make_shared<ReplayBuffer>();
