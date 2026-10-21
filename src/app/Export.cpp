@@ -12,6 +12,7 @@ extern "C" {
 
 #ifdef _WIN32
 #include "app/CrashHandler.h"
+#include "core/ThreadPolicy.h"
 #include <mfapi.h>
 #include <objbase.h>
 #endif
@@ -21,6 +22,7 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <optional>
 #include <system_error>
 
 namespace spectre {
@@ -160,7 +162,8 @@ bool SupportsPixFmt(const AVCodec* codec, AVPixelFormat fmt) {
 struct Probe {
   double duration = 0;
   int width = 0, height = 0;
-  double fps = 0;
+  AVRational rate{60, 1}; // fps del original
+  double fps = 60;
   int64_t videoBps = 0; // 0 = no se sabe
   bool h264 = false;
   bool audio = false;
@@ -179,7 +182,8 @@ bool ProbeInput(const std::string& path, Probe* probe, std::string* error) {
   probe->height = st->codecpar->height;
   if (probe->width < 16 || probe->height < 16) return Fail(error, "El vídeo no tiene un tamaño válido");
   AVRational rate = av_guess_frame_rate(in.p, st, nullptr);
-  probe->fps = rate.num > 0 && rate.den > 0 ? av_q2d(rate) : 60.0;
+  if (rate.num > 0 && rate.den > 0) probe->rate = rate;
+  probe->fps = av_q2d(probe->rate);
   probe->duration = DurationOf(in.p, v);
   if (probe->duration <= 0) return Fail(error, "No se pudo saber cuánto dura el vídeo");
   probe->h264 = st->codecpar->codec_id == AV_CODEC_ID_H264;
@@ -198,8 +202,9 @@ bool ProbeInput(const std::string& path, Probe* probe, std::string* error) {
 }
 
 struct Plan {
-  int width = 0, height = 0, fps = 60;
-  double sourceFps = 60;
+  int width = 0, height = 0;
+  AVRational rate{60, 1}; // fps de la copia
+  int step = 1;           // frames del original por cada frame de la copia
   int64_t videoBps = 0;
   int audioBps = 0;
 };
@@ -214,18 +219,24 @@ bool MakePlan(const Probe& probe, double budgetBytes, Plan* plan) {
   if (probe.videoBps > 0) bps = std::min(bps, double(probe.videoBps));
   if (bps < kMinVideoBps) return false;
 
-  int fps = std::clamp(int(std::lround(probe.fps)), 1, 60);
-  if (bps < 2.0e6 && fps > 30) fps = 30;
+  // Los fps del original divididos por un entero (144 a 48, 120 a 60, 60 a 30
+  // con poco bitrate): cada frame de la copia sale del mismo número de frames
+  // del original. Con un paso irregular (144 a 60 coge 2 o 3) el movimiento
+  // va a saltitos.
+  const double maxFps = bps < 2.0e6 ? 30.0 : 60.0;
+  const int step = std::max(1, int(std::ceil(probe.fps / maxFps - 1e-6)));
+  const AVRational rate = av_mul_q(probe.rate, AVRational{1, step});
+  const double fps = av_q2d(rate);
   // Bitrate mínimo de cada altura a 60 fps; a 30 fps basta con el 60 %.
   static const struct {
     int height;
     double bps60;
   } kLadder[] = {{1080, 5.5e6}, {720, 2.8e6}, {540, 1.6e6}, {480, 0.9e6}};
-  const double perFps = fps <= 30 ? 0.6 : 1.0;
+  const double perFps = fps <= 30.5 ? 0.6 : 1.0;
   int height = 360;
-  for (const auto& step : kLadder) {
-    if (bps >= step.bps60 * perFps) {
-      height = step.height;
+  for (const auto& rung : kLadder) {
+    if (bps >= rung.bps60 * perFps) {
+      height = rung.height;
       break;
     }
   }
@@ -234,8 +245,8 @@ bool MakePlan(const Probe& probe, double budgetBytes, Plan* plan) {
   if (width < 16 || height < 16) return false;
   plan->width = width;
   plan->height = height;
-  plan->fps = fps;
-  plan->sourceFps = probe.fps;
+  plan->rate = rate;
+  plan->step = step;
   plan->videoBps = int64_t(bps);
   return true;
 }
@@ -294,11 +305,11 @@ bool OpenVideoEncoder(const std::string& id, const Plan& plan, const AVCodecCont
   if (!c) return false;
   c->width = plan.width;
   c->height = plan.height;
-  c->time_base = {1, plan.fps};
-  c->framerate = {plan.fps, 1};
+  c->time_base = av_inv_q(plan.rate);
+  c->framerate = plan.rate;
   c->sample_aspect_ratio = {1, 1};
   c->pix_fmt = SupportsPixFmt(codec, AV_PIX_FMT_NV12) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-  c->gop_size = plan.fps * 2;
+  c->gop_size = std::max(1, int(std::lround(av_q2d(plan.rate) * 2)));
   c->max_b_frames = 0;
   c->bit_rate = plan.videoBps;
   c->rc_max_rate = plan.videoBps * 3 / 2;
@@ -426,9 +437,10 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
   int convertedCapacity = 0;
   int64_t lastIndex = -1;
   int64_t audioPts = AV_NOPTS_VALUE; // en muestras
-  // Bajar de fps (60 a 30) quita uno de cada dos frames; si no, cada frame
-  // cae en su sitio aunque los tiempos del original bailen un poco.
-  const bool decimate = plan.fps + 0.5 < plan.sourceFps;
+  // Bajar de fps (144 a 48) se queda con uno de cada tres frames; si no, cada
+  // frame cae en su sitio aunque los tiempos del original bailen un poco.
+  const bool decimate = plan.step > 1;
+  const double fps = av_q2d(plan.rate);
 
   scaled.p->format = venc.p->pix_fmt;
   scaled.p->width = plan.width;
@@ -466,7 +478,7 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
     int64_t index = lastIndex + 1;
     if (!std::isnan(t)) {
       if (t < -0.001) return true; // antes del inicio (lista de edición del MP4)
-      index = decimate ? int64_t(std::floor(t * plan.fps + 1e-3)) : int64_t(std::llround(t * plan.fps));
+      index = decimate ? int64_t(std::floor(t * fps + 1e-3)) : int64_t(std::llround(t * fps));
       if (index <= lastIndex) return true;
     }
     lastIndex = index;
@@ -628,8 +640,8 @@ ExportResult ExportVideo(const std::string& input, const std::string& output, co
                      " con una calidad aceptable. Recórtalo y exporta el recorte.";
       return result;
     }
-    Log("Exportar para Discord: %dx%d@%d, vídeo %lld kbps, audio %d kbps (intento %d)", plan.width, plan.height,
-        plan.fps, (long long)(plan.videoBps / 1000), plan.audioBps / 1000, attempt + 1);
+    Log("Exportar para Discord: %dx%d a %.2f fps, vídeo %lld kbps, audio %d kbps (intento %d)", plan.width,
+        plan.height, av_q2d(plan.rate), (long long)(plan.videoBps / 1000), plan.audioBps / 1000, attempt + 1);
     std::string error;
     Outcome outcome = Transcode(input, part, plan, options, cancel, progress, &result.encoder, &error);
     if (outcome != Outcome::Done) {
@@ -683,10 +695,15 @@ bool Exporter::Start(const std::string& input, const ExportOptions& options, std
     InstallThreadCrashHandler();
     // Media Foundation (h264_mf) necesita COM en este hilo.
     HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    // Modo de fondo con un juego abierto: CPU, disco y memoria ceden ante el juego.
-    const bool background =
-        options.gentle && SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != FALSE;
-    if (!options.gentle) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    // Con un juego abierto, a los núcleos de eficiencia (EcoQoS) y en modo de
+    // fondo: CPU, disco y memoria ceden ante el juego.
+    std::optional<BackgroundMode> background;
+    if (options.gentle) {
+      SetThreadEcoQoS(true);
+      background.emplace();
+    } else {
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
 #endif
     ExportResult result;
     try {
@@ -701,7 +718,7 @@ bool Exporter::Start(const std::string& input, const ExportOptions& options, std
       Log("Exportar: excepción: %s", e.what());
     }
 #ifdef _WIN32
-    if (background) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+    background.reset();
     if (SUCCEEDED(com)) CoUninitialize();
 #endif
     {
