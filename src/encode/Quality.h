@@ -36,9 +36,9 @@ struct QualityPlan {
 // Fps de Fuente: los Hz del monitor (59,94 Hz, que Windows da como 59, cuenta
 // como 60), como mucho 144 y hasta unas 5 veces el trabajo de 1080p60 para
 // que el encoder siga en tiempo real con el juego usando la GPU (1440p a 144
-// sí, 4K a 144 no). Si no caben, una fracción exacta de los Hz (240 Hz: 120;
-// 4K a 144 Hz: 72) y, si no la hay, 120 o 60. Sin Hz conocidos, los fps
-// elegidos.
+// sí, 4K a 144 no); si no caben, 144, 120 o 60. Una fracción exacta de los
+// Hz cuando no pierde fps de verdad (240 Hz: 120; 4K a 144 Hz: 72, no 60;
+// 180 Hz sigue a 144). Sin Hz conocidos, los fps elegidos.
 constexpr int kSourceMaxFps = 144;
 int SourceFps(int refreshHz, int width, int height, int fallbackFps);
 
