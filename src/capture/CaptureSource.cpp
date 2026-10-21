@@ -7,6 +7,17 @@
 
 namespace spectre {
 
+int MonitorRefreshHz(HMONITOR monitor) {
+  MONITORINFOEXW mi{};
+  mi.cbSize = sizeof(mi);
+  if (!monitor || !GetMonitorInfoW(monitor, &mi)) return 0;
+  DEVMODEW dm{};
+  dm.dmSize = sizeof(dm);
+  if (!EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) return 0;
+  // 0 y 1 significan «el del hardware», sin decir cuál.
+  return dm.dmDisplayFrequency > 1 ? int(dm.dmDisplayFrequency) : 0;
+}
+
 std::vector<MonitorInfo> EnumerateMonitors() {
   std::vector<MonitorInfo> list;
   EnumDisplayMonitors(
@@ -20,6 +31,7 @@ std::vector<MonitorInfo> EnumerateMonitors() {
           info.handle = mon;
           info.rect = mi.rcMonitor;
           info.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+          info.refreshHz = MonitorRefreshHz(mon);
           char buf[160];
           snprintf(buf, sizeof(buf), "Pantalla %zu (%ldx%ld)%s", out->size() + 1,
                    long(mi.rcMonitor.right - mi.rcMonitor.left), long(mi.rcMonitor.bottom - mi.rcMonitor.top),

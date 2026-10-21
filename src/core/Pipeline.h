@@ -24,9 +24,9 @@ struct PipelineSettings {
   CaptureTarget target;
   std::string captureApi = "auto"; // auto | wgc | dda
   bool cursor = true;
-  int fps = 60;
-  int outputHeight = 1080; // 0 = nativa
-  std::string quality = "alta"; // baja | media | alta | maxima | personalizada
+  int fps = 60;            // con quality = fuente, los Hz del monitor (ver SourceFps)
+  int outputHeight = 1080; // 0 = nativa (con quality = fuente, siempre)
+  std::string quality = "alta"; // baja | media | alta | maxima | fuente | personalizada
   int bitrateKbps = 20000;      // solo con quality = personalizada
   std::string codec = "h264";
   std::string encoder = "auto";

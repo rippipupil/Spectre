@@ -26,6 +26,7 @@ struct MenuModel {
 
   // Estado de la interfaz
   unsigned long long openedAt = 0; // GetTickCount64 al abrir (animación de entrada)
+  bool confirmSource = false;      // se pulsó Fuente: el aviso espera Activar o Cancelar
   float panelWidth = 0, panelHeight = 0; // tamaño real del panel en el último frame
 };
 

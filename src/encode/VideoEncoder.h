@@ -22,6 +22,10 @@ struct VideoEncoderSettings {
   QualityPlan quality;        // bitrate, tope y calidad objetivo (ver Quality.h)
   std::string codec = "h264"; // h264 | hevc | av1
   std::string preferred = "auto";
+  // Solo encoders por GPU (salvo uno por CPU elegido a mano): con Fuente se
+  // prueba antes una resolución menor que codificar en la CPU (ver
+  // Pipeline::Start).
+  bool hardwareOnly = false;
 };
 
 struct EncoderInfo {
@@ -56,9 +60,12 @@ public:
   bool Software() const { return software_; }
 
 private:
-  // simple: sin las opciones de calidad (VBR, AQ, multipass...), por si el
-  // driver no las admite y preferimos este encoder a uno peor.
-  bool TryOpen(const AVCodec* codec, const EncoderCandidate& cand, const VideoEncoderSettings& s, bool simple);
+  // Lo que se le pide al encoder, de más a menos. Source: lo de Quality más
+  // la AQ temporal de NVENC, que algunas gráficas no tienen (solo con Fuente).
+  // Quality: VBR, AQ, multipass... Simple: sin nada de eso, por si el driver
+  // no lo admite y preferimos este encoder a uno peor.
+  enum class Options { Source, Quality, Simple };
+  bool TryOpen(const AVCodec* codec, const EncoderCandidate& cand, const VideoEncoderSettings& s, Options options);
   bool SetupHwFrames(const VideoEncoderSettings& s);
   bool SetupStaging(const VideoEncoderSettings& s);
   bool SendStaging(int index, const PacketSink& sink);

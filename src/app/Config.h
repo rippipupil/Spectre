@@ -27,7 +27,7 @@ struct Config {
   bool captureCursor = true;
   int fps = 60;
   int outputHeight = 1080;             // 0 = resolución nativa
-  std::string quality = "alta";        // baja | media | alta | maxima | personalizada
+  std::string quality = "alta";        // baja | media | alta | maxima | fuente | personalizada
   int bitrateKbps = 20000;             // solo con quality = personalizada
   std::string codec = "h264";          // "h264" | "hevc" | "av1"
   std::string encoder = "auto";        // "auto" o nombre de FFmpeg (h264_nvenc...)

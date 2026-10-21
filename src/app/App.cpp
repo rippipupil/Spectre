@@ -74,6 +74,7 @@ const char* QualityName(const std::string& quality) {
   if (quality == "baja") return "Baja";
   if (quality == "media") return "Media";
   if (quality == "maxima") return "Máxima";
+  if (IsSourceQuality(quality)) return "Fuente";
   if (quality == "personalizada") return "Personalizada";
   return "Alta";
 }
