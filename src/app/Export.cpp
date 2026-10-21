@@ -222,9 +222,10 @@ bool MakePlan(const Probe& probe, double budgetBytes, Plan* plan) {
   // Los fps del original divididos por un entero (144 a 48, 120 a 60, 60 a 30
   // con poco bitrate): cada frame de la copia sale del mismo número de frames
   // del original. Con un paso irregular (144 a 60 coge 2 o 3) el movimiento
-  // va a saltitos.
+  // va a saltitos. Con un 1 % de margen, un vídeo de móvil a 60,02 fps sigue
+  // a 60 en vez de bajar a 30.
   const double maxFps = bps < 2.0e6 ? 30.0 : 60.0;
-  const int step = std::max(1, int(std::ceil(probe.fps / maxFps - 1e-6)));
+  const int step = std::max(1, int(std::ceil(probe.fps / maxFps - 0.01)));
   const AVRational rate = av_mul_q(probe.rate, AVRational{1, step});
   const double fps = av_q2d(rate);
   // Bitrate mínimo de cada altura a 60 fps; a 30 fps basta con el 60 %.
@@ -437,8 +438,10 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
   int convertedCapacity = 0;
   int64_t lastIndex = -1;
   int64_t audioPts = AV_NOPTS_VALUE; // en muestras
-  // Bajar de fps (144 a 48) se queda con uno de cada tres frames; si no, cada
-  // frame cae en su sitio aunque los tiempos del original bailen un poco.
+  // Bajar de fps (144 a 48) se queda con uno de cada tres frames, con medio
+  // frame del original de margen para los tiempos redondeados a milisegundos
+  // (vídeos de otros programas); si no, cada frame cae en su sitio aunque los
+  // tiempos del original bailen un poco.
   const bool decimate = plan.step > 1;
   const double fps = av_q2d(plan.rate);
 
@@ -478,7 +481,7 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
     int64_t index = lastIndex + 1;
     if (!std::isnan(t)) {
       if (t < -0.001) return true; // antes del inicio (lista de edición del MP4)
-      index = decimate ? int64_t(std::floor(t * fps + 1e-3)) : int64_t(std::llround(t * fps));
+      index = decimate ? int64_t(std::floor(t * fps + 0.5 / plan.step)) : int64_t(std::llround(t * fps));
       if (index <= lastIndex) return true;
     }
     lastIndex = index;
