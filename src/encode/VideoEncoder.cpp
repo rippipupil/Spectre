@@ -174,10 +174,13 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
   const int level = q.level < 0 ? 2 : std::min(q.level, 3);
   const bool source = q.level == kSourceLevel;
   const bool h264 = codec->id == AV_CODEC_ID_H264;
-  // Trabajo del encoder respecto a 1080p60. Con Fuente la salida es la nativa
-  // y el preset más lento puede no llegar a tiempo con la GPU ocupada por el
-  // juego: según NVIDIA, P7 hace ~210 fps de 1080p, y 1440p60 pide ~107.
+  // Con Fuente la salida es la nativa a los Hz del monitor, y el preset más
+  // lento puede no llegar a tiempo con la GPU ocupada por el juego: según
+  // NVIDIA, P7 hace ~210 fps de 1080p en Turing o posterior (Pascal, menos), y
+  // 1440p60 pide ~107. Esmero según el trabajo respecto a 1080p60: 0 hasta
+  // ~1440p60, 1 hasta ~1080p144, 2 por encima (1440p144, 4K60).
   const double load = double(s.width) * double(s.height) * double(s.fps) / (1920.0 * 1080.0 * 60.0);
+  const int effort = load <= 1.8 ? 0 : load <= 2.5 ? 1 : 2;
   const int64_t target = int64_t(q.targetKbps) * 1000;
   const int64_t cap = int64_t(std::max(q.maxKbps, q.targetKbps)) * 1000;
 
@@ -223,12 +226,13 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
       // tasa a un cuarto de resolución, casi gratis en NVENC.
       static const char* kPreset[] = {"p4", "p4", "p5", "p6"};
       const char* preset = kPreset[level];
-      if (source) preset = load <= 1.8 ? "p6" : load <= 4.5 ? "p5" : "p4";
+      static const char* kSourcePreset[] = {"p6", "p5", "p4"};
+      if (source) preset = kSourcePreset[effort];
       av_dict_set(&opts, "preset", preset, 0);
       av_dict_set(&opts, "rc", "vbr", 0);
       av_dict_set(&opts, "spatial-aq", "1", 0);
       av_dict_set(&opts, "aq-strength", "8", 0);
-      if (level >= 2 && !(source && load > 4.5)) av_dict_set(&opts, "multipass", "qres", 0);
+      if (level >= 2 && !(source && effort == 2)) av_dict_set(&opts, "multipass", "qres", 0);
       // Fuente: perfil High (8x8 y CABAC completo; por defecto FFmpeg pide
       // Main) y AQ temporal, que reparte mejor los bits en escenas con
       // movimiento. Si la gráfica no tiene AQ temporal, NVENC no abre y se
@@ -256,7 +260,8 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
     } else {
       static const char* kQuality[] = {"speed", "balanced", "balanced", "quality"};
       av_dict_set(&opts, "usage", "transcoding", 0);
-      av_dict_set(&opts, "quality", kQuality[level], 0);
+      static const char* kSourceQuality[] = {"quality", "balanced", "speed"};
+      av_dict_set(&opts, "quality", source ? kSourceQuality[effort] : kQuality[level], 0);
       av_dict_set(&opts, "rc", "vbr_peak", 0);
       av_dict_set(&opts, "enforce_hrd", "0", 0);
       if (level >= 1) av_dict_set(&opts, "vbaq", "1", 0);
@@ -265,7 +270,7 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
       // los shaders del juego. Si el driver no la admite, AMF solo avisa.
       if (source) {
         if (h264) ctx_->profile = AV_PROFILE_H264_HIGH;
-        av_dict_set(&opts, "preencode", "1", 0);
+        if (effort < 2) av_dict_set(&opts, "preencode", "1", 0);
       }
     }
   } else if (n.find("qsv") != std::string::npos) {
@@ -275,7 +280,8 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
       ctx_->rc_max_rate = ctx_->bit_rate;
     } else {
       static const char* kPreset[] = {"veryfast", "faster", "medium", "medium"};
-      av_dict_set(&opts, "preset", kPreset[level], 0);
+      static const char* kSourcePreset[] = {"medium", "faster", "veryfast"};
+      av_dict_set(&opts, "preset", source ? kSourcePreset[effort] : kPreset[level], 0);
     }
   } else if (n.find("_mf") != std::string::npos) {
     // hw_encoding=1: el MFT del fabricante (NVENC, VCN o QuickSync por dentro);
