@@ -84,6 +84,12 @@ void EstimatedSize(const SettingsModel& m, const std::string& quality, int* widt
   *width = running ? *height * m.stats.width / m.stats.height : *height * 16 / 9;
 }
 
+// Hz del monitor elegido (0 si no se sabe).
+int SelectedRefreshHz(const SettingsModel& m) {
+  if (m.monitors.empty()) return 0;
+  return m.monitors[size_t(std::clamp<int>(m.config.monitorIndex, 0, int(m.monitors.size()) - 1))].refreshHz;
+}
+
 // Fps de la configuración en edición con esa calidad. Fuente usa los Hz del
 // monitor (los de la captura si ya está en Fuente), como Pipeline::Start.
 int EstimatedFps(const SettingsModel& m, const std::string& quality) {
@@ -93,8 +99,7 @@ int EstimatedFps(const SettingsModel& m, const std::string& quality) {
   if (m.monitors.empty()) return c.fps;
   int width = 0, height = 0;
   EstimatedSize(m, quality, &width, &height);
-  const auto& mon = m.monitors[size_t(std::clamp<int>(c.monitorIndex, 0, int(m.monitors.size()) - 1))];
-  return SourceFps(mon.refreshHz, width, height, c.fps);
+  return SourceFps(SelectedRefreshHz(m), width, height, c.fps);
 }
 
 // Bitrate máximo que usará la configuración en edición (para las estimaciones).
@@ -337,7 +342,9 @@ void PageVideo(SettingsModel& m) {
   if (IsSourceQuality(c.quality)) {
     // Fuente usa los Hz del monitor; los fps elegidos vuelven al cambiar de calidad.
     int fps = 0;
-    std::string name = std::to_string(EstimatedFps(m, c.quality)) + " fps, los Hz del monitor";
+    const int hz = NormalizedRefreshHz(SelectedRefreshHz(m));
+    std::string name = std::to_string(EstimatedFps(m, c.quality)) + " fps" +
+                       (hz > 0 ? " (monitor a " + std::to_string(hz) + " Hz)" : std::string(" (los fija Fuente)"));
     ImGui::BeginDisabled();
     ChoiceCombo<int>("##fps", fps, {{0, name.c_str()}});
     ImGui::EndDisabled();
@@ -358,8 +365,8 @@ void PageVideo(SettingsModel& m) {
   if (IsSourceQuality(c.quality)) {
     char hint[300];
     snprintf(hint, sizeof(hint),
-             "Resolución nativa, los Hz del monitor (como mucho 144 fps; con más Hz o mucha resolución, la mitad "
-             "o un tercio) y hasta %d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo que "
+             "Resolución nativa, los Hz del monitor (como mucho 144 fps; si no caben, 120 o 60, o una fracción "
+             "exacta de los Hz para que vaya fluido) y hasta %d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo que "
              "más RAM, GPU y disco gasta.",
              EstimatedKbps(m) / 1000);
     Warning(hint);
