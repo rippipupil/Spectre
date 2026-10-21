@@ -16,13 +16,20 @@ int QualityLevel(const std::string& quality) {
 
 int SourceFps(int refreshHz, int width, int height, int fallbackFps) {
   if (refreshHz < 24) return fallbackFps;
-  int fps = refreshHz;
-  for (int rate : {30, 60, 75, 90, 100, 120, 144, 165, 240})
-    if (fps == rate - 1) fps = rate;
-  fps = std::min(fps, kSourceMaxFps);
+  int hz = refreshHz;
+  for (int rate : {30, 60, 75, 90, 100, 120, 144, 165, 240, 360})
+    if (hz == rate - 1) hz = rate;
   const double frame = double(std::max(width, 16)) * double(std::max(height, 16)) / (1920.0 * 1080.0);
+  auto fits = [&](int fps) { return fps <= kSourceMaxFps && frame * fps / 60.0 <= 5.0; };
+  // Mejor una fracción exacta de los Hz: a 144 fps, un monitor de 240 Hz da
+  // uno o dos frames por cada uno (5:3) y el scroll sale a saltitos; a 120,
+  // uno de cada dos, siempre igual. Igual con 4K a 144 Hz: 72 antes que 60.
+  for (int d = 1; hz / d >= 60; ++d)
+    if (hz % d == 0 && fits(hz / d)) return hz / d;
+  // Sin fracción exacta de 60 fps o más (165 Hz): lo más alto que quepa.
+  int fps = std::min(hz, kSourceMaxFps);
   for (int lower : {120, 60})
-    if (fps > lower && frame * fps / 60.0 > 5.0) fps = lower;
+    if (fps > lower && !fits(fps)) fps = lower;
   return fps;
 }
 

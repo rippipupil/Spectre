@@ -146,6 +146,12 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     }
     if (opened > 0)
       Log("Calidad Fuente: %dx%d@%d (la fuente es %ldx%ld)", width_, height_, settings_.fps, src.cx, src.cy);
+    // Solo pasa con un encoder por CPU elegido a mano: se respeta, pero la
+    // nativa a los Hz del monitor en la CPU le quita el procesador al juego.
+    if (opened > 0 && encoder_.Software() && notify_)
+      notify_("Fuente con el encoder por CPU elegido en Ajustes puede dar lag: pon Encoder en Automático para usar "
+              "la gráfica",
+              true);
     if (opened == 0) {
       // Sin encoder por GPU, lo máximo que da el PC sin lag es lo de abajo:
       // Máxima, y a 720p30 si acaba en la CPU.

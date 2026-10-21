@@ -357,9 +357,9 @@ void PageVideo(SettingsModel& m) {
   if (IsSourceQuality(c.quality)) {
     char hint[300];
     snprintf(hint, sizeof(hint),
-             "Resolución nativa, los Hz del monitor (hasta 144 fps; menos si la resolución es muy grande) y hasta "
-             "%d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo que más RAM, GPU y disco "
-             "gasta.",
+             "Resolución nativa, los Hz del monitor (como mucho 144 fps; con más Hz o mucha resolución, la mitad "
+             "o un tercio) y hasta %d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo que "
+             "más RAM, GPU y disco gasta.",
              EstimatedKbps(m) / 1000);
     Warning(hint);
   } else if (c.quality == "personalizada") {
