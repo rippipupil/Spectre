@@ -391,21 +391,36 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
     ImGui::Dummy(ImVec2(0, y + ss - q.y + Px(22)));
   }
 
-  if (NavItem(1, "Inicio", m.page == AppPage::Home)) Navigate(m, AppPage::Home);
+  // Filas de 34 px con el hueco normal. Con la ventana baja se juntan (hasta
+  // 28 px y sin hueco) para no pisar el pie; si ni así cabe, el pie no se
+  // dibuja (la versión y el atajo del panel también están en General).
+  const float unit = Px(1);
+  const float footerTop = win.y + winH - Px(kHint) * 2 - Px(26);
+  const float spacing = ImGui::GetStyle().ItemSpacing.y / unit;
+  const float room = (footerTop - Px(14) - ImGui::GetCursorScreenPos().y) / unit - (12 + kLabel + 6);
+  const int rows = 2 + int(SettingsPage::Count);
+  float pitch = (room + 2 * 34) / float(rows + 2); // filas de 34 y el hueco también en el rótulo
+  if (pitch < 34) pitch = room / float(rows);      // sin hueco
+  pitch = std::clamp(pitch, 28.0f, 34 + spacing);
+  const float rowH = std::min(pitch, 34.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, Px(pitch - rowH)));
+  if (NavItem(1, "Inicio", m.page == AppPage::Home, rowH)) Navigate(m, AppPage::Home);
   char library[48];
   snprintf(library, sizeof(library), "Biblioteca");
-  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer)) Navigate(m, AppPage::Library);
+  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer, rowH))
+    Navigate(m, AppPage::Library);
   NavLabel(m.settings.dirty ? "AJUSTES  (SIN APLICAR)" : "AJUSTES");
   for (int i = 0; i < int(SettingsPage::Count); ++i) {
     auto page = SettingsPage(i);
-    if (NavItem(10 + i, SettingsPageName(page), m.page == AppPage::Settings && m.settingsPage == page)) {
+    if (NavItem(10 + i, SettingsPageName(page), m.page == AppPage::Settings && m.settingsPage == page, rowH)) {
       Navigate(m, AppPage::Settings);
       m.settingsPage = page;
     }
   }
+  ImGui::PopStyleVar();
 
   // Pie: versión y recordatorio del panel
-  {
+  if (ImGui::GetItemRectMax().y + Px(8) <= footerTop) {
     float ss = Px(kHint);
     std::string hint = (m.config.hotkeys.overlay.empty() ? std::string("El panel") : m.config.hotkeys.overlay) +
                        " abre el panel en el juego";

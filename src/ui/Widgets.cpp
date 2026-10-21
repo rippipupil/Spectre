@@ -648,10 +648,10 @@ void ValueRow(const char* label, const std::string& value) {
   ImGui::TextUnformatted(value.c_str());
 }
 
-bool NavItem(int index, const char* name, bool selected) {
+bool NavItem(int index, const char* name, bool selected, float height) {
   const Palette& p = Colors();
   ImGui::PushID(index);
-  const float h = Px(34);
+  const float h = Px(height);
   bool pressed = ImGui::InvisibleButton("nav", ImVec2(ImGui::GetContentRegionAvail().x, h));
   bool hov = ImGui::IsItemHovered();
   ImGui::PopID();

@@ -150,7 +150,7 @@ bool ChoiceCombo(const char* id, T& value, const std::vector<std::pair<T, const 
 }
 
 // Entrada de la columna de navegación (Ajustes de la app).
-bool NavItem(int index, const char* name, bool selected);
+bool NavItem(int index, const char* name, bool selected, float height = 34);
 // Rótulo de grupo en la columna de navegación.
 void NavLabel(const char* text);
 
