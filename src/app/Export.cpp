@@ -12,6 +12,7 @@ extern "C" {
 
 #ifdef _WIN32
 #include "app/CrashHandler.h"
+#include <mfapi.h>
 #include <objbase.h>
 #endif
 
@@ -80,6 +81,31 @@ struct Fifo {
   ~Fifo() {
     if (p) av_audio_fifo_free(p);
   }
+};
+
+// h264_mf, como en VideoEncoder::TryOpen: si no encuentra el MFT, la limpieza
+// de FFmpeg 8.1 hace un MFShutdown() y un CoUninitialize() de más, que se
+// llevarían el MFStartup de main (webcam y listas de audio) y el COM de este
+// hilo. Antes de cada intento se toma uno de cada. Si el intento falla, o los
+// gastó FFmpeg o se quedan sin soltar, que no molesta; si abre, se sueltan
+// después de cerrar el encoder (por eso se declara antes que él).
+struct MfHold {
+  bool held = false;
+#ifdef _WIN32
+  static bool Take() {
+    if (!MediaFoundationAvailable() || FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return false;
+    if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return true;
+    CoUninitialize();
+    return false;
+  }
+  ~MfHold() {
+    if (!held) return;
+    MFShutdown();
+    CoUninitialize();
+  }
+#else
+  static bool Take() { return false; }
+#endif
 };
 
 bool Fail(std::string* error, std::string text) {
@@ -353,12 +379,19 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
   if (err < 0 || !out.p) return fail("No se pudo crear la copia: " + AvError(err));
   const bool globalHeader = (out.p->oformat->flags & AVFMT_GLOBALHEADER) != 0;
 
+  MfHold mf;
   Codec venc;
   std::vector<std::string> order = options.encoders;
   if (order.empty()) order.assign(std::begin(kEncoders), std::end(kEncoders));
   for (const auto& id : order) {
-    if (OpenVideoEncoder(id, plan, vdec.p, globalHeader, false, &venc) ||
-        OpenVideoEncoder(id, plan, vdec.p, globalHeader, true, &venc)) {
+    for (bool simple : {false, true}) {
+      const bool took = id.find("_mf") != std::string::npos && MfHold::Take();
+      if (OpenVideoEncoder(id, plan, vdec.p, globalHeader, simple, &venc)) {
+        mf.held = took;
+        break;
+      }
+    }
+    if (venc.p) {
       *encoder = id;
       break;
     }
