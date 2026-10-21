@@ -83,12 +83,25 @@ void EstimatedSize(const SettingsModel& m, const std::string& quality, int* widt
   *width = running ? *height * m.stats.width / m.stats.height : *height * 16 / 9;
 }
 
+// Fps de la configuración en edición con esa calidad. Fuente usa los Hz del
+// monitor (los de la captura si ya está en Fuente), como Pipeline::Start.
+int EstimatedFps(const SettingsModel& m, const std::string& quality) {
+  const auto& c = m.config;
+  if (!IsSourceQuality(quality)) return c.fps;
+  if (m.stats.running && m.stats.fps > 0 && IsSourceQuality(m.base.quality)) return m.stats.fps;
+  if (m.monitors.empty()) return c.fps;
+  int width = 0, height = 0;
+  EstimatedSize(m, quality, &width, &height);
+  const auto& mon = m.monitors[size_t(std::clamp<int>(c.monitorIndex, 0, int(m.monitors.size()) - 1))];
+  return SourceFps(mon.refreshHz, width, height, c.fps);
+}
+
 // Bitrate máximo que usará la configuración en edición (para las estimaciones).
 int EstimatedKbps(const SettingsModel& m, const std::string& quality) {
   const auto& c = m.config;
   int width = 0, height = 0;
   EstimatedSize(m, quality, &width, &height);
-  return PlanQuality(quality, c.bitrateKbps, width, height, c.fps, c.codec).maxKbps;
+  return PlanQuality(quality, c.bitrateKbps, width, height, EstimatedFps(m, quality), c.codec).maxKbps;
 }
 int EstimatedKbps(const SettingsModel& m) { return EstimatedKbps(m, m.config.quality); }
 
@@ -243,9 +256,9 @@ void SourceDialog(SettingsModel& m) {
         c.maxBufferMB == kAutoBufferMB ? AutoBufferBytes(m) : double(c.maxBufferMB) * 1024.0 * 1024.0;
     char text[700];
     snprintf(text, sizeof(text),
-             "Graba siempre a la resolución nativa (%dx%d), con hasta %d Mbps y las opciones de más calidad que "
-             "tu gráfica hace en tiempo real. Es el modo que más gasta de todos:",
-             width, height, kbps / 1000);
+             "Graba siempre a la resolución nativa y a los Hz del monitor (%dx%d a %d fps), con hasta %d Mbps y "
+             "las opciones de más calidad que tu gráfica hace en tiempo real. Es el modo que más gasta de todos:",
+             width, height, EstimatedFps(m, "fuente"), kbps / 1000);
     ImGui::PushTextWrapPos(0);
     ImGui::TextWrapped("%s", text);
     ImGui::PopTextWrapPos();
@@ -320,7 +333,16 @@ void PageVideo(SettingsModel& m) {
                                  {720, "720p"}, {480, "480p"}});
   }
   FieldLabel("Fotogramas por segundo");
-  m.dirty |= ChoiceCombo<int>("##fps", c.fps, {{30, "30 fps"}, {60, "60 fps"}, {120, "120 fps"}});
+  if (IsSourceQuality(c.quality)) {
+    // Fuente usa los Hz del monitor; los fps elegidos vuelven al cambiar de calidad.
+    int fps = 0;
+    std::string name = std::to_string(EstimatedFps(m, c.quality)) + " fps, los Hz del monitor";
+    ImGui::BeginDisabled();
+    ChoiceCombo<int>("##fps", fps, {{0, name.c_str()}});
+    ImGui::EndDisabled();
+  } else {
+    m.dirty |= ChoiceCombo<int>("##fps", c.fps, {{30, "30 fps"}, {60, "60 fps"}, {120, "120 fps"}});
+  }
   FieldLabel("Calidad");
   const std::string previous = c.quality;
   if (ChoiceCombo<std::string>("##quality", c.quality, QualityOptions())) {
@@ -335,8 +357,9 @@ void PageVideo(SettingsModel& m) {
   if (IsSourceQuality(c.quality)) {
     char hint[300];
     snprintf(hint, sizeof(hint),
-             "Resolución nativa y hasta %d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo "
-             "que más RAM, GPU y disco gasta.",
+             "Resolución nativa, los Hz del monitor (hasta 144 fps; menos si la resolución es muy grande) y hasta "
+             "%d Mbps, con lo máximo que tu gráfica codifica en tiempo real. Es el modo que más RAM, GPU y disco "
+             "gasta.",
              EstimatedKbps(m) / 1000);
     Warning(hint);
   } else if (c.quality == "personalizada") {

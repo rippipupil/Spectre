@@ -215,8 +215,9 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
     }
     if (m.confirmSource) {
       Gap(8);
-      const char* text = "Fuente graba a la resolución nativa con el bitrate más alto que da tu gráfica. Gasta "
-                         "mucha más RAM, GPU y disco: si el juego va a tirones, vuelve a Alta.";
+      const char* text = "Fuente graba a la resolución nativa y a los Hz del monitor, con el bitrate más alto "
+                         "que da tu gráfica. Gasta mucha más RAM, GPU y disco: si el juego va a tirones, vuelve "
+                         "a Alta.";
       const float w = ImGui::GetContentRegionAvail().x;
       const float pad = Px(10), bar = Px(3), fs = Px(kSmall);
       const float wrap = w - bar - pad * 2;

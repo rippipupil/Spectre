@@ -14,6 +14,18 @@ int QualityLevel(const std::string& quality) {
   return 2;
 }
 
+int SourceFps(int refreshHz, int width, int height, int fallbackFps) {
+  if (refreshHz < 24) return fallbackFps;
+  int fps = refreshHz;
+  for (int rate : {30, 60, 75, 90, 100, 120, 144, 165, 240})
+    if (fps == rate - 1) fps = rate;
+  fps = std::min(fps, kSourceMaxFps);
+  const double frame = double(std::max(width, 16)) * double(std::max(height, 16)) / (1920.0 * 1080.0);
+  for (int lower : {120, 60})
+    if (fps > lower && frame * fps / 60.0 > 5.0) fps = lower;
+  return fps;
+}
+
 QualityPlan PlanQuality(const std::string& quality, int customKbps, int width, int height, int fps,
                         const std::string& codec) {
   QualityPlan plan;
@@ -26,9 +38,13 @@ QualityPlan PlanQuality(const std::string& quality, int customKbps, int width, i
   }
   // Tope de referencia: 30 Mbps para 1080p60 en H.264, escalado con la tasa
   // de píxeles (con un exponente < 1: a más resolución, menos bits por píxel).
-  double pixelRate = double(std::max(width, 16)) * double(std::max(height, 16)) * double(std::max(fps, 1));
-  double ratio = pixelRate / (1920.0 * 1080.0 * 60.0);
-  double cap = 30000.0 * std::pow(ratio, 0.85);
+  double frame = double(std::max(width, 16)) * double(std::max(height, 16)) / (1920.0 * 1080.0);
+  double rate = double(std::max(fps, 1)) / 60.0;
+  double cap = 30000.0 * std::pow(frame * rate, 0.85);
+  // Fuente llega a 144 fps, y doblar los fps no pide doblar los bits: cada
+  // frame se parece más al anterior. Ahí los fps pesan con 0,6
+  // (investigacion/calidad-video.md, 4.2).
+  if (plan.level == kSourceLevel) cap = 30000.0 * std::pow(frame, 0.85) * std::pow(rate, 0.6);
   // Fuente: el doble que Máxima y cq 15, que en juegos ya no se distingue del
   // original. El tope de RAM del replay (Pipeline::BufferLimit) sale de aquí.
   static const double kMultiplier[] = {0.5, 0.75, 1.0, 1.5, 3.0};

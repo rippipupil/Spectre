@@ -33,10 +33,19 @@ struct QualityPlan {
   int level = 2;          // nivel 0..4 (-1 = personalizada)
 };
 
+// Fps de Fuente: los Hz del monitor (59,94 Hz, que Windows da como 59, cuenta
+// como 60), como mucho 144. Si la resolución es grande se baja a 120 o a 60
+// para que el encoder siga en tiempo real con el juego usando la GPU: hasta
+// unas 5 veces el trabajo de 1080p60 (1440p a 144 sí, 4K a 144 no). Sin Hz
+// conocidos, los fps elegidos.
+constexpr int kSourceMaxFps = 144;
+int SourceFps(int refreshHz, int width, int height, int fallbackFps);
+
 // Calcula el plan para una salida concreta. Para 1080p60 en H.264: baja 15,
 // media 22, alta 30, máxima 45 y fuente 90 Mbps de tope; se escala con los
-// píxeles por segundo y HEVC/AV1 necesitan un tercio menos. Fuente puede
-// llegar a 240 Mbps (4K), lo que admite H.264 nivel 5.1; el resto, a 150.
+// píxeles por segundo y HEVC/AV1 necesitan un tercio menos. En Fuente los
+// fps pesan menos (152 Mbps en 1080p144) y el tope llega a 240 Mbps, lo que
+// admite H.264 nivel 5.1; el resto, a 150.
 QualityPlan PlanQuality(const std::string& quality, int customKbps, int width, int height, int fps,
                         const std::string& codec);
 

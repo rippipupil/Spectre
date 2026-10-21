@@ -23,8 +23,11 @@ struct MonitorInfo {
   RECT rect{};
   bool primary = false;
   std::string name;
+  int refreshHz = 0; // 0 = Windows no lo dice
 };
 std::vector<MonitorInfo> EnumerateMonitors();
+// Hz del modo de pantalla actual del monitor (0 si Windows no lo dice).
+int MonitorRefreshHz(HMONITOR monitor);
 
 // Último frame capturado. La textura es propiedad de la fuente; quien la use
 // debe hacerlo con GpuMutex tomado.

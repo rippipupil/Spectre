@@ -41,6 +41,17 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   if (!settings_.target.window && !settings_.target.monitor)
     settings_.target.monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
 
+  // Fuente graba a los Hz del monitor (ver SourceFps). La captura tiene que
+  // saberlo antes de empezar: limita los frames que entrega a ese ritmo.
+  if (IsSourceQuality(settings_.quality)) {
+    HMONITOR mon = settings_.target.monitor ? settings_.target.monitor
+                                            : MonitorFromWindow(settings_.target.window, MONITOR_DEFAULTTONEAREST);
+    SIZE size = TargetSize(settings_.target);
+    int hz = MonitorRefreshHz(mon);
+    settings_.fps = SourceFps(hz, size.cx, size.cy, settings_.fps);
+    Log("Calidad Fuente: el monitor va a %d Hz, se graba a %d fps", hz, settings_.fps);
+  }
+
   // 1. Dispositivo y captura. WGC si puede capturar sin el marco amarillo
   // (o si se eligió a mano); si no, Desktop Duplication, que nunca lo dibuja.
   // WGC con marco queda como último recurso.
@@ -114,16 +125,24 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     // ancho en NVENC y a 4096x2160 en muchas AMD, así que un monitor 5120x1440
     // no entra), se prueba en cajas cada vez más pequeñas antes que codificar
     // en la CPU, que a esa resolución le quitaría el procesador al juego.
+    // Si tampoco abre a ningún tamaño con los fps del monitor (el nivel de
+    // H.264 que admite la gráfica puede no llegar), se repite a 60. La captura
+    // sigue al ritmo de antes: solo cuesta alguna copia de textura de más.
     settings_.outputHeight = 0;
     static const SIZE kBoxes[] = {{LONG_MAX, LONG_MAX}, {4096, 2304}, {2560, 1440}, {1920, 1080}};
-    LONG lastHeight = LONG_MAX;
-    for (const SIZE& box : kBoxes) {
-      double fit = std::min({1.0, double(box.cx) / double(src.cx), double(box.cy) / double(src.cy)});
-      LONG h = LONG(double(src.cy) * fit);
-      if (h >= lastHeight) continue; // esta caja no la hace más pequeña
-      lastHeight = h;
-      opened = openVideo(int(double(src.cx) * fit), int(h), true);
-      if (opened != 0) break;
+    for (;;) {
+      LONG lastHeight = LONG_MAX;
+      for (const SIZE& box : kBoxes) {
+        double fit = std::min({1.0, double(box.cx) / double(src.cx), double(box.cy) / double(src.cy)});
+        LONG h = LONG(double(src.cy) * fit);
+        if (h >= lastHeight) continue; // esta caja no la hace más pequeña
+        lastHeight = h;
+        opened = openVideo(int(double(src.cx) * fit), int(h), true);
+        if (opened != 0) break;
+      }
+      if (opened != 0 || settings_.fps <= 60) break;
+      Log("Calidad Fuente: ningún encoder por GPU abre a %d fps; se prueba a 60", settings_.fps);
+      settings_.fps = 60;
     }
     if (opened > 0)
       Log("Calidad Fuente: %dx%d@%d (la fuente es %ldx%ld)", width_, height_, settings_.fps, src.cx, src.cy);
