@@ -44,6 +44,9 @@ struct SettingsModel {
   // Grabación de un atajo: índice del atajo que espera la combinación (-1 = ninguno).
   int capturing = -1;
   std::string captureHint;
+  // Calidad que había antes de elegir Fuente, mientras se muestra su aviso
+  // (Cancelar la devuelve).
+  std::string qualityBeforeSource;
 };
 
 struct SettingsActions {
