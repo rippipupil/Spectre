@@ -20,8 +20,10 @@ struct UpdateStatus {
 };
 
 // Comprueba la última release de GitHub y descarga Spectre-Setup.exe.
-// Solo toca la red cuando el usuario lo pide: no hay sondeos en segundo
-// plano ni hilos vivos fuera de una comprobación o una descarga.
+// Toca la red cuando el usuario lo pide y, con Ajustes > Avisos > Versiones
+// nuevas, una vez al abrir Spectre y cada 12 h (App::CheckUpdatesQuietly).
+// No hay hilos vivos fuera de una comprobación o una descarga, y nada se
+// descarga sin pulsar Actualizar.
 class Updater {
 public:
   Updater();
@@ -30,7 +32,9 @@ public:
   ~Updater();
 
   UpdateStatus Status() const;
-  void Check();
+  // background: la comprobación automática; si falla, el estado vuelve a
+  // Idle en vez de dejar un error en Ajustes.
+  void Check(bool background = false);
   // Descarga el instalador y, al terminar, avisa a hwnd con
   // WM_SPECTRE_UPDATE_READY (lParam = new std::wstring* con la ruta).
   void Download(HWND hwnd);

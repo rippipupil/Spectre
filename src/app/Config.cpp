@@ -23,9 +23,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 micDeviceId, systemVolume, micVolume, separateTracks, cameraEnabled,
                                                 cameraId, cameraCorner, cameraSizePercent, screenshotFormat,
                                                 outputDir, storageLimitGB, deleteAfterDays, showNotifications,
-                                                soundOnSave, saveSound, copyClipOnSave,
+                                                notifyGame, notifyUpdates, soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
-                                                theme, themeMotion, panelLayout, panelLateralX, panelCompactX,
+                                                theme, themeStyle, themeMotion, panelLayout, panelLateralX, panelCompactX,
                                                 panelCompactY, hotkeys)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
@@ -48,6 +48,7 @@ static void Sanitize(Config& c) {
   if (c.outputHeight != 0) c.outputHeight = std::clamp(c.outputHeight, 360, 2160);
   if (c.monitorIndex < 0) c.monitorIndex = 0;
   if (!IsKnownTheme(c.theme)) c.theme = "negro";
+  if (!c.themeStyle.empty() && !IsKnownStyle(c.themeStyle)) c.themeStyle.clear();
   if (c.panelLayout != "lateral" && c.panelLayout != "compacto") c.panelLayout = "lateral";
   // !(x >= 0) también descarta NaN (un config.json editado a mano).
   for (float* f : {&c.panelLateralX, &c.panelCompactX, &c.panelCompactY})

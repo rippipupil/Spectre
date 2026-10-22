@@ -72,15 +72,86 @@ std::string FormatClipLength(int seconds);  // 30 s, 2 min
 // Iconos de trazo fino y constante, sin fondos ni círculos detrás.
 enum class Icon {
   Replay, Mic, Camera, Close, Back, Play, Pause, Folder, Trash, Star, StarFilled, Scissors, Copy, Pencil,
-  Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share, Sliders, Undo, Redo
+  Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share, Sliders, Undo, Redo,
+  Check, Alert, Download, Info, Gamepad, Record
 };
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float radius, ImU32 color);
-// Marca de estado: cuadrado en Negro, rombo en Psíquico. Nunca un círculo de
-// color: siempre va con el texto que explica el estado.
+// Una raya en diagonal encima de un icono: apagado (micrófono, cámara, replay).
+void DrawSlash(ImDrawList* dl, ImVec2 center, float radius, ImU32 color, ImU32 gap);
+// Marca de estado con la forma del diseño (cuadrado, rombo, barra o cursor).
+// Nunca un círculo de color: siempre va con el texto que explica el estado.
 void DrawMark(ImDrawList* dl, ImVec2 center, float half, ImU32 color, bool filled);
+// Visto que se dibuja solo: progress 0..1 recorre el trazo.
+void DrawCheck(ImDrawList* dl, ImVec2 center, float radius, ImU32 color, float progress = 1.0f);
 
-// Animaciones del tema Psíquico (unas decenas de vértices; nada si están
-// apagadas o el tema es Negro).
+// ------------------------------------------------- diseño y movimiento
+// Cada tema trae un diseño (ui/Theme.h Style): forma de los botones y lo que
+// hacen al pasar el ratón y al pulsarlos. Los efectos son unas decenas de
+// vértices y solo se dibujan mientras duran.
+
+// Estado animado del último control (justo después de su InvisibleButton):
+// ratón encima suavizado, pulsado y cuánto hace de la última pulsación. Se
+// guarda en la ventana de ImGui por id de control.
+struct Motion {
+  float hover = 0;          // 0..1, sube y baja en ~100 ms
+  bool held = false;
+  float pressAge = 1e9f;    // segundos desde que se pulsó
+  float releaseAge = 1e9f;  // segundos desde que se soltó
+  ImVec2 at;                // dónde se pulsó (pantalla)
+};
+Motion Animate(bool enabled = true);
+// Curvas de las animaciones (t de 0 a 1): salida rápida y llegada suave, y
+// llegada con un pequeño rebote (Suave).
+float EaseOut(float t);
+float BackOut(float t);
+// Algo se está animando: la ventana de la app (que dibuja bajo demanda) pide
+// otro frame. BeginFrame lo pone a cero.
+void RequestFrame();
+bool FrameRequested();
+
+// Papel de un botón: decide sus colores con cualquier diseño.
+enum class Role {
+  Primary,     // relleno del acento (la acción principal)
+  Danger,      // relleno rojo (detener la grabación)
+  Normal,      // superficie (acciones grandes secundarias)
+  Ghost,       // secundario con borde
+  GhostDanger, // secundario con borde y texto rojo
+  Quiet,       // sin nada hasta pasar el ratón (iconos, filas)
+};
+// Fondo del botón según el diseño. Devuelve dónde va el contenido (se hunde,
+// tiembla o encoge al pulsar) y sus colores.
+struct ButtonPaint {
+  ImVec2 a, b;
+  ImU32 fg;        // texto e icono
+  ImU32 muted;     // texto secundario (tecla)
+  ImU32 keyBorder; // borde de la tecla
+  float inset;     // margen extra a la izquierda (raíl)
+};
+ButtonPaint PaintButton(ImDrawList* dl, ImVec2 a, ImVec2 b, Role role, const Motion& m, bool enabled = true);
+// Efecto de pulsación por encima del contenido (eco, glitch, barrido, onda...).
+void PaintPress(ImDrawList* dl, ImVec2 a, ImVec2 b, Role role, const Motion& m);
+// Resalte de una tarjeta o fila con el ratón encima (hover 0..1).
+void HoverOutline(ImDrawList* dl, ImVec2 a, ImVec2 b, float hover);
+
+// Formas del diseño: rectángulo, esquinas cortadas o corchetes.
+float LineW(); // grosor de bordes y separadores en píxeles
+void ShapeFill(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color);
+void ShapeStroke(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color, float thickness = 0);
+void DrawBrackets(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color, float arm, float thickness = 0);
+// Caja plana (tarjeta de estado, aviso de Fuente) con una barra de color a la izquierda.
+void CardFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 edge);
+// Alto de los botones grandes y de las filas según la densidad del diseño.
+float ActionHeight();
+float RowHeight(float logical);
+
+// Rótulos de sección con el estilo del diseño (MAYÚSCULAS ESPACIADAS, // , >,
+// solo la primera en mayúscula). El texto se escribe siempre en mayúsculas.
+float LabelWidth(const char* upper, float size);
+float DrawLabel(ImDrawList* dl, ImVec2 pos, const char* upper, float size, ImU32 color);
+std::string Upper(const std::string& text);         // respeta las vocales con tilde y la ñ
+std::string SentenceCase(const std::string& upper); // "DURACIÓN DEL CLIP" -> "Duración del clip"
+
+// Animaciones de Psíquico y Terminal (solo con AmbientMotion()).
 // Sombra psíquica: al cambiar la fila bajo el ratón, la anterior se desvanece
 // en 200 ms. Una por contexto de ImGui; se reinicia con cada apertura.
 void ResetHoverTrail(unsigned long long openedAt);
@@ -90,8 +161,19 @@ void DrawHoverTrail(ImDrawList* dl);
 void DrawTrace(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color);
 // Respiración de la marca de estado (2,6 s); 1 sin animaciones.
 float Breathe();
+// Cursor de Terminal: 1 o 0 cada medio segundo; siempre 1 sin animaciones.
+float Blink();
 // Animación de entrada: 0 -> 1 en ~120 ms, sin rebote.
 float OpenProgress(unsigned long long openedAt);
+// Entrada de una página o panel según el diseño: desplazamiento y opacidad
+// para los primeros ~250 ms desde `since` (GetTickCount64).
+struct Entrance {
+  ImVec2 offset;
+  float alpha = 1;
+  float reveal = 1; // Terminal: fracción de alto ya barrida (0..1)
+  bool done = true;
+};
+Entrance EnterMotion(unsigned long long since, bool fromRight);
 
 void Gap(float px);
 void Divider(float above = 10, float below = 10);

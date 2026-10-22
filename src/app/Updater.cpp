@@ -238,7 +238,7 @@ UpdateStatus Updater::Status() const {
   return shared_->status;
 }
 
-void Updater::Check() {
+void Updater::Check(bool background) {
   {
     std::lock_guard lock(shared_->mutex);
     auto st = shared_->status.state;
@@ -249,9 +249,19 @@ void Updater::Check() {
     shared_->status.message.clear();
   }
   const unsigned gen = ++shared_->generation;
-  std::thread([shared = shared_, gen] {
+  std::thread([shared = shared_, gen, background] {
     auto cancelled = [&] { return shared->generation != gen; };
     InstallThreadCrashHandler();
+    // La comprobación automática no deja un error en Ajustes que nadie pidió
+    // (sin red, GitHub caído): solo queda en el log.
+    auto fail = [&](const std::string& message) {
+      if (!background) {
+        shared->Fail(message);
+        return;
+      }
+      Log("Actualizaciones: la comprobación automática falló: %s", message.c_str());
+      shared->Set([](UpdateStatus& s) { s.state = UpdateStatus::State::Idle; });
+    };
     RemoveOldDownloads();
     std::string body, error;
     DWORD status = 0;
@@ -265,7 +275,7 @@ void Updater::Check() {
     if (!ok && status == 404) error = "No hay ninguna versión publicada todavía.";
     if (cancelled()) return;
     if (!ok) {
-      shared->Fail(error.empty() ? "GitHub envió una respuesta demasiado grande." : error);
+      fail(error.empty() ? "GitHub envió una respuesta demasiado grande." : error);
       return;
     }
     try {
@@ -284,7 +294,7 @@ void Updater::Check() {
       Log("Actualizaciones: instalada %s, última %s%s", SPECTRE_VERSION, latest.c_str(),
           newer ? " (hay versión nueva)" : "");
       if (newer && url.empty()) {
-        shared->Fail("La versión " + latest + " aún no tiene instalador. Prueba de nuevo en unos minutos.");
+        fail("La versión " + latest + " aún no tiene instalador. Prueba de nuevo en unos minutos.");
         return;
       }
       std::lock_guard lock(shared->mutex);
@@ -299,7 +309,7 @@ void Updater::Check() {
       shared->status.state = newer ? UpdateStatus::State::Available : UpdateStatus::State::UpToDate;
     } catch (const std::exception& e) {
       Log("Actualizaciones: respuesta de GitHub no válida: %s", e.what());
-      shared->Fail("GitHub envió una respuesta que Spectre no entiende. Prueba de nuevo más tarde.");
+      fail("GitHub envió una respuesta que Spectre no entiende. Prueba de nuevo más tarde.");
     }
   }).detach();
 }

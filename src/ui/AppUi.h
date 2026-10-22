@@ -146,6 +146,9 @@ private:
   std::unordered_set<std::string> durationFailed_;          // no se pudo medir (archivo dañado)
   unsigned long long frame_ = 0;
   unsigned long long openedAt_ = 0;
+  // Entrada de la página con la animación del diseño (Widgets EnterMotion).
+  unsigned long long pageSince_ = 0;
+  int shownPage_ = -1;
   Player player_;
   EditorUi editor_; // con su propio reproductor: el del visor se cierra al entrar
   float volume_ = 1.0f;

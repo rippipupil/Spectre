@@ -68,6 +68,8 @@ struct Config {
 
   // Avisos
   bool showNotifications = true;
+  bool notifyGame = true;              // "Replay listo en <juego>" al detectar un juego nuevo
+  bool notifyUpdates = true;           // mira si hay versión nueva al abrir Spectre (y cada 12 h) y avisa
   bool soundOnSave = false;            // pitido corto al guardar un clip o una captura
   std::string saveSound = "clasico";   // clasico | suave | moneda | arcade | campana (app/Sound.h)
   bool copyClipOnSave = false;         // el clip recién guardado va al portapapeles (pegar en Discord)
@@ -80,8 +82,9 @@ struct Config {
   int maxBufferMB = 1024;
 
   // Apariencia (ver ui/Theme.h)
-  std::string theme = "negro";         // "negro" | "psiquico"
-  bool themeMotion = true;             // animaciones propias del tema (solo las tiene Psíquico)
+  std::string theme = "negro";         // id de ui/Theme.h: "negro", "psiquico" o uno de RoCer0
+  std::string themeStyle;              // diseño (ui/Theme.h Style::id); vacío = el que trae el tema
+  bool themeMotion = true;             // animaciones de la interfaz (ratón encima, pulsar, avisos)
 
   // Panel Alt+Z (ver ui/Menu.h). Se arrastra y se vuelve a abrir donde se
   // dejó: la posición se guarda como fracción del hueco libre del monitor

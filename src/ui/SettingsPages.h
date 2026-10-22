@@ -61,6 +61,7 @@ struct SettingsActions {
   std::function<void()> chooseFolder; // diálogo de Windows para elegir la carpeta de destino
   std::function<void()> refreshStorage;
   std::function<void(const std::string&)> playSound; // escuchar un sonido de guardar
+  std::function<void()> previewNotice; // un aviso de clip de prueba con el tema actual
 };
 
 // Dibuja el contenido de la página (sin título ni pie: los pone la ventana).

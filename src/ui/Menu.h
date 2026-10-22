@@ -65,7 +65,5 @@ constexpr float kPanelMargin = 18.0f;
 inline bool IsLateralPanel(const Config& config) { return config.panelLayout != "compacto"; }
 
 void DrawPanel(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
-// El aviso recibe la configuración activa para dibujarse con su tema.
-void DrawToast(OverlayWindow& window, const Config& config, const std::string& text, bool error, float alpha);
 
 } // namespace spectre
