@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -36,14 +35,6 @@ constexpr DWORD kDwmCloak = 13;         // DWMWA_CLOAK
 
 COLORREF ToColorRef(ImU32 c) {
   return RGB((c >> IM_COL32_R_SHIFT) & 0xFF, (c >> IM_COL32_G_SHIFT) & 0xFF, (c >> IM_COL32_B_SHIFT) & 0xFF);
-}
-
-std::string FontPath(const wchar_t* file) {
-  wchar_t windir[MAX_PATH];
-  GetWindowsDirectoryW(windir, MAX_PATH);
-  auto p = std::filesystem::path(windir) / L"Fonts" / file;
-  std::error_code ec;
-  return std::filesystem::exists(p, ec) ? Narrow(p.wstring()) : std::string();
 }
 
 void SetCloak(HWND hwnd, bool cloak) {
@@ -146,7 +137,7 @@ void AppWindow::Close() {
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext(imgui_);
     imgui_ = nullptr;
-    boldFont_ = bigFont_ = nullptr;
+    fonts_ = ui::FontSet{};
   }
   DestroyGraphics();
   HWND h = hwnd_;
@@ -245,6 +236,7 @@ bool AppWindow::CreateGraphics() {
 }
 
 void AppWindow::DestroyGraphics() {
+  mipSampler_.Reset();
   rtv_.Reset();
   swapChain_.Reset();
   if (context_) {
@@ -273,8 +265,44 @@ bool AppWindow::ResizeBuffers() {
   return true;
 }
 
-std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int width, int height) {
+std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int width, int height, bool mipmaps) {
   if (!device_ || !bgra || width <= 0 || height <= 0) return nullptr;
+  UINT support = 0;
+  if (mipmaps && !mipSampler_) {
+    // Como el de ImGui (bilineal, sin repetir) pero con todos los niveles: el
+    // de ImGui tiene MaxLOD = 0 y solo leería el nivel 0.
+    D3D11_SAMPLER_DESC sd{};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    device_->CreateSamplerState(&sd, &mipSampler_);
+  }
+  if (mipmaps && mipSampler_ && SUCCEEDED(device_->CheckFormatSupport(DXGI_FORMAT_B8G8R8A8_UNORM, &support)) &&
+      (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN)) {
+    // Cadena completa de mipmaps generada en la GPU: el visor la muestra
+    // reducida sin dientes.
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = UINT(width);
+    desc.Height = UINT(height);
+    desc.MipLevels = 0;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    auto tex = std::make_shared<UiTexture>();
+    if (SUCCEEDED(device_->CreateTexture2D(&desc, nullptr, &tex->texture)) &&
+        SUCCEEDED(device_->CreateShaderResourceView(tex->texture.Get(), nullptr, &tex->srv))) {
+      context_->UpdateSubresource(tex->texture.Get(), 0, nullptr, bgra, UINT(width) * 4, 0);
+      context_->GenerateMips(tex->srv.Get());
+      tex->sampler = mipSampler_;
+      tex->width = width;
+      tex->height = height;
+      return tex;
+    }
+  }
   D3D11_TEXTURE2D_DESC desc{};
   desc.Width = UINT(width);
   desc.Height = UINT(height);
@@ -292,6 +320,22 @@ std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int wid
   tex->width = width;
   tex->height = height;
   return tex;
+}
+
+void AddTextureImage(ImDrawList* dl, const UiTexture& tex, ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1, ImU32 tint) {
+  if (tex.sampler) {
+    // El backend de ImGui pone su muestreador al empezar y no lo cambia entre
+    // imágenes: se sustituye solo para esta y luego se restaura su estado.
+    dl->AddCallback(
+        [](const ImDrawList*, const ImDrawCmd* cmd) {
+          auto* rs = static_cast<ImGui_ImplDX11_RenderState*>(ImGui::GetPlatformIO().Renderer_RenderState);
+          auto* sampler = static_cast<ID3D11SamplerState*>(cmd->UserCallbackData);
+          rs->DeviceContext->PSSetSamplers(0, 1, &sampler);
+        },
+        tex.sampler.Get());
+  }
+  dl->AddImage(ImTextureID(tex.Id()), p0, p1, uv0, uv1, tint);
+  if (tex.sampler) dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 }
 
 std::shared_ptr<UiTexture> AppWindow::CreateRenderTexture(int width, int height) {
@@ -316,25 +360,6 @@ std::shared_ptr<UiTexture> AppWindow::CreateRenderTexture(int width, int height)
 
 // ------------------------------------------------------------------ ImGui
 
-void AppWindow::LoadFonts() {
-  ImGuiIO& io = ImGui::GetIO();
-  io.Fonts->Clear();
-  const float base = 15.0f;
-  auto regular = FontPath(L"segoeui.ttf");
-  auto bold = FontPath(L"segoeuib.ttf");
-  ImFont* main = nullptr;
-  if (!regular.empty()) main = io.Fonts->AddFontFromFileTTF(regular.c_str(), base * scale_);
-  if (!main) {
-    ImFontConfig cfg;
-    cfg.SizePixels = 13.0f * scale_;
-    main = io.Fonts->AddFontDefault(&cfg);
-  }
-  boldFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * scale_) : nullptr;
-  bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.5f * scale_) : nullptr;
-  if (!boldFont_) boldFont_ = main;
-  if (!bigFont_) bigFont_ = main;
-}
-
 void AppWindow::SetupImGui() {
   IMGUI_CHECKVERSION();
   imgui_ = ImGui::CreateContext();
@@ -343,7 +368,8 @@ void AppWindow::SetupImGui() {
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-  LoadFonts();
+  ui::LoadFonts(scale_, &fonts_);
+  fontMemoryFreed_ = false;
   ApplyBaseStyle(scale_);
   ImGui_ImplWin32_Init(hwnd_);
   ImGui_ImplDX11_Init(device_.Get(), context_.Get());
@@ -360,7 +386,8 @@ void AppWindow::Render(const std::function<void()>& draw) {
   if (rebuildFonts_) {
     rebuildFonts_ = false;
     ImGui_ImplDX11_InvalidateDeviceObjects();
-    LoadFonts();
+    ui::LoadFonts(scale_, &fonts_);
+    fontMemoryFreed_ = false;
     ImGui::GetStyle() = ImGuiStyle();
     ApplyBaseStyle(scale_);
   }
@@ -376,6 +403,8 @@ void AppWindow::Render(const std::function<void()>& draw) {
   const float clear[4] = {0, 0, 0, 1};
   context_->ClearRenderTargetView(rtv_.Get(), clear);
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+  // El atlas de fuentes ya está en la GPU desde el primer NewFrame.
+  if (!fontMemoryFreed_) fontMemoryFreed_ = ui::ReleaseFontMemory();
   HRESULT hr = swapChain_->Present(1, 0);
   if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
     if (!lost_) Log("App: la GPU se reinició (0x%08X), se recrea la ventana", unsigned(hr));
@@ -396,6 +425,10 @@ void AppWindow::SetTitleColors(const Palette& palette) {
   title_[0] = caption;
   title_[1] = text;
   title_[2] = border;
+  // Modo oscuro de la barra (lo único que cambia en Windows 10) según el fondo
+  // del tema: claro con los temas claros de RoCer0.
+  BOOL dark = (GetRValue(caption) * 299 + GetGValue(caption) * 587 + GetBValue(caption) * 114) / 1000 < 128;
+  DwmSetWindowAttribute(hwnd_, kDwmDarkMode, &dark, sizeof(dark));
   DwmSetWindowAttribute(hwnd_, kDwmCaptionColor, &caption, sizeof(caption));
   DwmSetWindowAttribute(hwnd_, kDwmTextColor, &text, sizeof(text));
   DwmSetWindowAttribute(hwnd_, kDwmBorderColor, &border, sizeof(border));

@@ -91,6 +91,7 @@ private:
     bool failed = false;
     unsigned long long lastUse = 0;
     int64_t modified = 0; // fecha del archivo de la miniatura
+    int requested = 0;    // ancho pedido al hilo de la biblioteca (px)
   };
 
   void Sidebar(AppWindow& w, AppModel& m, const AppActions& a);
@@ -103,7 +104,9 @@ private:
   void ItemMenu(AppModel& m, const AppActions& a);
   void Dialogs(AppModel& m, const AppActions& a);
   void Timeline(AppWindow& w, const MediaItem& item, float width);
-  UiTexture* ThumbFor(const MediaItem& item);
+  // Miniatura de un archivo; width = ancho en píxeles al que se va a dibujar
+  // (0 = la que haya). Si la que hay es más pequeña se pide otra más grande.
+  UiTexture* ThumbFor(const MediaItem& item, float width = 0);
   void RequestDuration(const MediaItem& item);
   std::vector<const MediaItem*> Filtered(const AppModel& m) const;
   const MediaItem* Find(const AppModel& m, const std::string& path) const;

@@ -8,6 +8,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -754,10 +755,10 @@ void PageNotifications(SettingsModel& m) {
 
 // Tarjeta del selector de temas: se pinta con los colores del tema que
 // representa, con su nombre y tres muestras (fondo, superficie y acento).
-bool ThemeCard(const Theme& t, bool selected) {
+bool ThemeCard(const Theme& t, bool selected, float width) {
   const Palette& p = Colors();
   ImGui::PushID(t.id);
-  bool pressed = ImGui::InvisibleButton("theme", ImVec2(Px(170), Px(52)));
+  bool pressed = ImGui::InvisibleButton("theme", ImVec2(width, Px(40)));
   bool hov = ImGui::IsItemHovered();
   ImGui::PopID();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -765,11 +766,13 @@ bool ThemeCard(const Theme& t, bool selected) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(a, b, C(t.colors.bg));
   dl->AddRect(a, b, C(selected ? p.accent : hov ? p.lineStrong : p.line), 0, 0, Px(1));
+  const float sw = Px(10), gap = Px(3);
+  float x = b.x - Px(10) - sw * 3 - gap * 2;
   float mid = (a.y + b.y) * 0.5f, fs = Px(kSmall);
-  Text(dl, selected ? Bold() : ImGui::GetFont(), fs, ImVec2(a.x + Px(12), mid - fs * 0.5f),
-       C(selected ? t.colors.text : t.colors.textMuted), t.name);
-  const float sw = Px(12), gap = Px(3);
-  float x = b.x - Px(12) - sw * 3 - gap * 2;
+  ImFont* font = selected ? Bold() : ImGui::GetFont();
+  std::string name = Ellipsize(font, fs, t.name, x - a.x - Px(18));
+  Text(dl, font, fs, ImVec2(a.x + Px(10), mid - fs * 0.5f), C(selected ? t.colors.text : t.colors.textMuted),
+       name.c_str());
   ImVec2 s0(x, mid - sw * 0.5f);
   dl->AddRectFilled(s0, s0 + ImVec2(sw, sw), C(t.colors.bg));
   dl->AddRect(s0, s0 + ImVec2(sw, sw), C(t.colors.lineStrong), 0, 0, Px(1));
@@ -786,23 +789,42 @@ void AppearanceSection(SettingsModel& m) {
   ImGui::AlignTextToFramePadding();
   ImGui::TextUnformatted("Tema");
   ImGui::SameLine(Px(kLabelColumn));
-  bool first = true;
+  // Rejilla de tarjetas en la columna de controles, por grupos: los de
+  // Spectre y los de RoCer0. Al pulsar una, el tema se aplica y se guarda
+  // (App lo detecta tras el frame): la app, el panel y los avisos lo usan ya.
+  ImGui::BeginGroup();
+  const float gap = Px(8);
+  const float avail = std::max(ImGui::GetContentRegionAvail().x, Px(180));
+  const int cols = std::clamp(int((avail + gap) / (Px(180) + gap)), 1, 4);
+  const float cardW = std::floor((avail - gap * float(cols - 1)) / float(cols));
+  const char* group = nullptr;
+  int col = 0;
   for (const Theme* t : Themes()) {
-    if (!first) ImGui::SameLine(0, Px(8));
-    first = false;
-    if (ThemeCard(*t, c.theme == t->id) && c.theme != t->id) {
-      c.theme = t->id;
-      m.dirty = true;
+    if (!group || std::strcmp(group, t->group) != 0) {
+      if (group) Gap(6);
+      group = t->group;
+      col = 0;
+      std::string label = group;
+      for (auto& ch : label) ch = char(toupper((unsigned char)ch));
+      ImVec2 q = ImGui::GetCursorScreenPos();
+      float ls = Px(kLabel);
+      TrackedText(ImGui::GetWindowDrawList(), Bold(), ls, ImVec2(q.x, q.y + Px(2)), C(Colors().textFaint),
+                  label.c_str(), Px(1.5f));
+      ImGui::Dummy(ImVec2(0, ls + Px(6)));
     }
+    if (col > 0) ImGui::SameLine(0, gap);
+    if (ThemeCard(*t, c.theme == t->id, cardW) && c.theme != t->id) c.theme = t->id;
+    col = (col + 1) % cols;
   }
+  ImGui::EndGroup();
   Gap(2);
-  // Solo el tema Psíquico tiene animaciones: con Negro el interruptor se ve apagado.
+  // Solo el tema Psíquico tiene animaciones: con los demás el interruptor se ve apagado.
   ImGui::BeginDisabled(!FindTheme(c.theme).psychic);
-  m.dirty |= SwitchField("Animaciones del tema", &c.themeMotion,
-                         "Movimiento propio del tema Psíquico: rastro al abrir el panel, estela en el botón "
-                         "principal y marca de estado que respira. El tema Negro no tiene animaciones.");
+  SwitchField("Animaciones del tema", &c.themeMotion,
+              "Movimiento propio del tema Psíquico: rastro al abrir el panel, estela en el botón "
+              "principal y marca de estado que respira. Los demás temas no tienen animaciones.");
   ImGui::EndDisabled();
-  Help("Los cambios se ven al momento; pulsa Aplicar para conservarlos.");
+  Help("El tema se guarda al elegirlo y se usa en esta ventana, en el panel (Alt+Z) y en los avisos.");
 }
 
 // Panel Alt+Z: lateral de todo el alto (como el de NVIDIA) o el compacto de

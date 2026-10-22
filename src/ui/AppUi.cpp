@@ -24,8 +24,12 @@ namespace {
 
 constexpr float kSidebarWidth = 224.0f;
 constexpr float kFooterHeight = 60.0f;
-constexpr int kThumbWidth = 384, kThumbHeight = 216;
-constexpr size_t kMaxThumbs = 180; // texturas de miniatura vivas (unos 60 MB de VRAM como mucho)
+// Las miniaturas se piden al ancho real de la tarjeta, redondeado hacia arriba
+// a un múltiplo de 128 px: con la ventana maximizada una miniatura pequeña se
+// estiraba y se veía pixelada.
+constexpr int kThumbMin = 256, kThumbMax = 1280, kThumbStep = 128;
+constexpr size_t kMaxThumbs = 180;                 // texturas de miniatura vivas
+constexpr size_t kThumbBudget = 64ull << 20;       // y como mucho 64 MB de VRAM entre todas
 constexpr const char* kTrimHelp = "Se guarda como un clip nuevo y el original no cambia. Como no se recodifica, "
                                   "empieza en el fotograma clave anterior al inicio elegido: hasta 2 s antes.";
 
@@ -84,12 +88,12 @@ void DrawImage(ImDrawList* dl, const UiTexture& tex, ImVec2 a, ImVec2 b, bool co
     float k = std::max(aw / tw, ah / th);
     float uw = aw / (tw * k), uh = ah / (th * k);
     ImVec2 uv0((1.0f - uw) * 0.5f, (1.0f - uh) * 0.5f), uv1(uv0.x + uw, uv0.y + uh);
-    dl->AddImage(ImTextureID(tex.Id()), a, b, uv0, uv1, tint);
+    AddTextureImage(dl, tex, a, b, uv0, uv1, tint);
   } else {
     float k = std::min(aw / tw, ah / th);
     float w = tw * k, h = th * k;
     ImVec2 p0(a.x + (aw - w) * 0.5f, a.y + (ah - h) * 0.5f);
-    dl->AddImage(ImTextureID(tex.Id()), p0, ImVec2(p0.x + w, p0.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
+    AddTextureImage(dl, tex, p0, ImVec2(p0.x + w, p0.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
   }
 }
 
@@ -204,8 +208,8 @@ void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
     case MediaWorker::Job::Thumbnail: {
       Thumb& t = thumbs_[r.path];
       t.pending = false;
-      t.failed = !r.ok;
-      if (r.ok) t.texture = w.CreateTexture(r.bgra.data(), r.width, r.height);
+      // Si falla la versión grande se queda la pequeña que ya había.
+      if (auto tex = r.ok ? w.CreateTexture(r.bgra.data(), r.width, r.height) : nullptr) t.texture = tex;
       t.failed = !t.texture;
       break;
     }
@@ -221,7 +225,7 @@ void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
       if (r.path != imagePath_) break;
       imagePending_ = false;
       imageFailed_ = !r.ok;
-      if (r.ok) image_ = w.CreateTexture(r.bgra.data(), r.width, r.height);
+      if (r.ok) image_ = w.CreateTexture(r.bgra.data(), r.width, r.height, true);
       imageFailed_ = !image_;
       break;
     }
@@ -229,13 +233,18 @@ void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
   w.Invalidate();
 }
 
-UiTexture* AppUi::ThumbFor(const MediaItem& item) {
+UiTexture* AppUi::ThumbFor(const MediaItem& item, float width) {
   Thumb& t = thumbs_[item.path];
-  if (t.modified != item.modified) t = Thumb{nullptr, false, false, 0, item.modified};
+  if (t.modified != item.modified) t = Thumb{nullptr, false, false, 0, item.modified, 0};
   t.lastUse = frame_;
-  if (!t.texture && !t.pending && !t.failed) {
+  int want = std::clamp((int(std::ceil(width)) + kThumbStep - 1) / kThumbStep * kThumbStep, kThumbMin, kThumbMax);
+  // Una más grande solo si la que hay (o la que viene) se quedaría corta; la
+  // pequeña se sigue viendo hasta que llega. Se compara con lo pedido, no con
+  // lo recibido: Windows puede devolver menos si el vídeo es más pequeño.
+  if (!t.pending && !t.failed && (!t.texture || (width > 0 && want > t.requested))) {
     t.pending = true;
-    worker_.Request(MediaWorker::Job::Thumbnail, item.path, kThumbWidth, kThumbHeight);
+    t.requested = want;
+    worker_.Request(MediaWorker::Job::Thumbnail, item.path, want, want * 9 / 16);
   }
   return t.texture.get();
 }
@@ -284,7 +293,7 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   if (m.page != AppPage::Viewer && (!playerPath_.empty() || !imagePath_.empty())) LeaveViewer();
   // En Ajustes se ve el tema elegido antes de aplicarlo.
   const Config& look = m.page == AppPage::Settings ? m.settings.config : m.config;
-  BeginFrame(Fonts{w.Scale(), w.BoldFont(), w.BigFont()}, look);
+  BeginFrame(Fonts{w.Scale(), w.BoldFont(), w.BigFont(), &w.FontSizes()}, look);
   ResetHoverTrail(openedAt_);
   const Palette& p = Colors();
   w.SetTitleColors(p);
@@ -337,12 +346,20 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   if (player_.Playing() || scrubbing_) w.Animate();
 
   // Miniaturas que hace rato que no se ven: fuera, para no acumular VRAM.
-  if (thumbs_.size() > kMaxThumbs) {
+  size_t thumbBytes = 0;
+  for (const auto& [path, t] : thumbs_)
+    if (t.texture) thumbBytes += size_t(t.texture->width) * size_t(t.texture->height) * 4;
+  if (thumbs_.size() > kMaxThumbs || thumbBytes > kThumbBudget) {
     std::vector<std::pair<unsigned long long, std::string>> ages;
     for (const auto& [path, t] : thumbs_)
       if (!t.pending && t.lastUse + 2 < frame_) ages.emplace_back(t.lastUse, path);
     std::sort(ages.begin(), ages.end());
-    for (size_t i = 0; i < ages.size() && thumbs_.size() > kMaxThumbs; ++i) thumbs_.erase(ages[i].second);
+    for (size_t i = 0; i < ages.size() && (thumbs_.size() > kMaxThumbs || thumbBytes > kThumbBudget); ++i) {
+      auto it = thumbs_.find(ages[i].second);
+      if (it->second.texture)
+        thumbBytes -= size_t(it->second.texture->width) * size_t(it->second.texture->height) * 4;
+      thumbs_.erase(it);
+    }
   }
 }
 
@@ -599,7 +616,7 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   if (!ImGui::IsRectVisible(a, b)) return false;
   ImVec2 ta = a, tb(b.x, a.y + thumbH);
   dl->AddRectFilled(ta, tb, C(p.surface));
-  if (UiTexture* tex = ThumbFor(item)) {
+  if (UiTexture* tex = ThumbFor(item, width)) {
     DrawImage(dl, *tex, ta, tb, true);
   } else {
     DrawIcon(dl, item.Video() ? Icon::Play : Icon::Shot, (ta + tb) * 0.5f, Px(12), C(p.textFaint));
