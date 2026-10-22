@@ -805,6 +805,34 @@ void AppearanceSection(SettingsModel& m) {
   Help("Los cambios se ven al momento; pulsa Aplicar para conservarlos.");
 }
 
+// Panel Alt+Z: lateral de todo el alto (como el de NVIDIA) o el compacto de
+// antes. Los dos se arrastran y se vuelven a abrir donde se dejaron.
+void PanelSection(SettingsModel& m) {
+  auto& c = m.config;
+  const Config defaults;
+  Heading("PANEL SOBRE EL JUEGO");
+  FieldLabel("Forma del panel");
+  m.dirty |= ChoiceCombo<std::string>("##panel", c.panelLayout,
+                                      {{"lateral", "Lateral, de arriba abajo"}, {"compacto", "Compacto (el de antes)"}});
+  std::string help = c.hotkeys.overlay.empty() ? std::string("El panel") : "El panel de " + c.hotkeys.overlay;
+  help += c.panelLayout == "compacto" ? " es una columna estrecha del alto de su contenido."
+                                      : " ocupa todo el alto de la pantalla, como el de NVIDIA.";
+  help += " Arrástralo desde la cabecera o desde cualquier hueco para moverlo: se vuelve a abrir donde lo dejes.";
+  Help(help.c_str());
+  Gap(4);
+  const bool moved = c.panelLateralX != defaults.panelLateralX || c.panelCompactX != defaults.panelCompactX ||
+                     c.panelCompactY != defaults.panelCompactY;
+  ImGui::BeginDisabled(!moved);
+  if (GhostButton("panel-reset", "Devolverlo a su sitio", Px(210))) {
+    // Lateral a la izquierda; compacto a la derecha y centrado.
+    c.panelLateralX = defaults.panelLateralX;
+    c.panelCompactX = defaults.panelCompactX;
+    c.panelCompactY = defaults.panelCompactY;
+    m.dirty = true;
+  }
+  ImGui::EndDisabled();
+}
+
 // Estado de la actualización: marca de color (o ruedita si está trabajando) y texto.
 void UpdateStatusLine(ImU32 color, bool busy, const std::string& text, bool bold = false) {
   float rowH = ImGui::GetFrameHeight();
@@ -900,6 +928,7 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
 void PageGeneral(SettingsModel& m, const SettingsActions& a) {
   auto& c = m.config;
   AppearanceSection(m);
+  PanelSection(m);
 
   Heading("INICIO Y CIERRE");
   m.dirty |= SwitchField("Iniciar con Windows", &c.autostart,

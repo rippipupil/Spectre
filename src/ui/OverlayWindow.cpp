@@ -202,6 +202,16 @@ void OverlayWindow::SetHitRegion(const RECT* rect) {
   }
 }
 
+void OverlayWindow::ReleaseMouseButtons() {
+  if (!imgui_) return;
+  ImGuiContext* previous = ImGui::GetCurrentContext();
+  ImGui::SetCurrentContext(imgui_);
+  ImGuiIO& io = ImGui::GetIO();
+  // Los botones que ya estaban sueltos se descartan (ImGui filtra los repetidos).
+  for (int button = 0; button < ImGuiMouseButton_COUNT; ++button) io.AddMouseButtonEvent(button, false);
+  ImGui::SetCurrentContext(previous);
+}
+
 bool OverlayWindow::CreateGraphics(UINT width, UINT height) {
   width_ = width;
   height_ = height;

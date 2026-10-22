@@ -28,6 +28,13 @@ struct MenuModel {
   unsigned long long openedAt = 0; // GetTickCount64 al abrir (animación de entrada)
   bool confirmSource = false;      // se pulsó Fuente: el aviso espera Activar o Cancelar
   float panelWidth = 0, panelHeight = 0; // tamaño real del panel en el último frame
+  float panelTop = 0;              // borde superior del panel dentro de la ventana en el último frame
+
+  // Arrastre: DrawPanel lo empieza (clic en la cabecera o en un hueco del
+  // panel) y lo termina al soltar; mientras tanto App mueve la ventana con el
+  // cursor y actualiza la posición de config.
+  bool dragging = false;
+  float dragFromX = 0, dragFromY = 0; // dónde se pulsó, en coordenadas de la ventana
 };
 
 // Todas las acciones se ejecutan después del frame de ImGui (App las aplaza):
@@ -51,6 +58,11 @@ struct MenuActions {
 
 // Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).
 constexpr float kPanelWidth = 320.0f;
+// Separación del panel compacto respecto a los bordes del monitor (lógicos).
+constexpr float kPanelMargin = 18.0f;
+// Lateral: todo el alto del monitor, como el overlay de NVIDIA. Compacto (el
+// de antes): franja estrecha con el panel del alto de su contenido.
+inline bool IsLateralPanel(const Config& config) { return config.panelLayout != "compacto"; }
 
 void DrawPanel(OverlayWindow& window, MenuModel& model, const MenuActions& actions);
 // El aviso recibe la configuración activa para dibujarse con su tema.
