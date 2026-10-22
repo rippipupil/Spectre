@@ -278,6 +278,26 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     line(0.0f, 0.42f, 0.0f, -0.80f);
     poly({{-0.40f, -0.40f}, {0.0f, -0.80f}, {0.40f, -0.40f}}, false);
     break;
+  case Icon::Sliders:
+    // Tres deslizadores: el editor.
+    for (int i = 0; i < 3; ++i) {
+      const float y = -0.55f + 0.55f * float(i), knob = i == 0 ? 0.35f : i == 1 ? -0.35f : 0.10f;
+      line(-0.82f, y, 0.82f, y);
+      dl->AddRectFilled(P(knob - 0.15f, y - 0.17f), P(knob + 0.15f, y + 0.17f), color);
+    }
+    break;
+  case Icon::Undo:
+  case Icon::Redo: {
+    // Flecha que vuelve: hacia la izquierda (deshacer) o hacia la derecha (rehacer).
+    const float k = icon == Icon::Undo ? 1.0f : -1.0f;
+    line(-0.66f * k, -0.30f, 0.18f * k, -0.30f);
+    if (k > 0) dl->PathArcTo(P(0.18f, 0.12f), r * 0.42f, -kPi * 0.5f, kPi * 0.5f, 12);
+    else dl->PathArcTo(P(-0.18f, 0.12f), r * 0.42f, -kPi * 0.5f, -kPi * 1.5f, 12);
+    dl->PathStroke(color, 0, t);
+    line(0.18f * k, 0.54f, -0.40f * k, 0.54f);
+    poly({{-0.36f * k, -0.62f}, {-0.68f * k, -0.30f}, {-0.36f * k, 0.02f}}, false);
+    break;
+  }
   }
 }
 

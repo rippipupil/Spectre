@@ -76,9 +76,25 @@ jobs:
           $deps = dumpbin /dependents dist\spectre.exe | Out-String
           Write-Host $deps
           if ($deps -match '(?i)(vcruntime|msvcp)\d*\.dll') { throw "spectre.exe depende del runtime de VC++" }
-          foreach ($dll in 'avcodec','avformat','avutil','swresample','swscale') {
+          foreach ($dll in 'avcodec','avfilter','avformat','avutil','swresample','swscale') {
             if (-not (Get-ChildItem dist -Filter "$dll-*.dll")) { throw "Falta $dll en dist" }
           }
+
+      - name: Comprobar los filtros del editor
+        shell: pwsh
+        run: |
+          # «Editar» (src/app/VideoEdit.cpp) monta sus grafos con estos filtros:
+          # la build LGPL de FFmpeg tiene que traerlos todos (boxblur y eq son
+          # GPL y no se usan).
+          $list = & ffmpeg\bin\ffmpeg.exe -hide_banner -filters | Out-String
+          $names = @('buffer','buffersink','abuffer','abuffersink','format','transpose','hflip','vflip','crop',
+                     'split','scale','gblur','lutyuv','overlay','pad','unsharp','vignette','fade','palettegen',
+                     'paletteuse','atrim','asetpts','aresample','atempo','areverse','aformat','volume','afftdn',
+                     'amix','dynaudnorm','afade','alimiter')
+          foreach ($f in $names) {
+            if ($list -notmatch "(?m)^\s*\S{2,3}\s+$f\s") { throw "La build de FFmpeg no tiene el filtro $f" }
+          }
+          Write-Host "Filtros del editor: los $($names.Count) están"
 
       - name: Instalador (Inno Setup)
         shell: pwsh

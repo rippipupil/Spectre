@@ -6,8 +6,10 @@
 
 #include "app/Config.h"
 #include "app/Library.h"
+#include "app/VideoEdit.h"
 #include "core/Pipeline.h"
 #include "ui/AppWindow.h"
+#include "ui/EditorUi.h"
 #include "ui/Player.h"
 #include "ui/SettingsPages.h"
 
@@ -21,7 +23,7 @@
 
 namespace spectre {
 
-enum class AppPage { Home, Library, Viewer, Settings };
+enum class AppPage { Home, Library, Viewer, Editor, Settings };
 
 struct AppModel {
   Config config;          // configuración activa (Inicio, acciones rápidas)
@@ -42,6 +44,11 @@ struct AppModel {
   // Exportación para Discord en marcha (una cada vez): archivo y porcentaje; -1 = ninguna.
   std::string exportPath;
   int exportPercent = -1;
+  std::string editPath; // archivo abierto en «Editar» (al volver, el visor lo enseña)
+  // Edición guardándose (una cada vez): archivo y porcentaje; -1 = ninguna.
+  std::string editRenderPath;
+  int editPercent = -1;
+  std::string editSaved, editSavedFrom; // la última copia guardada y de qué archivo salió
 };
 
 struct AppActions {
@@ -68,6 +75,11 @@ struct AppActions {
   std::function<void(const std::string&)> copyToClipboard;
   std::function<void(const std::string&)> exportForDiscord;
   std::function<void()> cancelExport;
+  // «Editar»: guarda una copia con esos cambios (en otro hilo) o cancela la que se está guardando.
+  std::function<void(const std::string&, const EditSettings&)> saveEdit;
+  std::function<void()> cancelEdit;
+  // Parte el vídeo en dos copias sin recodificar: hasta ese segundo y desde él.
+  std::function<void(const std::string&, double)> split;
   std::function<void(const std::string&, bool)> setFavorite;
   std::function<void(const MediaItem&, double)> setDuration;
   std::function<bool(const std::string&, const std::string&, std::string*, std::string*)> rename;
@@ -89,7 +101,7 @@ public:
   // Abre el visor con ese archivo (desde el panel o la biblioteca).
   void View(AppModel& model, const std::string& path, AppPage back);
   void PauseMedia();
-  bool MediaPlaying() const { return player_.Playing(); }
+  bool MediaPlaying() const { return player_.Playing() || editor_.Playing(); }
 
 private:
   struct Thumb {
@@ -105,6 +117,9 @@ private:
   void PageHome(AppWindow& w, AppModel& m, const AppActions& a);
   void PageLibrary(AppWindow& w, AppModel& m, const AppActions& a);
   void PageViewer(AppWindow& w, AppModel& m, const AppActions& a);
+  void PageEditor(AppWindow& w, AppModel& m, const AppActions& a);
+  // Abre «Editar» con ese vídeo; Volver lleva a su visor.
+  void Edit(AppModel& m, const std::string& path);
   void PageSettings(AppWindow& w, AppModel& m, const AppActions& a);
   void StatusCard(AppModel& m, const AppActions& a);
   // selection: -1 sin casilla (Inicio), 0 o 1 en la biblioteca (elegido para unir).
@@ -132,6 +147,7 @@ private:
   unsigned long long frame_ = 0;
   unsigned long long openedAt_ = 0;
   Player player_;
+  EditorUi editor_; // con su propio reproductor: el del visor se cierra al entrar
   float volume_ = 1.0f;
   bool muted_ = false;
   std::string playerPath_;

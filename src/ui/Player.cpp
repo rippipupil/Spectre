@@ -82,6 +82,8 @@ struct Player::Impl {
   int width = 0, height = 0;
   float volume = 1.0f;
   bool muted = false;
+  double rate = 1.0;
+  uint64_t frames = 0;
 
   ~Impl() {
     if (engine) engine->Shutdown();
@@ -208,6 +210,14 @@ void Player::SetMuted(bool muted) {
 
 bool Player::Muted() const { return impl_ && impl_->muted; }
 
+void Player::SetRate(double rate) {
+  if (!impl_) return;
+  rate = std::clamp(rate, 0.25, 4.0);
+  if (std::fabs(rate - impl_->rate) < 1e-3) return;
+  impl_->rate = rate;
+  impl_->engine->SetPlaybackRate(rate);
+}
+
 std::shared_ptr<UiTexture> Player::Frame(AppWindow& window) {
   if (!impl_ || !impl_->notify->ready) return impl_ ? impl_->texture : nullptr;
   LONGLONG pts = 0;
@@ -223,7 +233,8 @@ std::shared_ptr<UiTexture> Player::Frame(AppWindow& window) {
   MFVideoNormalizedRect src{0.0f, 0.0f, 1.0f, 1.0f};
   RECT dst{0, 0, LONG(w), LONG(h)};
   MFARGB border{0, 0, 0, 255};
-  impl_->engine->TransferVideoFrame(impl_->texture->texture.Get(), &src, &dst, &border);
+  if (SUCCEEDED(impl_->engine->TransferVideoFrame(impl_->texture->texture.Get(), &src, &dst, &border)))
+    ++impl_->frames;
   return impl_->texture;
 }
 
@@ -264,5 +275,6 @@ bool Player::ReadFrame(std::vector<uint8_t>* bgr, int* width, int* height) const
 
 int Player::VideoWidth() const { return impl_ ? impl_->width : 0; }
 int Player::VideoHeight() const { return impl_ ? impl_->height : 0; }
+uint64_t Player::FrameSerial() const { return impl_ ? impl_->frames : 0; }
 
 } // namespace spectre

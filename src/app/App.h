@@ -6,6 +6,7 @@
 #include "app/Library.h"
 #include "app/System.h"
 #include "app/Updater.h"
+#include "app/VideoEdit.h"
 #include "core/Pipeline.h"
 #include "ui/AppUi.h"
 #include "ui/AppWindow.h"
@@ -15,6 +16,7 @@
 
 #include <shellapi.h>
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -53,6 +55,12 @@ private:
   // copia al portapapeles.
   void ExportForDiscord(const std::string& path);
   void FinishExport();
+  // «Editar» de la biblioteca: guarda una copia con los cambios en otro hilo
+  // (<nombre>_editado_<fecha>.mp4, .gif o .m4a junto al original).
+  void SaveEdit(const std::string& path, const EditSettings& settings);
+  void FinishEdit();
+  // Dos copias sin recodificar: hasta ese segundo y desde él.
+  void SplitClip(const std::string& path, double at);
   void ToggleMenu();
   void OpenMenu();
   // restoreFocus=false: el programa que se acaba de abrir desde el panel
@@ -71,6 +79,9 @@ private:
   bool StartPipeline();
   PipelineSettings BuildSettings() const;
   bool GameActive() const;
+  // Hay un juego abierto o se graba: guardar una edición o exportar va sin
+  // prisa. También lo apunta en liveLoad_, para los trabajos que ya van.
+  bool UpdateLiveLoad();
   // Ruta nueva en la carpeta de destino (o en la del juego): Clip_<juego>_<fecha>.mp4
   std::string OutputName(const char* prefix, const char* extension = ".mp4");
   bool RegisterHotkeys();
@@ -210,6 +221,13 @@ private:
   ULONGLONG lastAppUsage_ = 0;
   ULONGLONG lastAppFrame_ = 0;
   Exporter exporter_;
+  EditWorker editWorker_;
+  // Lo que da UpdateLiveLoad(), para el editor y Exportar mientras trabajan
+  // (con un juego o una grabación van como mucho a tiempo real).
+  std::shared_ptr<std::atomic<bool>> liveLoad_ = std::make_shared<std::atomic<bool>>(false);
+  // Edición guardada «Para Discord»: se exporta después y, si sale una copia
+  // aparte, esta (la intermedia) se borra.
+  std::string discordAfterEdit_;
 };
 
 } // namespace spectre
