@@ -14,7 +14,23 @@ FetchContent_Declare(imgui
   GIT_SHALLOW TRUE)
 FetchContent_Declare(json
   URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
-FetchContent_MakeAvailable(imgui json)
+# FreeType rasteriza las fuentes de la interfaz con hinting: el texto pequeño
+# sale nítido (con stb_truetype quedaba borroso). Estática, sin zlib, png,
+# brotli ni harfbuzz, con el CRT estático como el resto (CMP0091) y sin reglas
+# de instalación: no debe acabar nada suyo en dist/.
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+FetchContent_Declare(freetype
+  GIT_REPOSITORY https://github.com/freetype/freetype
+  GIT_TAG VER-2-13-3
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(imgui json freetype)
 
 add_library(imgui STATIC
   ${imgui_SOURCE_DIR}/imgui.cpp
@@ -22,10 +38,12 @@ add_library(imgui STATIC
   ${imgui_SOURCE_DIR}/imgui_tables.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
   ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
+  ${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp)
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_ENABLE_FREETYPE)
+target_link_libraries(imgui PRIVATE freetype)
 
 add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE ${SPECTRE_FFMPEG_DIR}/include)

@@ -4,12 +4,13 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#include "ui/Fonts.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
 
 struct ImGuiContext;
-struct ImFont;
 
 namespace spectre {
 
@@ -21,9 +22,15 @@ using Microsoft::WRL::ComPtr;
 struct UiTexture {
   ComPtr<ID3D11Texture2D> texture;
   ComPtr<ID3D11ShaderResourceView> srv;
+  // Solo en texturas con mipmaps: el muestreador de ImGui lee únicamente el
+  // nivel 0, así que se dibujan con este (ver AddTextureImage).
+  ComPtr<ID3D11SamplerState> sampler;
   int width = 0, height = 0;
   unsigned long long Id() const { return static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(srv.Get())); }
 };
+
+// dl->AddImage, pero con el muestreador de la textura si lo tiene.
+void AddTextureImage(ImDrawList* dl, const UiTexture& tex, ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1, ImU32 tint);
 
 // Ventana normal de Spectre (la que se abre desde el menú Inicio, el exe o la
 // bandeja), dibujada con Dear ImGui sobre una swapchain flip de Direct3D 11.
@@ -62,12 +69,15 @@ public:
 
   ID3D11Device* Device() const { return device_.Get(); }
   bool VideoSupport() const { return videoSupport_; }
-  std::shared_ptr<UiTexture> CreateTexture(const uint8_t* bgra, int width, int height);
+  // mipmaps=true para imágenes que se ven más pequeñas que su tamaño (capturas
+  // en el visor): sin ellas, reducir más de la mitad deja los bordes dentados.
+  std::shared_ptr<UiTexture> CreateTexture(const uint8_t* bgra, int width, int height, bool mipmaps = false);
   // Textura en la que se puede dibujar (fotogramas del reproductor).
   std::shared_ptr<UiTexture> CreateRenderTexture(int width, int height);
 
-  ImFont* BoldFont() const { return boldFont_; }
-  ImFont* BigFont() const { return bigFont_; }
+  ImFont* BoldFont() const { return fonts_.Bold(); }
+  ImFont* BigFont() const { return fonts_.Big(); }
+  const ui::FontSet& FontSizes() const { return fonts_; }
   float Scale() const { return scale_; }
   // Barra de título con los colores del tema (Windows 11; en Windows 10 solo el modo oscuro).
   void SetTitleColors(const Palette& palette);
@@ -84,7 +94,6 @@ private:
   bool CreateGraphics();
   void DestroyGraphics();
   void SetupImGui();
-  void LoadFonts();
   bool ResizeBuffers();
   void Input(); // hubo entrada: unos frames más para que el hover y las animaciones se asienten
 
@@ -113,9 +122,10 @@ private:
   ComPtr<ID3D11DeviceContext> context_;
   ComPtr<IDXGISwapChain1> swapChain_;
   ComPtr<ID3D11RenderTargetView> rtv_;
+  ComPtr<ID3D11SamplerState> mipSampler_; // se crea con la primera textura con mipmaps
   ImGuiContext* imgui_ = nullptr;
-  ImFont* boldFont_ = nullptr;
-  ImFont* bigFont_ = nullptr;
+  ui::FontSet fonts_;
+  bool fontMemoryFreed_ = false; // la copia del atlas en RAM ya se liberó
 };
 
 } // namespace spectre
