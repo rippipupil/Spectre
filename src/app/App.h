@@ -16,6 +16,7 @@
 
 #include <shellapi.h>
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -78,6 +79,9 @@ private:
   bool StartPipeline();
   PipelineSettings BuildSettings() const;
   bool GameActive() const;
+  // Hay un juego abierto o se graba: guardar una edición o exportar va sin
+  // prisa. También lo apunta en liveLoad_, para los trabajos que ya van.
+  bool UpdateLiveLoad();
   // Ruta nueva en la carpeta de destino (o en la del juego): Clip_<juego>_<fecha>.mp4
   std::string OutputName(const char* prefix, const char* extension = ".mp4");
   bool RegisterHotkeys();
@@ -218,6 +222,9 @@ private:
   ULONGLONG lastAppFrame_ = 0;
   Exporter exporter_;
   EditWorker editWorker_;
+  // Lo que da UpdateLiveLoad(), para el editor y Exportar mientras trabajan
+  // (con un juego o una grabación van como mucho a tiempo real).
+  std::shared_ptr<std::atomic<bool>> liveLoad_ = std::make_shared<std::atomic<bool>>(false);
   // Edición guardada «Para Discord»: se exporta después y, si sale una copia
   // aparte, esta (la intermedia) se borra.
   std::string discordAfterEdit_;

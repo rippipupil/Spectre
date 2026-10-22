@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -115,6 +116,14 @@ struct EditSegment {
 };
 std::vector<EditSegment> BuildSegments(const EditSettings& settings, const EditSource& source);
 double SegmentsLength(const std::vector<EditSegment>& segments);
+
+// Un GIF dura como mucho esto.
+constexpr double kMaxGifSeconds = 30;
+// «Al revés» y «Bumerán» guardan el sonido del tramo entero y decodifican cada
+// trozo varias veces: como mucho este tramo del original (sin contar las
+// repeticiones).
+constexpr double kMaxReverseSeconds = 60;
+double ReversedSeconds(const EditSettings& settings, const EditSource& source);
 // Momento del resultado en el que se ve ese segundo del original (el primero,
 // si se ve varias veces); -1 si no sale.
 double OutputTimeOf(const std::vector<EditSegment>& segments, double sourceSeconds);
@@ -151,6 +160,9 @@ struct EditJob {
   std::string input, output;
   EditSettings settings;
   bool gentle = true; // hay un juego abierto o se está grabando: un hilo, modo de fondo
+  // Lo mismo, pero al momento (App lo actualiza): mientras está activo, el
+  // MP4 se escribe como mucho a tiempo real (LivePacer). nullptr: sin tope.
+  std::shared_ptr<const std::atomic<bool>> live;
   std::vector<std::string> encoders; // vacío: los de la GPU y luego los de la CPU
   TextRasterizer raster;
 };

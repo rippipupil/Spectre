@@ -3,6 +3,8 @@
 #include "common/Util.h"
 
 #ifdef _WIN32
+#include "core/ThreadPolicy.h"
+
 #include <mfapi.h>
 #include <objbase.h>
 #endif
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <thread>
 
 namespace spectre {
 
@@ -62,23 +65,26 @@ bool OpenStreamDecoder(const AVStream* st, int threads, AVCodecContext** out) {
 namespace {
 
 // Opciones de calidad para un tamaño fijo: VBR alrededor del bitrate pedido,
-// con picos de hasta 1,5 veces. No hay prisa (no es en directo), así que se
-// usan los modos de más calidad de cada encoder.
-void SetQualityOptions(const std::string& name, AVDictionary** opts) {
+// con picos de hasta 1,5 veces. Sin juego ni grabación no hay prisa y se usan
+// los modos de más calidad de cada encoder. Con ellos (background), los
+// rápidos que usa el replay en directo: el encoder de la GPU es el mismo y no
+// hay que quitarle hueco.
+void SetQualityOptions(const std::string& name, bool background, AVDictionary** opts) {
   if (name == "h264_nvenc") {
-    av_dict_set(opts, "preset", "p6", 0);
+    av_dict_set(opts, "preset", background ? "p4" : "p6", 0);
     av_dict_set(opts, "tune", "hq", 0);
     av_dict_set(opts, "rc", "vbr", 0);
-    av_dict_set(opts, "multipass", "fullres", 0);
+    if (!background) av_dict_set(opts, "multipass", "fullres", 0);
     av_dict_set(opts, "spatial-aq", "1", 0);
     av_dict_set(opts, "profile", "high", 0);
   } else if (name == "h264_amf") {
     av_dict_set(opts, "usage", "transcoding", 0);
-    av_dict_set(opts, "quality", "quality", 0);
+    av_dict_set(opts, "quality", background ? "speed" : "quality", 0);
     av_dict_set(opts, "rc", "vbr_peak", 0);
     av_dict_set(opts, "profile", "high", 0);
+    if (background) av_dict_set(opts, "async_depth", "4", 0);
   } else if (name == "h264_qsv") {
-    av_dict_set(opts, "preset", "slow", 0);
+    av_dict_set(opts, "preset", background ? "veryfast" : "slow", 0);
     av_dict_set(opts, "profile", "high", 0);
   } else if (name == "h264_mf") {
     av_dict_set(opts, "rate_control", "pc_vbr", 0);
@@ -121,7 +127,7 @@ bool OpenH264Encoder(const std::string& id, const VideoTarget& target, const AVC
   if (globalHeader) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
   AVDictionary* opts = nullptr;
-  if (!simple) SetQualityOptions(name, &opts);
+  if (!simple) SetQualityOptions(name, target.background, &opts);
   if (hw) av_dict_set(&opts, "hw_encoding", "1", 0);
   int err = avcodec_open2(c, codec, &opts);
   av_dict_free(&opts);
@@ -148,6 +154,47 @@ bool OpenFirstH264Encoder(const std::vector<std::string>& order, const VideoTarg
     }
   }
   return false;
+}
+
+#ifdef _WIN32
+struct LivePacer::Calm {
+  BackgroundMode background;
+};
+#else
+struct LivePacer::Calm {};
+#endif
+
+LivePacer::LivePacer(std::shared_ptr<const std::atomic<bool>> live) : live_(std::move(live)) {}
+
+LivePacer::~LivePacer() = default;
+
+void LivePacer::Wait(double seconds, const std::atomic<bool>& cancel) {
+  if (!live_ || !*live_) {
+    pacing_ = false;
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (!pacing_) {
+    // Desde aquí: lo que ya se hizo deprisa no cuenta.
+    pacing_ = true;
+    from_ = seconds;
+    start_ = now;
+    if (!calm_) {
+#ifdef _WIN32
+      SetThreadEcoQoS(true);
+#endif
+      calm_ = std::make_unique<Calm>();
+    }
+    return;
+  }
+  // Hasta una décima de adelanto: el encoder recibe tandas cortas y el hilo
+  // no se despierta en cada fotograma.
+  for (;;) {
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
+    const double ahead = (seconds - from_) - elapsed;
+    if (ahead <= 0.1 || cancel || !*live_) return;
+    std::this_thread::sleep_for(std::chrono::duration<double>(std::min(ahead, 0.1)));
+  }
 }
 
 bool OpenAacEncoder(int64_t bps, int channels, int sampleRate, bool globalHeader, AVCodecContext** out,

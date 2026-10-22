@@ -369,6 +369,12 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
 
 bool App::GameActive() const { return game_ && GetTickCount64() - lastGameSeen_ < kGameGraceMs; }
 
+bool App::UpdateLiveLoad() {
+  const bool busy = GameActive() || pipeline_.Recording();
+  liveLoad_->store(busy);
+  return busy;
+}
+
 std::string App::OutputName(const char* prefix, const char* extension) {
   bool gameActive = GameActive();
   std::string app = gameActive && !game_->exeName.empty() ? game_->exeName : "Escritorio";
@@ -692,8 +698,10 @@ void App::SaveEdit(const std::string& path, const EditSettings& settings) {
   job.input = path;
   job.settings = settings;
   // Con un juego abierto o grabando se guarda sin prisa (un hilo, en modo de
-  // fondo), para no quitarle CPU ni disco.
-  job.gentle = GameActive() || pipeline_.Recording();
+  // fondo, como mucho a tiempo real), para no quitarle CPU, disco ni el
+  // encoder de la GPU al replay.
+  job.gentle = UpdateLiveLoad();
+  job.live = liveLoad_;
   job.raster = RasterizeText;
   const wchar_t* ext = settings.format == EditFormat::Gif     ? L".gif"
                        : settings.format == EditFormat::Audio ? L".m4a"
@@ -775,8 +783,10 @@ void App::ExportForDiscord(const std::string& path) {
     return;
   }
   ExportOptions options;
-  // Con un juego abierto se exporta sin prisa, para no quitarle CPU.
-  options.gentle = GameActive() || pipeline_.Recording();
+  // Con un juego abierto o grabando se exporta sin prisa, para no quitarle
+  // CPU ni el encoder de la GPU al replay.
+  options.gentle = UpdateLiveLoad();
+  options.live = liveLoad_;
   HWND hwnd = hwnd_;
   exporter_.Start(
       path, options, [hwnd](int percent) { PostMessageW(hwnd, WM_SPECTRE_EXPORT, WPARAM(percent), 0); },
@@ -988,7 +998,9 @@ void App::ApplyConfig(const Config& next, bool quiet) {
 }
 
 void App::InstallPendingUpdate() {
-  if (installerPath_.empty() || pipeline_.Recording()) return;
+  // Ni a mitad de una grabación ni de una edición o una exportación, que se
+  // cancelarían al cerrar: el temporizador de cada segundo vuelve a probar.
+  if (installerPath_.empty() || pipeline_.Recording() || editWorker_.Busy() || exporter_.Busy()) return;
   relaunchAfterUpdate_ = true;
   Quit();
 }
@@ -1860,6 +1872,9 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   }
   case WM_TIMER:
+    // Un juego que se abre o una grabación que empieza frenan la edición o la
+    // exportación que ya va.
+    UpdateLiveLoad();
     // La grabación pudo acabar sola (disco lento o con errores): ni los ajustes ni la actualización pendientes se
     // quedan colgados.
     if (wp == kTimerHealth && restartPending_ && !pipeline_.Recording())
@@ -1957,8 +1972,11 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_UPDATE_READY: {
     std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
     installerPath_ = *path;
-    // Nunca cerrar Spectre a mitad de una grabación: espera a que se detenga.
+    // Nunca cerrar Spectre a mitad de una grabación, una edición o una
+    // exportación: espera a que acaben.
     if (pipeline_.Recording()) Toast("La actualización se instalará al terminar la grabación");
+    else if (editWorker_.Busy()) Toast("La actualización se instalará al terminar de guardar la edición");
+    else if (exporter_.Busy()) Toast("La actualización se instalará al terminar la exportación");
     else InstallPendingUpdate();
     return 0;
   }

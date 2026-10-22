@@ -30,7 +30,6 @@ constexpr size_t kMaxUndo = 100;
 constexpr double kMinRange = 0.2;  // lo más corto que se puede dejar el recorte
 constexpr double kMinPart = 0.1;   // trozo quitado o tramo lento más corto
 constexpr int kOverlayBox = 1280;  // el texto de la vista previa en movimiento, como mucho a este tamaño
-constexpr double kMaxGifSeconds = 30;
 
 std::string Title(const MediaItem& item) {
   if (!item.spectre) return item.stem;
@@ -606,6 +605,11 @@ bool EditorUi::CanSave(const MediaItem& item, std::string* why) const {
   if (s_.format == EditFormat::Gif && length > kMaxGifSeconds + 0.05) {
     *why = "Un GIF puede durar como mucho 30 s y este saldría de " + Length(length) +
            ": recórtalo o súbele la velocidad";
+    return false;
+  }
+  if (const double back = ReversedSeconds(s_, src_); back > kMaxReverseSeconds + 0.05) {
+    *why = "«Al revés» y «Bumerán» van con 1 min del original como mucho y aquí hay " + Length(back) +
+           ": recorta el tramo";
     return false;
   }
   if (s_.format == EditFormat::Audio && (!src_.audio || s_.mute)) {
@@ -1253,6 +1257,10 @@ void EditorUi::TabTime(const MediaItem& item, const AppActions& a) {
     Gap(4);
     Note("Hacia delante y luego hacia atrás, sin la imagen congelada.");
   }
+  if (s_.direction != EditDirection::Forward && probed_ && ReversedSeconds(s_, src_) > kMaxReverseSeconds + 0.05) {
+    Gap(4);
+    Note("Con más de 1 min no se puede: recorta el tramo.");
+  }
   Gap(18);
 
   ToolHeader("Repetir");
@@ -1332,7 +1340,12 @@ void EditorUi::TabPicture() {
   if (s_.format == EditFormat::Gif) {
     Note("Los GIF se guardan a 480p como mucho.");
   } else if (sizes.size() > 1) {
-    const int size = Segmented("short-side", sizes, s_.shortSide);
+    // Una elegida antes del 9:16 o del zoom que ya no se ofrece no amplía
+    // nada (ComputeGeometry solo baja): se ve como «Original».
+    int current = 0;
+    for (const auto& option : sizes)
+      if (option.first == s_.shortSide) current = option.first;
+    const int size = Segmented("short-side", sizes, current);
     if (size >= 0) s_.shortSide = size;
     Gap(6);
     char buf[96];

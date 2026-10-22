@@ -43,7 +43,6 @@ fs::path PathOf(const std::string& utf8) { return fs::path(utf8); }
 constexpr int kRate = 48000;             // audio de salida: 48 kHz estéreo
 constexpr int kChunk = 1024;             // muestras por frame de AAC
 constexpr double kMinSegment = 0.02;     // tramos más cortos que esto no salen
-constexpr double kMaxGifSeconds = 30;
 constexpr int kGifShortSide = 480;
 constexpr double kGifFps = 15;
 // «Al revés» guarda fotogramas decodificados para sacarlos del último al
@@ -429,6 +428,16 @@ double SegmentsLength(const std::vector<EditSegment>& segments) {
   return total;
 }
 
+double ReversedSeconds(const EditSettings& settings, const EditSource& source) {
+  if (settings.direction == EditDirection::Forward) return 0;
+  EditSettings once = settings;
+  once.repeat = 1;
+  double total = 0;
+  for (const auto& seg : BuildSegments(once, source))
+    if (seg.kind == EditSegment::Kind::Reverse) total += seg.to - seg.from;
+  return total;
+}
+
 double OutputTimeOf(const std::vector<EditSegment>& segments, double t) {
   double at = 0;
   for (const auto& s : segments) {
@@ -498,7 +507,9 @@ EditGeometry ComputeGeometry(const EditSettings& s, const EditSource& src) {
   int shortTarget = s.shortSide;
   if (s.format == EditFormat::Gif)
     shortTarget = std::min(shortTarget > 0 ? shortTarget : kGifShortSide, kGifShortSide);
-  if (shortTarget > 0) {
+  // Solo hacia abajo: una resolución elegida antes del 9:16 o del zoom (720
+  // con un lado corto que ahora es de 608) no amplía el vídeo.
+  if (shortTarget > 0 && shortTarget < std::min(outW, outH)) {
     const double k = double(shortTarget) / std::min(outW, outH);
     outW *= k;
     outH *= k;
@@ -1300,7 +1311,8 @@ Outcome Encode(PassContext& c, const std::string& output, const AVFrame* palette
       *encoderUsed = "gif";
     } else {
       // Con los colores del original, como en Exportar.
-      const VideoTarget target{c.g.outW, c.g.outH, {c.g.fpsNum, c.g.fpsDen}, VideoBitrate(s, c.src, c.g)};
+      const VideoTarget target{c.g.outW, c.g.outH, {c.g.fpsNum, c.g.fpsDen}, VideoBitrate(s, c.src, c.g),
+                               c.job.gentle};
       if (!OpenFirstH264Encoder(c.job.encoders, target, reader.VideoDecoder(), globalHeader, &venc.p, encoderUsed,
                                 &mf, "Editor")) {
         *error = "Ningún encoder H.264 se pudo abrir en este PC";
@@ -1425,10 +1437,13 @@ Outcome Encode(PassContext& c, const std::string& output, const AVFrame* palette
     return drainAudio();
   };
 
+  // El MP4 usa el encoder de la GPU (el GIF y el M4A, solo la CPU).
+  LivePacer pacer(video && !gif ? c.job.live : nullptr);
   Outcome o = reader.Run(c.segments, video ? Reader::VideoOut(onVideo) : Reader::VideoOut(),
                          audio ? Reader::AudioOut(onAudio) : Reader::AudioOut(),
                          [&](double t) {
                            if (c.progress) c.progress(std::clamp(t / c.length, 0.0, 1.0));
+                           pacer.Wait(t, c.cancel);
                          },
                          error);
   if (o != Outcome::Done) return o;
@@ -1477,6 +1492,10 @@ EditResult RenderEdit(const EditJob& job, const std::atomic<bool>& cancel, const
   if (s.format == EditFormat::Gif && length > kMaxGifSeconds + 0.05) {
     r.error = "Un GIF puede durar como mucho 30 s y este saldría de " + Num(std::round(length)) +
               " s: recórtalo o súbele la velocidad";
+    return r;
+  }
+  if (ReversedSeconds(s, src) > kMaxReverseSeconds + 0.05) {
+    r.error = "«Al revés» y «Bumerán» van con 1 min del original como mucho: recorta el tramo";
     return r;
   }
   if (s.format == EditFormat::Audio && (s.mute || !src.audio)) {
@@ -1548,7 +1567,19 @@ bool RenderEditPreview(const EditSettings& settings, const EditSource& source, c
     pw = std::max(2, int(pw * k));
     ph = std::max(2, int(ph * k));
   }
-  const auto overlays = BuildOverlays(s, g.outW, g.outH, raster);
+  // El texto se dibuja a la resolución final, y su borde cuesta (cerca de 1 s
+  // en 4K): mientras no cambie, el de la petición anterior. Cada hilo guarda
+  // el suyo (la vista previa va siempre en el mismo).
+  thread_local std::string overlayKey;
+  thread_local std::vector<EditOverlay> overlayCache;
+  std::string key = s.text + '\n' + s.watermark + '\n' + Int(int(s.textPlace)) + "," + Int(s.textSize) + "," +
+                    Int(s.textBox) + "," + Num(s.textSeconds) + "," + Int(int(s.watermarkCorner)) + "," +
+                    Int(g.outW) + "x" + Int(g.outH) + (raster ? "" : ",-");
+  if (key != overlayKey) {
+    overlayCache = BuildOverlays(s, g.outW, g.outH, raster);
+    overlayKey = std::move(key);
+  }
+  const std::vector<EditOverlay>& overlays = overlayCache;
   std::vector<GraphInput> ins = {
       {"in", "buffer", VideoBufferArgs(width, height, AV_PIX_FMT_BGR24, {g.fpsDen, g.fpsNum}, {1, 1})}};
   auto ov = OverlayInputs(overlays);

@@ -244,7 +244,7 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
 
   MfHold mf;
   Codec venc;
-  const VideoTarget target{plan.width, plan.height, plan.rate, plan.videoBps};
+  const VideoTarget target{plan.width, plan.height, plan.rate, plan.videoBps, options.gentle};
   OpenFirstH264Encoder(options.encoders, target, vdec.p, globalHeader, &venc.p, encoder, &mf, "Exportar");
   if (!venc.p) return fail("Ningún encoder H.264 se pudo abrir en este PC");
   Codec aenc;
@@ -314,6 +314,7 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
   };
 
   int lastPercent = -1;
+  LivePacer pacer(options.live);
   auto onVideo = [&](AVFrame* f) {
     double t = TimeOf(f, vIn) - start;
     int64_t index = lastIndex + 1;
@@ -329,6 +330,7 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
     sws_scale(scaler.p, f->data, f->linesize, 0, f->height, scaled.p->data, scaled.p->linesize);
     scaled.p->pts = index;
     if (!encode(venc.p, vOut, scaled.p)) return false;
+    pacer.Wait(double(index + 1) / fps, cancel);
     if (progress && duration > 0 && !std::isnan(t)) {
       int percent = int(std::clamp(t / duration, 0.0, 1.0) * 100.0);
       if (percent != lastPercent) {

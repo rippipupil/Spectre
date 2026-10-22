@@ -7,6 +7,9 @@
 
 #include "encode/Media.h"
 
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -21,6 +24,35 @@ struct VideoTarget {
   int width = 0, height = 0;
   AVRational rate{60, 1};
   int64_t bps = 0;
+  // Hay un juego abierto o se graba: el replay usa el mismo encoder de la
+  // GPU, así que se abre en sus modos rápidos (como el directo) y no en los
+  // de más calidad.
+  bool background = false;
+};
+
+// Con un juego abierto o grabando (live, que App actualiza mientras dura el
+// trabajo), la copia va como mucho a tiempo real: así no le pide al encoder de
+// la GPU más que una segunda grabación y el replay no se queda sin hueco. La
+// primera vez que live se activa, el hilo pasa también a EcoQoS y al modo de
+// fondo, por si el juego se abrió después de empezar. Se usa en el hilo del
+// trabajo; sin live (nullptr) no frena nunca.
+class LivePacer {
+public:
+  explicit LivePacer(std::shared_ptr<const std::atomic<bool>> live);
+  ~LivePacer();
+  LivePacer(const LivePacer&) = delete;
+  LivePacer& operator=(const LivePacer&) = delete;
+  // seconds: segundos del resultado ya entregados al encoder. Si van por
+  // delante del reloj, espera (y deja de esperar si se cancela).
+  void Wait(double seconds, const std::atomic<bool>& cancel);
+
+private:
+  struct Calm;
+  std::shared_ptr<const std::atomic<bool>> live_;
+  std::unique_ptr<Calm> calm_;
+  bool pacing_ = false;
+  double from_ = 0; // segundos del resultado al empezar a ir a tiempo real
+  std::chrono::steady_clock::time_point start_;
 };
 
 // h264_mf, como en VideoEncoder::TryOpen: si no encuentra el MFT, la limpieza

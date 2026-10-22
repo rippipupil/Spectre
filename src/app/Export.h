@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -20,8 +21,12 @@ constexpr uint64_t kDiscordLimitBytes = 20000000;
 
 struct ExportOptions {
   uint64_t maxBytes = kDiscordLimitBytes;
-  // Hay un juego abierto: se decodifica en un solo hilo, en modo de fondo.
+  // Hay un juego abierto o se graba: se decodifica en un solo hilo, en modo de
+  // fondo, con el encoder de la GPU en sus modos rápidos.
   bool gentle = true;
+  // Lo mismo, pero al momento (App lo actualiza): mientras está activo, la
+  // copia va como mucho a tiempo real (LivePacer). nullptr: sin tope.
+  std::shared_ptr<const std::atomic<bool>> live;
   // Encoders a probar, en orden ("h264_mf:hw" = Media Foundation con la GPU).
   // Vacío: los de la GPU y, si ninguno abre, los de la CPU.
   std::vector<std::string> encoders;
