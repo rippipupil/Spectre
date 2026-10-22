@@ -136,10 +136,14 @@ bool LinkButton(const char* id, const char* label) {
   ImVec2 q = ImGui::GetCursorScreenPos();
   bool clicked = ImGui::InvisibleButton(id, ImVec2(ts.x, ts.y + Px(4)));
   bool hov = ImGui::IsItemHovered();
+  Motion mo = Animate();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  Text(dl, ImGui::GetFont(), ls, q, C(hov ? Colors().text : Colors().textMuted), label);
-  if (hov) dl->AddRectFilled(ImVec2(q.x, q.y + ts.y + Px(1)), ImVec2(q.x + ts.x, q.y + ts.y + Px(2)), C(Colors().text));
+  Text(dl, ImGui::GetFont(), ls, q, C(Mix(Colors().textMuted, Colors().text, mo.hover)), label);
+  // El subrayado crece desde la izquierda.
+  if (mo.hover > 0)
+    dl->AddRectFilled(ImVec2(q.x, q.y + ts.y + Px(1)), ImVec2(q.x + ts.x * EaseOut(mo.hover), q.y + ts.y + Px(2)),
+                      C(Colors().text));
   return clicked;
 }
 
@@ -151,11 +155,14 @@ bool Chip(const char* id, const std::string& label, bool active) {
   ImVec2 size(ts.x + Px(18), Px(26));
   bool pressed = ImGui::InvisibleButton(id, size);
   bool hov = ImGui::IsItemHovered();
+  Motion mo = Animate();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  if (hov || active) dl->AddRectFilled(a, b, C(active ? p.surfaceActive : p.surface));
-  dl->AddRect(a, b, C(active ? p.accent : hov ? p.lineStrong : p.line), 0, 0, Px(1));
+  if (active) ShapeFill(dl, a, b, C(p.surfaceActive));
+  else if (mo.hover > 0) ShapeFill(dl, a, b, C(p.surface, mo.hover));
+  ShapeStroke(dl, a, b, C(active ? p.accent : Mix(p.line, p.lineStrong, mo.hover)));
+  PaintPress(dl, a, b, Role::Normal, mo);
   DrawMark(dl, ImVec2(a.x + Px(9), (a.y + b.y) * 0.5f), Px(2.5f), C(p.accent), true);
   Text(dl, ImGui::GetFont(), fs, ImVec2(a.x + Px(15), (a.y + b.y - ts.y) * 0.5f), C(p.text), label.c_str());
   return pressed;
@@ -171,7 +178,7 @@ void AppUi::OnOpened(HWND notifyWindow, UINT notifyMsg) {
   worker_.Start(notifyWindow, notifyMsg);
   editor_.Start(notifyWindow, notifyMsg);
   frame_ = 0;
-  openedAt_ = GetTickCount64();
+  openedAt_ = pageSince_ = GetTickCount64();
 }
 
 void AppUi::OnClosed() {
@@ -379,6 +386,19 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
 
   Sidebar(w, m, a);
   ImGui::SameLine(0, 0);
+  // Al cambiar de página (o de sección de Ajustes), la nueva entra con la
+  // animación del diseño: se desliza, sube, tiembla o se descubre de arriba abajo.
+  const int shown = int(m.page) * 64 + (m.page == AppPage::Settings ? int(m.settingsPage) : 0);
+  if (shown != shownPage_) {
+    if (shownPage_ >= 0) pageSince_ = GetTickCount64();
+    shownPage_ = shown;
+  }
+  const Entrance enter = EnterMotion(pageSince_, true);
+  const ImVec2 pageMin = ImGui::GetCursorScreenPos();
+  if (!enter.done) {
+    ImGui::SetCursorScreenPos(pageMin + enter.offset);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::clamp(enter.alpha, 0.0f, 1.0f));
+  }
   ImGui::BeginGroup();
   switch (m.page) {
   case AppPage::Home: PageHome(w, m, a); break;
@@ -388,6 +408,16 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   case AppPage::Settings: PageSettings(w, m, a); break;
   }
   ImGui::EndGroup();
+  if (!enter.done) {
+    ImGui::PopStyleVar();
+    // Terminal: lo que queda por debajo de la línea aún no se ve.
+    if (enter.reveal < 1.0f) {
+      ImDrawList* fg = ImGui::GetForegroundDrawList();
+      const float y = pageMin.y + (io.DisplaySize.y - pageMin.y) * enter.reveal;
+      fg->AddRectFilled(ImVec2(pageMin.x, y), io.DisplaySize, C(p.bg));
+      fg->AddRectFilled(ImVec2(pageMin.x, y - Px(1)), ImVec2(io.DisplaySize.x, y + Px(1)), C(p.accent));
+    }
+  }
   Dialogs(m, a);
   ImGui::End();
   ImGui::PopStyleColor();
@@ -400,10 +430,14 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
     selectToggle_.clear();
   }
 
-  // Animaciones del tema solo con la ventana delante y a 30 fps: detrás de un
-  // juego o en otra ventana no se dibuja nada que no haya cambiado.
+  // La ventana se dibuja cuando algo cambia. El movimiento de fondo del diseño
+  // solo con la ventana delante (detrás de un juego no lo ve nadie): el rastro
+  // de Psíquico a 30 fps, el cursor de Terminal al parpadear. Pasar por
+  // encima, pulsar o entrar en una página piden frames solo mientras duran.
   unsigned long long now = GetTickCount64();
-  if (ThemeMotion() && w.Focused()) w.AnimateAt(now + 33);
+  if (w.Focused() && AmbientMotion() == Ambient::Ghost) w.AnimateAt(now + 33);
+  if (w.Focused() && AmbientMotion() == Ambient::Cursor) w.AnimateAt(now + 500 - now % 500 + 1);
+  if (FrameRequested()) w.Animate();
   // El reloj de la grabación, no detrás de un juego (ahí no lo ve nadie).
   if (m.stats.recording && (w.Focused() || !m.gameDetected)) w.AnimateAt(now + 1000 - now % 1000);
   if (m.page == AppPage::Settings && m.settings.update.state == UpdateStatus::State::Checking) w.AnimateAt(now + 50);
@@ -461,7 +495,7 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
     } else if (m.replayActive) {
       mark = p.accent;
       text = "Replay activo";
-      alpha = Breathe();
+      alpha = AmbientMotion() == Ambient::Cursor ? Blink() : Breathe();
     } else if (m.config.replayEnabled && m.config.onlyInGames) {
       mark = p.textMuted;
       filled = false;
@@ -526,9 +560,8 @@ void AppUi::StatusCard(AppModel& m, const AppActions& a) {
   ImVec2 q = ImGui::GetCursorScreenPos();
   float width = ImGui::GetContentRegionAvail().x;
   const float pad = Px(20);
-  float height = Px(150);
-  dl->AddRectFilled(q, ImVec2(q.x + width, q.y + height), C(p.surface));
-  dl->AddRectFilled(q, ImVec2(q.x + Px(3), q.y + height), C(m.stats.recording ? p.danger : p.accent));
+  float height = Px(106) + ActionHeight();
+  CardFrame(dl, q, ImVec2(q.x + width, q.y + height), m.stats.recording ? p.danger : p.accent);
 
   std::string status, detail;
   if (m.stats.recording) {
@@ -551,7 +584,7 @@ void AppUi::StatusCard(AppModel& m, const AppActions& a) {
 
   float gap = Px(10);
   float bw = (width - pad * 2 - gap * 2) / 3.0f;
-  ImGui::SetCursorScreenPos(ImVec2(q.x + pad, q.y + height - pad - Px(44)));
+  ImGui::SetCursorScreenPos(ImVec2(q.x + pad, q.y + height - pad - ActionHeight()));
   ImGui::PushID("status");
   if (ActionButton("clip", "Guardar clip", c.hotkeys.saveClip, Tone::Primary, m.replayActive, false, bw))
     a.saveClip();
@@ -868,6 +901,7 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   ImVec2 size(width, thumbH + textH);
   bool pressed = ImGui::InvisibleButton("card", size);
   bool hov = ImGui::IsItemHovered();
+  Motion mo = Animate();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) *contextMenu = true;
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
@@ -881,7 +915,7 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
     DrawIcon(dl, item.Video() ? Icon::Play : Icon::Shot, (ta + tb) * 0.5f, Px(12), C(p.textFaint));
   }
   RequestDuration(item);
-  if (hov) dl->AddRect(a, b, C(p.lineStrong), 0, 0, Px(1));
+  HoverOutline(dl, a, b, mo.hover);
   Badge(dl, ImVec2(ta.x + Px(8), ta.y + Px(8)), BadgeText(item), false);
   if (item.Video() && item.duration > 0)
     Badge(dl, ImVec2(tb.x - Px(8), tb.y - Px(8) - Px(kLabel) - Px(6)), FormatDuration(item.duration), true);

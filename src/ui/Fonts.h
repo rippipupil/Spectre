@@ -29,8 +29,8 @@ struct FontSet {
 
 // Vacía el atlas del contexto de ImGui actual, añade Segoe UI y Segoe UI Bold
 // a todos los tamaños y lo construye. Sin Segoe UI usa la fuente de ImGui.
-// allSizes=false carga solo el tamaño del texto normal (15 px), el único que
-// usan los avisos: el atlas se construye unas siete veces más rápido.
+// allSizes=false carga solo los dos tamaños que usan los avisos (15 px el
+// título y 13 px el detalle): el atlas se construye unas tres veces más rápido.
 void LoadFonts(float scale, FontSet* out, bool allSizes = true);
 // Cuando el backend ya subió el atlas a la GPU (tras el primer frame): libera
 // la copia en RAM. Fuera de un frame. false si aún no estaba subido.

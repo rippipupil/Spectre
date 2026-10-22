@@ -2,9 +2,9 @@
 
 Spectre graba la pantalla y guarda clips de tus partidas en Windows 10 y 11. Funciona en segundo plano, ocupa poca memoria y usa el codificador de vídeo de tu gráfica, sea NVIDIA, AMD o Intel.
 
-**[Descargar Spectre-Setup.exe](https://github.com/rippipupil/Spectre/releases/latest/download/Spectre-Setup.exe)**
+**[Descargar Spectre-Setup.exe](../../releases/latest/download/Spectre-Setup.exe)**
 
-El instalador incluye todo lo necesario y no pide permisos de administrador. Si prefieres no instalar nada, hay un [zip portable](https://github.com/rippipupil/Spectre/releases/latest/download/Spectre-Portable.zip).
+El instalador incluye todo lo necesario y no pide permisos de administrador. Si prefieres no instalar nada, hay un [zip portable](../../releases/latest/download/Spectre-Portable.zip).
 
 ## Uso
 

@@ -845,9 +845,24 @@ void PageNotifications(SettingsModel& m, const SettingsActions& a) {
   auto& c = m.config;
   Heading("AVISOS EN PANTALLA");
   m.dirty |= SwitchField("Mostrar avisos", &c.showNotifications,
-                         "Avisos breves al guardar un clip, una captura o empezar a grabar. Los errores se muestran "
-                         "siempre. Sobre un juego a pantalla completa, un aviso puede añadir un frame de retraso "
-                         "mientras se ve: si lo notas, apágalos y usa el sonido de abajo.");
+                         "Como los de Medal: al guardar un clip (primero «Guardando» y luego «Guardado»), al empezar "
+                         "y terminar una grabación, con capturas y marcas, al activar o quitar el replay, el "
+                         "micrófono o la cámara, y al terminar una edición o una exportación. Cada tema los dibuja y "
+                         "los anima a su manera. Los errores y el aviso de poco disco se muestran siempre. Sobre un "
+                         "juego a pantalla completa, un aviso puede añadir un frame de retraso mientras se ve: si lo "
+                         "notas, apágalos y usa el sonido de abajo.");
+  ImGui::BeginDisabled(!c.showNotifications);
+  m.dirty |= SwitchField("Al detectar un juego", &c.notifyGame,
+                         "«Replay listo en ...» la primera vez que se ve cada juego a pantalla completa, con el "
+                         "atajo para guardar. No sale con navegadores ni reproductores de vídeo.");
+  m.dirty |= SwitchField("Versiones nuevas", &c.notifyUpdates,
+                         "Mira en GitHub si hay una versión nueva un minuto después de abrir Spectre y cada 12 horas, "
+                         "y lo avisa cuando no estás jugando. Nada se descarga sin pulsar Actualizar en Ajustes > "
+                         "General.");
+  ImGui::EndDisabled();
+  Gap(4);
+  if (GhostButton("notice-test", "Probar aviso", Px(160)) && a.previewNotice) a.previewNotice();
+  Help("Enseña «Guardando clip» y «Clip guardado» con el tema elegido, sin guardar nada.");
   FieldLabel("Posición");
   m.dirty |= ChoiceCombo<std::string>("##pos", c.toastPosition,
                                       {{"top-right", "Arriba a la derecha"},
@@ -875,19 +890,64 @@ void PageNotifications(SettingsModel& m, const SettingsActions& a) {
        "audio del juego» no se graba.");
 }
 
+// Borde de una tarjeta de tema con la forma de su diseño: esquinas cortadas
+// (Psíquico, Táctico), corchetes (Terminal), raíl (Suave), línea arriba
+// (Contorno), doble grosor (Alto contraste) o un rectángulo.
+void StyleFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, const Style& st, ImU32 edge, ImU32 accent, float thickness) {
+  thickness *= st.line;
+  switch (st.button) {
+  case ButtonShape::Chamfer: {
+    const float cut = Px(std::min(st.cut, 8.0f));
+    const bool tl = st.cutCorners & 1, tr = st.cutCorners & 2, br = st.cutCorners & 4, bl = st.cutCorners & 8;
+    ImVec2 pts[8];
+    int n = 0;
+    if (tl) { pts[n++] = ImVec2(a.x, a.y + cut); pts[n++] = ImVec2(a.x + cut, a.y); } else pts[n++] = a;
+    if (tr) { pts[n++] = ImVec2(b.x - cut, a.y); pts[n++] = ImVec2(b.x, a.y + cut); } else pts[n++] = ImVec2(b.x, a.y);
+    if (br) { pts[n++] = ImVec2(b.x, b.y - cut); pts[n++] = ImVec2(b.x - cut, b.y); } else pts[n++] = b;
+    if (bl) { pts[n++] = ImVec2(a.x + cut, b.y); pts[n++] = ImVec2(a.x, b.y - cut); } else pts[n++] = ImVec2(a.x, b.y);
+    dl->AddPolyline(pts, n, edge, ImDrawFlags_Closed, thickness);
+    break;
+  }
+  case ButtonShape::Bracket: {
+    const float arm = Px(8);
+    dl->AddRect(a, b, C(edge, 0.35f), 0, 0, Px(1));
+    for (int i = 0; i < 4; ++i) {
+      ImVec2 c(i & 1 ? b.x : a.x, i & 2 ? b.y : a.y);
+      const float sx = i & 1 ? -1.0f : 1.0f, sy = i & 2 ? -1.0f : 1.0f;
+      ImVec2 pts[3] = {ImVec2(c.x, c.y + sy * arm), c, ImVec2(c.x + sx * arm, c.y)};
+      dl->AddPolyline(pts, 3, edge, 0, thickness);
+    }
+    break;
+  }
+  case ButtonShape::Rail:
+    dl->AddRect(a, b, edge, 0, 0, thickness);
+    dl->AddRectFilled(a, ImVec2(a.x + Px(3), b.y), accent);
+    break;
+  default:
+    dl->AddRect(a, b, edge, 0, 0, thickness);
+    if (st.toast == ToastLook::TopLine) dl->AddRectFilled(a, ImVec2(b.x, a.y + Px(2)), accent);
+    break;
+  }
+}
+
 // Tarjeta del selector de temas: se pinta con los colores del tema que
-// representa, con su nombre y tres muestras (fondo, superficie y acento).
+// representa y la forma de su diseño, con su nombre y tres muestras (fondo,
+// superficie y acento).
 bool ThemeCard(const Theme& t, bool selected, float width) {
   const Palette& p = Colors();
   ImGui::PushID(t.id);
   bool pressed = ImGui::InvisibleButton("theme", ImVec2(width, Px(40)));
   bool hov = ImGui::IsItemHovered();
   ImGui::PopID();
-  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  if (hov) {
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    ImGui::SetTooltip("Diseño %s", FindStyle(t.style).name);
+  }
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(a, b, C(t.colors.bg));
-  dl->AddRect(a, b, C(selected ? p.accent : hov ? p.lineStrong : p.line), 0, 0, Px(1));
+  StyleFrame(dl, a, b, FindStyle(t.style), C(selected ? p.accent : hov ? p.lineStrong : p.line), C(t.colors.accent),
+             Px(1));
   const float sw = Px(10), gap = Px(3);
   float x = b.x - Px(10) - sw * 3 - gap * 2;
   float mid = (a.y + b.y) * 0.5f, fs = Px(kSmall);
@@ -940,13 +1000,24 @@ void AppearanceSection(SettingsModel& m) {
   }
   ImGui::EndGroup();
   Gap(2);
-  // Solo el tema Psíquico tiene animaciones: con los demás el interruptor se ve apagado.
-  ImGui::BeginDisabled(!FindTheme(c.theme).psychic);
-  SwitchField("Animaciones del tema", &c.themeMotion,
-              "Movimiento propio del tema Psíquico: rastro al abrir el panel, estela en el botón "
-              "principal y marca de estado que respira. Los demás temas no tienen animaciones.");
+  // Cada tema trae su diseño (forma de los botones, bordes, rótulos,
+  // interruptores, avisos y animaciones); aquí se puede usar otro.
+  const Theme& theme = FindTheme(c.theme);
+  const std::string own = std::string("El del tema (") + FindStyle(theme.style).name + ")";
+  std::vector<std::pair<std::string, const char*>> styles{{"", own.c_str()}};
+  for (const Style* st : Styles()) styles.emplace_back(st->id, st->name);
+  FieldLabel("Diseño");
+  ChoiceCombo<std::string>("##style", c.themeStyle, styles);
+  const Style& style = StyleFor(theme, c.themeStyle);
+  Help(style.summary);
+  Gap(2);
+  // Alto contraste no tiene movimiento: el interruptor se ve apagado.
+  ImGui::BeginDisabled(!style.motion);
+  SwitchField("Animaciones", &c.themeMotion,
+              "Al pasar por encima y al pulsar un botón, al abrir el panel, al cambiar de página y en los avisos "
+              "(la de «Clip guardado» es distinta en cada diseño). Apagadas, todo aparece sin movimiento.");
   ImGui::EndDisabled();
-  Help("El tema se guarda al elegirlo y se usa en esta ventana, en el panel (Alt+Z) y en los avisos.");
+  Help("El tema y el diseño se guardan al elegirlos y se usan en esta ventana, en el panel (Alt+Z) y en los avisos.");
 }
 
 // Panel Alt+Z: lateral de todo el alto (como el de NVIDIA) o el compacto de
@@ -1011,7 +1082,10 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
   char buf[256];
   switch (u.state) {
   case S::Idle:
-    Help("Spectre solo se conecta a GitHub cuando pulsas el botón: no comprueba nada en segundo plano.");
+    Help(m.config.notifyUpdates && m.config.showNotifications
+             ? "Spectre mira en GitHub si hay versión nueva al abrirse y cada 12 horas, y te avisa (Ajustes > "
+               "Avisos). Nada se descarga sin pulsar Actualizar."
+             : "Spectre solo se conecta a GitHub cuando pulsas el botón: no comprueba nada en segundo plano.");
     Gap(4);
     if (GhostButton("update-check", "Buscar actualizaciones", bw)) a.checkUpdates();
     break;
@@ -1033,9 +1107,11 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
              "instalador, Spectre se actualiza solo desde aquí.");
       else
         Help("GitHub no ha publicado la huella de este instalador, así que Spectre no puede comprobarlo y no lo "
-             "instala solo. Descárgalo desde la página de la versión.");
+             "instala solo. Descárgalo y ábrelo tú.");
       Gap(4);
-      if (SolidButton("update-page", "Abrir página de descarga", bw)) a.openPath(Updater::ReleasePage());
+      if (SolidButton("update-page", u.portable ? "Descargar el zip nuevo" : "Descargar el instalador", bw) &&
+          !u.manualUrl.empty())
+        a.openPath(u.manualUrl);
     } else {
       std::string help = "Se descarga el instalador";
       if (u.sizeBytes > 0) help += " (" + FormatBytes(u.sizeBytes) + ")";
@@ -1150,7 +1226,6 @@ void LinkRow(const char* name, const char* url, const SettingsActions& a) {
 void PageProjects(const SettingsActions& a) {
   Heading("GITHUB");
   LinkRow("marieteffk", "https://github.com/marieteffk", a);
-  LinkRow("rippipupil", "https://github.com/rippipupil", a);
   Help("Se abren en el navegador.");
 }
 

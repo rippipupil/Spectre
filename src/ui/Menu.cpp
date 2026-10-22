@@ -20,9 +20,10 @@ Fonts FontsOf(const OverlayWindow& w) { return Fonts{w.Scale(), w.BoldFont(), w.
 bool ClipRow(int index, const ClipFile& clip) {
   const Palette& p = Colors();
   ImGui::PushID(index);
-  const float h = Px(30);
+  const float h = RowHeight(30);
   ImVec2 size(ImGui::GetContentRegionAvail().x, h);
   bool pressed = ImGui::InvisibleButton("clip", size);
+  Motion m = Animate();
   bool hov = ImGui::IsItemHovered();
   ImGuiID id = ImGui::GetItemID();
   ImGui::PopID();
@@ -34,9 +35,10 @@ bool ClipRow(int index, const ClipFile& clip) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 rowA(a.x - Px(8), a.y), rowB(b.x + Px(8), b.y);
   TrackHover(id, rowA, rowB, hov);
-  if (hov) dl->AddRectFilled(rowA, rowB, C(p.surface));
+  PaintButton(dl, rowA, rowB, Role::Quiet, m);
+  PaintPress(dl, rowA, rowB, Role::Quiet, m);
   float mid = (a.y + b.y) * 0.5f;
-  DrawIcon(dl, Icon::Play, ImVec2(a.x + Px(5), mid), Px(5), C(hov ? p.text : p.textMuted));
+  DrawIcon(dl, Icon::Play, ImVec2(a.x + Px(5), mid), Px(5), C(Mix(p.textMuted, p.text, m.hover)));
   float ss = Px(kSmall);
   float timeW = TextSize(ImGui::GetFont(), ss, clip.when.c_str()).x;
   std::string name = Ellipsize(ImGui::GetFont(), ss, clip.name, b.x - a.x - timeW - Px(30));
@@ -49,15 +51,16 @@ bool ClipRow(int index, const ClipFile& clip) {
 bool SquareButton(const char* id, Icon icon, float size, const char* tooltip) {
   const Palette& p = Colors();
   bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
-  bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+  Motion m = Animate();
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(a, b, C(held ? p.surfaceActive : hov ? p.surfaceHover : p.surface));
-  if (hov) {
+  ButtonPaint bp = PaintButton(dl, a, b, Role::Normal, m);
+  if (ImGui::IsItemHovered()) {
     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     if (tooltip) ImGui::SetTooltip("%s", tooltip);
   }
-  DrawIcon(dl, icon, (a + b) * 0.5f, size * 0.2f, C(hov ? p.text : p.textMuted));
+  DrawIcon(dl, icon, (bp.a + bp.b) * 0.5f, (bp.b.x - bp.a.x) * 0.2f, C(Mix(p.textMuted, bp.fg, m.hover)));
+  PaintPress(dl, a, b, Role::Normal, m);
   return pressed;
 }
 
@@ -78,7 +81,7 @@ void PanelStatus(const MenuModel& m) {
   } else if (m.replayActive) {
     mark = p.accent;
     text = "Replay activo, guarda los últimos " + FormatClipLength(m.config.clipSeconds);
-    alpha = Breathe();
+    alpha = AmbientMotion() == Ambient::Cursor ? Blink() : Breathe();
   } else if (m.config.replayEnabled && m.config.onlyInGames) {
     mark = p.textMuted;
     filled = false;
@@ -105,7 +108,7 @@ void PanelStatus(const MenuModel& m) {
 // lo que quede fuera de la zona de clic, así que fuera no se vería. Usa la
 // posición y el tamaño del frame anterior.
 void DrawOpenGhost(const MenuModel& m, float width) {
-  if (!ThemeMotion() || m.panelHeight <= 0) return;
+  if (!ThemeMotion() || CurrentStyle().toast != ToastLook::Ghost || m.panelHeight <= 0) return;
   float t = float(GetTickCount64() - m.openedAt) / 240.0f;
   if (t >= 1.0f) return;
   t = std::clamp(t, 0.0f, 1.0f);
@@ -121,6 +124,28 @@ std::string WithKey(const char* text, const std::string& key) {
   return key.empty() ? std::string(text) : std::string(text) + " (" + key + ")";
 }
 
+// Detalles del diseño sobre el marco del panel (dentro de su rectángulo: la
+// ventana recorta lo que quede fuera de la zona de clic).
+void PanelDecor(ImDrawList* dl, ImVec2 a, ImVec2 b, bool onRight) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  switch (st.toast) {
+  case ToastLook::Header:
+    // Táctico: una franja del acento en el lado que da al centro de la pantalla.
+    if (onRight) dl->AddRectFilled(ImVec2(a.x, a.y), ImVec2(a.x + Px(2), b.y), C(p.accent));
+    else dl->AddRectFilled(ImVec2(b.x - Px(2), a.y), ImVec2(b.x, b.y), C(p.accent));
+    break;
+  case ToastLook::Terminal:
+    DrawBrackets(dl, a + ImVec2(Px(4), Px(4)), b - ImVec2(Px(4), Px(4)), C(p.lineStrong), Px(16));
+    break;
+  case ToastLook::TopLine:
+    dl->AddRectFilled(a, ImVec2(b.x, a.y + Px(2)), C(p.accent));
+    break;
+  default:
+    break;
+  }
+}
+
 } // namespace
 
 void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
@@ -129,10 +154,13 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   // a cero con cada contexto nuevo y un resto antiguo parpadearía.
   ResetHoverTrail(m.openedAt);
   const Palette& p = Colors();
-  const float appear = OpenProgress(m.openedAt);
   const float width = Px(kPanelWidth);
   const bool lateral = IsLateralPanel(m.config);
   const ImVec2 display = ImGui::GetIO().DisplaySize;
+  // Entra desde su lado de la pantalla, con el movimiento del diseño.
+  const bool onRight = (lateral ? m.config.panelLateralX : m.config.panelCompactX) > 0.5f;
+  const Entrance enter = EnterMotion(m.openedAt, onRight);
+  const float appear = ThemeMotion() ? enter.alpha : OpenProgress(m.openedAt);
   bool startDrag = false;
 
   DrawOpenGhost(m, width);
@@ -140,7 +168,9 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGui::PushStyleVar(ImGuiStyleVar_Alpha, appear);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(16), Px(16)));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+  // Suave va sin borde; Alto contraste, con 2 px.
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,
+                      CurrentStyle().divider == DividerStyle::Space ? 0.0f : CurrentStyle().line);
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(Px(8), Px(4)));
   ImGui::PushStyleColor(ImGuiCol_WindowBg, V(p.bg));
   ImGui::PushStyleColor(ImGuiCol_Border, V(p.line));
@@ -152,11 +182,11 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
   if (lateral) {
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowPos(enter.offset);
     ImGui::SetNextWindowSize(display);
   } else {
     const float fy = m.config.panelCompactY;
-    ImGui::SetNextWindowPos(ImVec2(0, display.y * fy), ImGuiCond_Always, ImVec2(0, fy));
+    ImGui::SetNextWindowPos(ImVec2(0, display.y * fy) + enter.offset, ImGuiCond_Always, ImVec2(0, fy));
     ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, display.y));
     flags |= ImGuiWindowFlags_AlwaysAutoResize;
   }
@@ -194,7 +224,7 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
 
   Gap(6);
   {
-    const float bh = Px(44), gap = Px(6);
+    const float bh = ActionHeight(), gap = Px(6);
     float recW = ImGui::GetContentRegionAvail().x - bh - gap;
     if (m.stats.recording) {
       if (ActionButton("rec", "Detener grabación", c.hotkeys.toggleRecording, Tone::Danger, true, false, recW))
@@ -244,10 +274,8 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
       ImFont* font = Sized(ImGui::GetFont(), fs);
       ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrap, text);
       ImVec2 end(q.x + w, q.y + ts.y + pad * 2);
-      // Como los avisos: plano, borde de 1 px y una barra a la izquierda.
-      dl->AddRectFilled(q, end, C(p.surface));
-      dl->AddRect(q + ImVec2(0.5f, 0.5f), end - ImVec2(0.5f, 0.5f), C(p.line), 0, 0, Px(1));
-      dl->AddRectFilled(q, ImVec2(q.x + bar, end.y), C(p.warning));
+      // Una caja del diseño con una barra a la izquierda.
+      CardFrame(dl, q, end, p.warning);
       dl->AddText(font, fs, ImVec2(q.x + bar + pad, q.y + pad), C(p.text), text, nullptr, wrap);
       ImGui::Dummy(ImVec2(w, end.y - q.y));
       Gap(6);
@@ -279,7 +307,7 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   size_t shown = std::min<size_t>(m.clips.size(), 3);
   if (lateral) {
     float room = footerTop - ImGui::GetCursorScreenPos().y;
-    shown = std::min(m.clips.size(), std::max(shown, size_t(std::max(0.0f, room / (Px(30) + spacing)))));
+    shown = std::min(m.clips.size(), std::max(shown, size_t(std::max(0.0f, room / (RowHeight(30) + spacing)))));
   }
   for (int i = 0; i < int(shown); ++i) {
     const auto& clip = m.clips[size_t(i)];
@@ -312,42 +340,22 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   m.panelWidth = ImGui::GetWindowWidth();
   m.panelHeight = ImGui::GetWindowHeight();
   m.panelTop = ImGui::GetWindowPos().y;
+  {
+    const ImVec2 wa = ImGui::GetWindowPos(), wb = wa + ImGui::GetWindowSize();
+    PanelDecor(dl, wa, wb, onRight);
+    // Terminal: una línea barre el panel de arriba abajo y lo va descubriendo.
+    if (enter.reveal < 1.0f) {
+      ImDrawList* fg = ImGui::GetForegroundDrawList();
+      const float y = wa.y + (wb.y - wa.y) * enter.reveal;
+      fg->AddRectFilled(ImVec2(wa.x, y), wb, ImGui::GetColorU32(p.bg));
+      fg->AddRectFilled(ImVec2(wa.x, y - Px(1)), ImVec2(wb.x, y + Px(1)), ImGui::GetColorU32(p.accent));
+    }
+  }
   ImGui::End();
   ImGui::PopStyleColor(2);
   ImGui::PopStyleVar(5);
 
   if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) a.close();
-}
-
-void DrawToast(OverlayWindow& w, const Config& config, const std::string& text, bool error, float alpha) {
-  BeginFrame(FontsOf(w), config);
-  const Palette& p = Colors();
-  ImGuiIO& io = ImGui::GetIO();
-  ImGui::SetNextWindowPos(ImVec2(0, 0));
-  ImGui::SetNextWindowSize(io.DisplaySize);
-  ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-  ImGui::Begin("toast", nullptr,
-               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
-                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 a(0, 0), b(io.DisplaySize.x, io.DisplaySize.y);
-  // Rectángulo plano con borde de 1 px y una barra de 3 px a la izquierda:
-  // del acento al guardar o grabar, roja si es un error.
-  dl->AddRectFilled(a, b, C(p.bg));
-  dl->AddRect(a + ImVec2(0.5f, 0.5f), b - ImVec2(0.5f, 0.5f), C(p.line), 0, 0, Px(1));
-  dl->AddRectFilled(a, ImVec2(a.x + Px(3), b.y), C(error ? p.danger : p.accent));
-  if (!error) DrawTrace(dl, a, b, p.accent);
-  float x = a.x + Px(18);
-  float wrap = b.x - x - Px(16);
-  float fs = Px(kBody);
-  ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrap, text.c_str());
-  dl->AddText(ImGui::GetFont(), fs, ImVec2(x, (a.y + b.y - ts.y) * 0.5f), C(p.text), text.c_str(), nullptr, wrap);
-  ImGui::End();
-  ImGui::PopStyleColor();
-  ImGui::PopStyleVar(3);
 }
 
 } // namespace spectre

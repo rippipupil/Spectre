@@ -19,6 +19,7 @@ namespace {
 // Tamaños de texto de la interfaz en píxeles lógicos (Widgets.h). kBody + 2
 // son los títulos de las tarjetas de estado y de la biblioteca.
 constexpr float kSizes[FontSet::kCount] = {kLabel, kHint, kSmall, kBody, kBody + 2, kTitle};
+constexpr int kSmallIndex = 2; // kSmall
 constexpr int kMainIndex = 3;  // kBody
 constexpr int kBigIndex = 5;   // kTitle
 
@@ -77,7 +78,7 @@ void LoadFonts(float scale, FontSet* out, bool allSizes) {
   std::vector<unsigned char> regular = ReadFont(L"segoeui.ttf");
   std::vector<unsigned char> bold = ReadFont(L"segoeuib.ttf");
   for (int i = 0; i < FontSet::kCount; ++i) {
-    if (!allSizes && i != kMainIndex) continue;
+    if (!allSizes && i != kMainIndex && i != kSmallIndex) continue;
     out->regular[i] = Add(regular, kSizes[i] * scale);
     out->bold[i] = Add(bold, kSizes[i] * scale);
   }

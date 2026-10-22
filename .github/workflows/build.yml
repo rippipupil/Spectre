@@ -60,7 +60,7 @@ jobs:
       - name: Configurar
         # Entre comillas: PowerShell parte en el primer punto los argumentos que
         # empiezan por "-" y CMake recibía la versión "0".
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg" "-DSPECTRE_BUILD_VERSION=${{ env.APP_VERSION }}"
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DSPECTRE_FFMPEG_DIR=${{ github.workspace }}/ffmpeg" "-DSPECTRE_BUILD_VERSION=${{ env.APP_VERSION }}" "-DSPECTRE_UPDATE_REPO=${{ github.repository }}"
 
       - name: Compilar
         run: cmake --build build

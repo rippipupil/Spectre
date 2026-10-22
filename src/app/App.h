@@ -13,6 +13,7 @@
 #include "ui/KeyboardHook.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
+#include "ui/Toast.h"
 
 #include <shellapi.h>
 
@@ -21,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -100,9 +102,22 @@ private:
   void OnRecordingStopped(const std::string& path, int64_t stoppedAt);
 
   // UI
-  void Toast(const std::string& text, bool error = false);
+  // Aviso a partir de una frase: título, detalle y tipo salen del texto
+  // (ui/Toast.h MakeNotice) salvo que se diga el tipo.
+  void Toast(const std::string& text, bool error = false, NoticeKind kind = NoticeKind::Auto);
+  // continuation: es lo mismo que se ve (se añade algo, «Guardando clip» pasa a
+  // «Clip guardado»): la tarjeta no vuelve a entrar.
+  void Notify(Notice notice, bool continuation = false);
   // Lo añade al aviso que se está viendo (como «Clip guardado») en vez de taparlo.
   void ToastAfter(const std::string& text, bool error = false);
+  // Coloca la ventana del aviso en su esquina; heightPx = 0 la estima.
+  void PlaceToast(float heightPx = 0);
+  // Ajustes > Avisos > Probar: «Guardando clip» y, al rato, «Clip guardado».
+  void PreviewToast();
+  // «Replay listo en <juego>» la primera vez que se ve cada juego.
+  void AnnounceGame();
+  // Ajustes > Avisos > Versiones nuevas: una comprobación al abrir y cada 12 h.
+  void CheckUpdatesQuietly();
   void SyncModels(); // el config activo cambió: panel y ventana lo muestran
   void RefreshMenuModel();
   void RefreshPanelClips();
@@ -177,9 +192,23 @@ private:
   HWND pipelineWindow_ = nullptr; // ventana pedida al arrancar (nula = monitor)
   std::deque<std::string> recentNames_; // nombres ya usados aunque el archivo aún no exista
   bool restartPending_ = false; // cambios de captura a aplicar al terminar la grabación
-  std::string toastText_;
-  bool toastError_ = false;
+  Notice toastNotice_;          // lo que dice el aviso visible
+  HMONITOR toastMonitor_ = nullptr;
+  ULONGLONG toastShownAt_ = 0;  // entrada de la tarjeta (animación)
+  ULONGLONG toastPhaseAt_ = 0;  // último cambio de contenido (guardando -> guardado)
   ULONGLONG toastUntil_ = 0;
+  ULONGLONG toastTotalMs_ = 1;
+  int toastPlacedHeight_ = 0;   // alto medido con el que ya se recolocó
+  // Clips pedidos que aún se escriben: duración y si es el corto, para el aviso.
+  // Clips que se están escribiendo, por nombre de archivo: duración y si es
+  // el corto. Pueden terminar en otro orden que el de las teclas.
+  std::unordered_map<std::string, std::pair<int, bool>> pendingClips_;
+  bool previewing_ = false; // «Probar aviso»: se ve aunque los avisos estén apagados
+  DWORD announcedGamePid_ = 0;  // juego del último «Replay listo»
+  ULONGLONG nextUpdateCheck_ = 0;
+  bool quietCheckPending_ = false;
+  std::string foundVersion_;     // versión nueva que encontró la comprobación automática
+  std::string announcedVersion_; // versión nueva ya avisada
   ULONGLONG lastStats_ = 0;
   std::string hotkeyError_;     // atajos que no se pudieron registrar
   unsigned hotkeyFailedMask_ = 0; // bit i: el atajo i de HotkeyConfig no se pudo registrar

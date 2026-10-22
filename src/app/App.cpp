@@ -36,7 +36,7 @@ enum HotkeyId {
   kHotkeyOverlay = 1, kHotkeySaveClip, kHotkeyRecord, kHotkeyReplay, kHotkeyScreenshot, kHotkeyMarker, kHotkeyShortClip
 };
 constexpr int kHotkeyCount = 7;
-enum TimerId { kTimerGame = 1, kTimerHealth };
+enum TimerId { kTimerGame = 1, kTimerHealth, kTimerPreview };
 enum TrayCommand {
   kCmdOpenApp = 100,
   kCmdOpenPanel,
@@ -285,6 +285,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   settings.chooseFolder = [this] { Defer([this] { ChooseOutputFolder(); }); };
   settings.refreshStorage = appActions_.rescan;
   settings.playSound = [](const std::string& style) { PlayCue(Cue::Saved, style); };
+  settings.previewNotice = [this] { Defer([this] { PreviewToast(); }); };
 
   if (!RegisterHotkeys()) Toast(hotkeyError_, true);
   SetTimer(hwnd_, kTimerGame, 2000, nullptr);
@@ -292,7 +293,11 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   CheckGame();
   UpdatePipeline();
   EnforceStorageLimit();
-  if (updated) Toast("Spectre se ha actualizado a la versión " SPECTRE_VERSION ". Tus ajustes se conservan.");
+  if (updated)
+    Notify({NoticeKind::Update, "Spectre actualizado", "Ya tienes la versión " SPECTRE_VERSION ". Tus ajustes se conservan"});
+  // La primera comprobación de versiones, un minuto después de arrancar: no
+  // compite con el arranque de la captura.
+  nextUpdateCheck_ = GetTickCount64() + 60 * 1000;
   // Abrir Spectre (menú Inicio, el exe, el instalador) abre su ventana. Con
   // Windows (--tray) arranca solo en la bandeja, y tras una actualización
   // tampoco se abre encima de un juego a pantalla completa.
@@ -425,7 +430,14 @@ void App::SaveClip(bool shortClip) {
     if (ago >= 0 && ago <= double(seconds)) tail.push_back(ago);
   }
   library_->SetTailMarkers(path, std::move(tail));
+  // El clip acaba al pedirlo: antes que el aviso, que puede tener que crear
+  // su ventana. «Guardando clip» sale enseguida; el resultado
+  // (WM_SPECTRE_NOTIFY, siempre después) lo cambia por «Clip guardado» en la
+  // misma tarjeta.
+  pendingClips_[FileNameOf(path)] = {seconds, shortClip};
   pipeline_.SaveClip(path, double(seconds));
+  Notify({NoticeKind::ClipSaving, shortClip ? "Guardando clip corto" : "Guardando clip",
+          "Los últimos " + ui::FormatClipLength(seconds)});
 }
 
 void App::OnRecordingStopped(const std::string& path, int64_t stoppedAt) {
@@ -446,12 +458,19 @@ void App::OnRecordingStopped(const std::string& path, int64_t stoppedAt) {
 
 void App::ToggleRecording() {
   if (pipeline_.Recording()) {
-    std::string path = pipeline_.Stats().recordPath;
+    PipelineStats stats = pipeline_.Stats();
+    std::string path = stats.recordPath;
     int64_t stoppedAt = QpcNow();
     pipeline_.StopRecording();
     if (config_.soundOnSave) PlayCue(Cue::Saved, config_.saveSound);
+    Notice notice{NoticeKind::RecordingSaved, "Grabación guardada",
+                  FileNameOf(path) + " (" + ui::FormatDuration(stats.recordSeconds) + ")"};
     std::string note = LowDiskNote();
-    Toast("Grabación guardada: " + FileNameOf(path) + note, !note.empty());
+    if (!note.empty()) {
+      notice.detail += note;
+      notice.warning = true; // se ve aunque los avisos estén apagados
+    }
+    Notify(std::move(notice));
     OnRecordingStopped(path, stoppedAt);
     UpdatePipeline(std::exchange(restartPending_, false));
     InstallPendingUpdate();
@@ -464,9 +483,15 @@ void App::ToggleRecording() {
   if (pipeline_.StartRecording(OutputName("Grabacion"))) {
     recordStartQpc_ = QpcNow();
     recordMarkers_.clear();
+    const std::string& key = config_.hotkeys.toggleRecording;
+    Notice notice{NoticeKind::Recording, "Grabando",
+                  key.empty() ? "Detenla desde el panel (Alt+Z)" : "Pulsa " + key + " para detener"};
     std::string note = LowDiskNote();
-    Toast("Grabando. Pulsa " + config_.hotkeys.toggleRecording + " para detener" + (note.empty() ? "." : note),
-          !note.empty());
+    if (!note.empty()) {
+      notice.detail += note;
+      notice.warning = true;
+    }
+    Notify(std::move(notice));
   } else {
     Toast("No se pudo iniciar la grabación", true);
   }
@@ -478,7 +503,13 @@ void App::ToggleReplay() {
   SyncModels();
   if (pipeline_.Running()) pipeline_.SetReplaySeconds(config_.replayEnabled ? config_.clipSeconds : 3.0);
   UpdatePipeline();
-  Toast(config_.replayEnabled ? "Replay activado" : "Replay desactivado");
+  const std::string& key = config_.hotkeys.saveClip;
+  if (config_.replayEnabled)
+    Notify({NoticeKind::ReplayOn, "Replay activado",
+            (key.empty() ? std::string("Guarda") : key + " guarda") + " los últimos " +
+                ui::FormatClipLength(config_.clipSeconds)});
+  else
+    Notify({NoticeKind::ReplayOff, "Replay desactivado", "No se guarda nada hasta que lo vuelvas a activar"});
 }
 
 void App::ToggleMicrophone() {
@@ -571,7 +602,8 @@ void App::AddMarker() {
   while (!markers_.empty() && QpcToSeconds(now - markers_.front()) > kMaxMarkerAge) markers_.pop_front();
   if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(now);
   if (config_.soundOnSave) PlayCue(Cue::Marker, config_.saveSound);
-  Toast(pipeline_.Recording() ? "Marca añadida a la grabación y al replay" : "Marca añadida: saldrá en el próximo clip");
+  Notify({NoticeKind::Marker, "Marca añadida",
+          pipeline_.Recording() ? "En la grabación y en el replay" : "Saldrá en el próximo clip"});
 }
 
 void App::TrimClip(const std::string& path, double start, double end) {
@@ -1110,10 +1142,12 @@ void App::CheckGame() {
     if (retarget || reaudio) {
       Log("Juego %s: se reinicia la captura", gameActive ? game_->exeName.c_str() : "cerrado");
       UpdatePipeline(true);
+      AnnounceGame();
       return;
     }
   }
   UpdatePipeline();
+  AnnounceGame();
 }
 
 bool App::RegisterHotkeys() {
@@ -1245,30 +1279,56 @@ void App::ReportStorageLimit(const LimitResult& r) {
 
 // ---------------------------------------------------------------------- UI
 
-void App::Toast(const std::string& text, bool error) {
+void App::Toast(const std::string& text, bool error, NoticeKind kind) { Notify(MakeNotice(text, error, kind)); }
+
+void App::Notify(Notice notice, bool continuation) {
   // Crear la ventana del aviso cambia el contexto de ImGui: nunca en mitad
   // del frame de otra ventana.
   if (inFrame_) {
-    Defer([this, text, error] { Toast(text, error); });
+    Defer([this, notice, continuation] { Notify(notice, continuation); });
     return;
   }
-  if (!error && !config_.showNotifications) return;
-  toastText_ = text;
-  toastError_ = error;
-  // En el monitor donde se está jugando (o donde está el panel), no siempre
-  // en el principal.
-  HMONITOR monitor = menu_.Visible() ? menuMonitor_
-                                     : MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+  // Los errores y lo de poco disco se ven aunque los avisos estén apagados.
+  if (!notice.error && !notice.warning && !config_.showNotifications && !previewing_) return;
+  const ULONGLONG now = GetTickCount64();
+  const bool visible = toast_.Visible() && now < toastUntil_;
+  // «Guardando clip» pasa a «Clip guardado» (o al error) en la misma tarjeta:
+  // no vuelve a entrar, solo cambia lo de dentro y suena su animación.
+  const bool same = visible && (continuation || (toastNotice_.kind == NoticeKind::ClipSaving &&
+                                                 (notice.kind == NoticeKind::Clip || notice.error)));
+  if (!same) {
+    toastShownAt_ = now;
+    // En el monitor donde se está jugando (o donde está el panel), no siempre
+    // en el principal.
+    toastMonitor_ = menu_.Visible() ? menuMonitor_ : MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+  }
+  if (!continuation || toastNotice_.kind != notice.kind) toastPhaseAt_ = now;
+  toastNotice_ = std::move(notice);
+  // Más tiempo para leer los largos y para los errores. «Guardando clip» se
+  // queda hasta que el archivo está escrito (lo sustituye «Clip guardado»).
+  size_t chars = 0;
+  for (unsigned char ch : toastNotice_.title + toastNotice_.detail) chars += (ch & 0xC0) != 0x80;
+  ULONGLONG ms = kToastMs + ULONGLONG(chars > 90 ? (chars - 90) / 40 : 0) * 1200 + (toastNotice_.error ? 1500 : 0);
+  if (toastNotice_.kind == NoticeKind::ClipSaving) ms = 10000;
+  toastUntil_ = now + ms;
+  toastTotalMs_ = ms;
+  toastPlacedHeight_ = 0;
+  PlaceToast();
+}
+
+void App::PlaceToast(float heightPx) {
+  HMONITOR monitor = toastMonitor_ ? toastMonitor_ : MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
   MONITORINFO mi{};
   mi.cbSize = sizeof(mi);
-  GetMonitorInfoW(monitor, &mi);
+  if (!GetMonitorInfoW(monitor, &mi)) {
+    monitor = MonitorFromWindow(nullptr, MONITOR_DEFAULTTOPRIMARY);
+    GetMonitorInfoW(monitor, &mi);
+  }
   float scale = MonitorScale(monitor);
-  // Alto según el texto (unas 42 letras por línea): los errores largos no se cortan.
-  size_t chars = 0;
-  for (unsigned char ch : text) chars += (ch & 0xC0) != 0x80;
-  int lines = std::max<int>(1, int((chars + 41) / 42));
-  int w = int(400 * scale), h = int(float(std::max(64, 30 + lines * 22)) * scale), margin = int(20 * scale);
-  toastUntil_ = GetTickCount64() + kToastMs + ULONGLONG(std::max(0, lines - 2)) * 1200 + (error ? 1500 : 0);
+  // Alto estimado por letras hasta que el primer frame mide el de verdad.
+  int w = int(kToastWidth * scale), margin = int(20 * scale);
+  int h = heightPx > 0 ? int(heightPx) : int(std::ceil(EstimateToastHeight(config_, toastNotice_) * scale));
+  h = std::min<int>(h, (mi.rcWork.bottom - mi.rcWork.top) / 2);
   // Esquina de Ajustes > Avisos.
   const RECT& work = mi.rcWork;
   const std::string& corner = config_.toastPosition;
@@ -1291,13 +1351,78 @@ void App::Toast(const std::string& text, bool error) {
 }
 
 void App::ToastAfter(const std::string& text, bool error) {
-  if (!toast_.Visible() || GetTickCount64() >= toastUntil_ || toastText_.empty()) {
+  if (!toast_.Visible() || GetTickCount64() >= toastUntil_ || toastNotice_.kind == NoticeKind::ClipSaving) {
     Toast(text, error);
     return;
   }
-  std::string joined = toastText_;
-  if (joined.back() != '.') joined += '.';
-  Toast(joined + " " + text, error || toastError_);
+  Notice joined = toastNotice_;
+  std::string& detail = joined.detail;
+  if (!detail.empty() && detail.back() != '.') detail += '.';
+  detail += (detail.empty() ? "" : " ") + text;
+  joined.error = joined.error || error;
+  Notify(std::move(joined), true);
+}
+
+void App::PreviewToast() {
+  previewing_ = true;
+  Notify({NoticeKind::ClipSaving, "Guardando clip", "Los últimos " + ui::FormatClipLength(config_.clipSeconds)});
+  previewing_ = false;
+  // El archivo «tarda» lo que suele tardar uno de verdad.
+  SetTimer(hwnd_, kTimerPreview, 900, nullptr);
+}
+
+void App::AnnounceGame() {
+  if (!game_ || !GameActive() || game_->processId == announcedGamePid_) return;
+  if (!config_.notifyGame || !config_.replayEnabled || !pipeline_.Running()) return;
+  // Navegadores y reproductores a pantalla completa no son juegos.
+  std::string exe = game_->exeName;
+  for (auto& ch : exe) ch = char(tolower(static_cast<unsigned char>(ch)));
+  static const char* kMediaApps[] = {"chrome",   "msedge",       "firefox",     "opera",  "brave",   "vivaldi",
+                                     "iexplore", "vlc",          "mpc-hc",      "mpc-hc64", "mpc-be", "mpc-be64",
+                                     "mpv",      "potplayermini", "potplayermini64", "wmplayer", "kodi", "spotify",
+                                     "discord",  "powerpnt",     "netflix",     "obs64"};
+  announcedGamePid_ = game_->processId;
+  for (const char* app : kMediaApps)
+    if (exe == app) return;
+  const std::string& key = config_.hotkeys.saveClip;
+  Notify({NoticeKind::Game, "Replay listo en " + game_->exeName,
+          (key.empty() ? std::string("Guarda") : key + " guarda") + " los últimos " +
+              ui::FormatClipLength(config_.clipSeconds)});
+}
+
+void App::CheckUpdatesQuietly() {
+  const ULONGLONG now = GetTickCount64();
+  const UpdateStatus status = updater_.Status();
+  if (quietCheckPending_) {
+    if (status.state == UpdateStatus::State::Checking) return;
+    quietCheckPending_ = false;
+    // Lo que encuentra el botón de Ajustes ya se ve allí: solo se avisa de
+    // lo que encontró la comprobación automática.
+    if (status.state == UpdateStatus::State::Available) foundVersion_ = status.latest;
+  }
+  // Una versión nueva se avisa una vez, y no en mitad de una partida: espera
+  // a que no haya juego delante ni grabación.
+  if (!foundVersion_.empty() && foundVersion_ != announcedVersion_) {
+    if (status.state != UpdateStatus::State::Available) {
+      foundVersion_.clear(); // ya se está descargando o instalando desde Ajustes
+      return;
+    }
+    if (GameActive() || pipeline_.Recording()) return;
+    announcedVersion_ = foundVersion_;
+    Notify({NoticeKind::Update, "Versión nueva: " + status.latest,
+            status.portable || status.unverified ? "Descárgala desde Ajustes > General > Actualizaciones"
+                            : "Instálala desde Ajustes > General > Actualizaciones. Tus ajustes se conservan"});
+    return;
+  }
+  // Sin avisos no hay a quién contárselo: tampoco se consulta GitHub.
+  if (!config_.showNotifications || !config_.notifyUpdates || now < nextUpdateCheck_) return;
+  nextUpdateCheck_ = now + 12ull * 60 * 60 * 1000;
+  // Lo que el usuario ya está haciendo en Ajustes manda.
+  if (status.state != UpdateStatus::State::Idle && status.state != UpdateStatus::State::UpToDate &&
+      status.state != UpdateStatus::State::Error)
+    return;
+  updater_.Check(true);
+  quietCheckPending_ = true;
 }
 
 void App::SyncModels() {
@@ -1383,10 +1508,23 @@ void App::RenderOverlays() {
       toast_.Hide();
     } else {
       float remaining = float(toastUntil_ - now);
-      float alpha = remaining < 400 ? remaining / 400.0f : 1.0f;
+      ToastFrame frame;
+      frame.notice = &toastNotice_;
+      frame.age = float(now - toastShownAt_) / 1000.0f;
+      frame.phaseAge = float(now - toastPhaseAt_) / 1000.0f;
+      frame.life = remaining / float(toastTotalMs_);
+      frame.fade = remaining < 400 ? remaining / 400.0f : 1.0f;
+      frame.fromRight = config_.toastPosition == "top-right" || config_.toastPosition == "bottom-right";
+      frame.fromBottom = config_.toastPosition == "bottom-right" || config_.toastPosition == "bottom-left";
+      float needed = 0;
       inFrame_ = true;
-      toast_.Render([&] { DrawToast(toast_, config_, toastText_, toastError_, alpha); });
+      toast_.Render([&] { needed = DrawToast(toast_, config_, frame); });
       inFrame_ = false;
+      // El alto estimado por letras no era el bueno: se recoloca con el medido.
+      if (needed > 0 && std::fabs(needed - float(toast_.Height())) > 1.5f && int(needed) != toastPlacedHeight_) {
+        toastPlacedHeight_ = int(needed);
+        PlaceToast(needed);
+      }
     }
   }
   RunDeferred();
@@ -1661,9 +1799,11 @@ void App::RenderApp() {
   // El tema no espera a Aplicar: se guarda al elegirlo y lo usan enseguida el
   // panel (Alt+Z) y los avisos, no solo esta ventana. Tampoco cuenta como
   // cambio sin aplicar.
-  if (s.config.theme != config_.theme || s.config.themeMotion != config_.themeMotion) {
+  if (s.config.theme != config_.theme || s.config.themeMotion != config_.themeMotion ||
+      s.config.themeStyle != config_.themeStyle) {
     config_.theme = s.base.theme = s.config.theme;
     config_.themeMotion = s.base.themeMotion = s.config.themeMotion;
+    config_.themeStyle = s.base.themeStyle = s.config.themeStyle;
     SaveConfig(config_);
     SyncModels();
   }
@@ -1880,6 +2020,15 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (wp == kTimerHealth && restartPending_ && !pipeline_.Recording())
       UpdatePipeline(std::exchange(restartPending_, false));
     if (wp == kTimerHealth) InstallPendingUpdate();
+    if (wp == kTimerHealth) CheckUpdatesQuietly();
+    if (wp == kTimerPreview) {
+      KillTimer(hwnd_, kTimerPreview);
+      previewing_ = true;
+      Notify({NoticeKind::Clip, "Clip guardado", "Así se verá cuando guardes un clip"});
+      previewing_ = false;
+      if (config_.soundOnSave) PlayCue(Cue::Saved, config_.saveSound);
+      return 0;
+    }
     // Ajustes > Replay > Detener la grabación tras: se para sola y se guarda.
     if (wp == kTimerHealth && config_.recordLimitMinutes > 0 && pipeline_.Recording() &&
         pipeline_.Stats().recordSeconds >= double(config_.recordLimitMinutes) * 60.0) {
@@ -1902,7 +2051,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       pipeline_.Stop();
       restartPending_ = false;
       if (wasRecording) {
-        Toast("La ventana capturada se cerró; la grabación se guardó");
+        Notify({NoticeKind::RecordingSaved, "Grabación guardada", "La ventana capturada se cerró: " + FileNameOf(path)});
         OnRecordingStopped(path, stoppedAt);
       }
       UpdatePipeline();
@@ -1912,27 +2061,44 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_NOTIFY: {
     std::unique_ptr<std::string> text(reinterpret_cast<std::string*>(lp));
     bool error = wp != 0;
-    std::string message = *text;
+    const std::string& message = *text;
+    Notice notice = MakeNotice(message, error);
+    // El resultado de un «Guardando clip»: cuál era (largo o corto, cuánto),
+    // por el nombre del archivo que trae el mensaje.
+    std::pair<int, bool> clip{config_.clipSeconds, false};
+    for (const char* prefix : {"Clip guardado: ", "No se pudo guardar el clip: "}) {
+      if (!StartsWith(message, prefix)) continue;
+      auto it = pendingClips_.find(message.substr(strlen(prefix)));
+      if (it != pendingClips_.end()) {
+        clip = it->second;
+        pendingClips_.erase(it);
+      }
+    }
     if (!error && (StartsWith(message, "Clip guardado") || StartsWith(message, "Captura guardada") ||
                    StartsWith(message, "Recorte guardado") || StartsWith(message, "Unión guardada") ||
                    StartsWith(message, "Cámara lenta guardada") || StartsWith(message, "Fotograma guardado") ||
                    StartsWith(message, "Dividido en dos"))) {
       if (config_.soundOnSave && (StartsWith(message, "Clip") || StartsWith(message, "Captura")))
         PlayCue(Cue::Saved, config_.saveSound);
-      // Ajustes > Avisos > Copiar el clip al guardarlo: listo para Ctrl+V en Discord.
-      if (config_.copyClipOnSave && StartsWith(message, "Clip guardado: ")) {
+      if (StartsWith(message, "Clip guardado: ")) {
         const std::string name = message.substr(strlen("Clip guardado: "));
-        auto it = std::find_if(recentNames_.rbegin(), recentNames_.rend(),
-                               [&](const std::string& p) { return FileNameOf(p) == name; });
-        if (it != recentNames_.rend() && CopyFileToClipboard(hwnd_, *it)) message += ". Copiado: pégalo con Ctrl+V";
+        if (clip.second) notice.title = "Clip corto guardado";
+        notice.detail = name + " (" + ui::FormatClipLength(clip.first) + ")";
+        // Ajustes > Avisos > Copiar el clip al guardarlo: listo para Ctrl+V en Discord.
+        if (config_.copyClipOnSave) {
+          auto it = std::find_if(recentNames_.rbegin(), recentNames_.rend(),
+                                 [&](const std::string& p) { return FileNameOf(p) == name; });
+          if (it != recentNames_.rend() && CopyFileToClipboard(hwnd_, *it))
+            notice.detail += ". Copiado: pégalo con Ctrl+V";
+        }
       }
       std::string note = LowDiskNote();
       if (!note.empty()) {
-        message += note;
-        error = true; // se ve aunque los avisos estén apagados
+        notice.detail += note;
+        notice.warning = true; // se ve aunque los avisos estén apagados
       }
     }
-    Toast(message, error);
+    Notify(std::move(notice));
     if (menu_.Visible()) RefreshPanelClips();
     if (appWindow_.Visible()) RescanLibrary();
     EnforceStorageLimit(); // algo nuevo en la carpeta
