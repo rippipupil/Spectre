@@ -93,8 +93,19 @@ private:
   void RemoveTrayIcon();
   void ShowTrayMenu();
   void RenderOverlays();
+  // Dónde se mueve el panel: el monitor (o su área de trabajo), el ancho del
+  // panel y la separación de los bordes, en píxeles.
+  struct MenuArea {
+    RECT area{};
+    int width = 0;
+    int margin = 0;
+  };
+  MenuArea MenuPlacement() const;
   RECT MenuRect() const;
   void PlaceMenu(bool activate);
+  // Arrastre del panel: la ventana sigue al cursor; al soltar se guarda la posición.
+  void UpdateMenuDrag();
+  void EndMenuDrag();
   // Si el panel coge el foco al abrirse (escritorio, pantalla completa
   // exclusiva, juego que encierra el cursor en parte del monitor) o no (juego
   // a pantalla completa con el cursor libre, aunque esté escondido: el teclado
@@ -178,6 +189,10 @@ private:
   bool mouseWasDown_ = false;     // sondeo del clic fuera del panel
   RECT menuHitScreen_{};          // zona del panel que recibe clics, en pantalla
   bool menuHitValid_ = false;
+  bool menuDragActive_ = false;   // arrastrando el panel (UpdateMenuDrag)
+  POINT menuDragFrom_{};          // cursor al pulsar, en pantalla
+  LONG menuDragLeft_ = 0;         // borde izquierdo de la ventana al pulsar
+  LONG menuDragTop_ = 0;          // borde superior del panel al pulsar, en pantalla
 
   // Ventana de Spectre
   std::shared_ptr<Library> library_ = std::make_shared<Library>(); // también la usa el hilo del límite de espacio
