@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace spectre {
@@ -124,6 +125,7 @@ private:
   MediaWorker worker_;
   std::unordered_map<std::string, Thumb> thumbs_;
   std::unordered_map<std::string, int64_t> durationsAsked_; // ruta -> fecha del archivo medido
+  std::unordered_set<std::string> durationFailed_;          // no se pudo medir (archivo dañado)
   unsigned long long frame_ = 0;
   unsigned long long openedAt_ = 0;
   Player player_;

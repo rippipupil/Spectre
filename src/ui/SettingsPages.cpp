@@ -801,10 +801,35 @@ void PageStorage(SettingsModel& m, const SettingsActions& a) {
       options.emplace_back(c.deleteAfterDays, own.c_str());
     m.dirty |= ChoiceCombo<int>("##age", c.deleteAfterDays, options);
   }
-  if (c.deleteAfterDays > 0)
+  if (c.deleteAfterDays > 0) {
     Warning("Al aplicar, al abrir Spectre y cada vez que guardes algo, se borran para siempre los clips, grabaciones "
             "y capturas de Spectre más antiguos que eso, y te avisa. Los favoritos y los archivos renombrados o de "
             "otros programas nunca se borran.");
+    // Lo que se iría al pulsar Aplicar, con lo que hay ahora en la carpeta: así
+    // elegir «7 días» por error no se lleva meses de clips sin verlo antes.
+    if (c.deleteAfterDays != m.base.deleteAfterDays && s.valid && c.outputDir == m.base.outputDir) {
+      FILETIME nowFt;
+      GetSystemTimeAsFileTime(&nowFt);
+      const int64_t now = int64_t((uint64_t(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime);
+      const int64_t maxAge = int64_t(c.deleteAfterDays) * 24 * 3600 * 10000000;
+      int count = 0;
+      uint64_t bytes = 0;
+      for (const auto& [modified, size] : s.deletable)
+        if (now - modified > maxAge) {
+          ++count;
+          bytes += size;
+        }
+      Gap(4);
+      if (count > 0) {
+        std::string text = "Al aplicar se borrarán para siempre " + std::to_string(count) +
+                           (count == 1 ? " archivo (" : " archivos (") + FormatBytes(bytes) +
+                           "). Marca con la estrella lo que quieras conservar antes de aplicar.";
+        Warning(text.c_str());
+      } else {
+        Help("Ahora no hay nada tan antiguo: al aplicar no se borra nada.");
+      }
+    }
+  }
 
   Heading("CAPTURAS DE PANTALLA");
   FieldLabel("Formato");

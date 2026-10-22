@@ -484,6 +484,7 @@ StorageInfo SummarizeStorage(const std::vector<MediaItem>& items, const std::str
     }
     info.usedBytes += item.size;
     if (item.favorite) info.favoriteBytes += item.size;
+    else info.deletable.emplace_back(item.modified, item.size);
     if (item.Video()) ++info.videos;
     else ++info.screenshots;
   }

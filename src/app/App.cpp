@@ -6,6 +6,7 @@
 
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
+#include "core/ThreadPolicy.h"
 #include "ui/Widgets.h"
 
 #include <shellscalingapi.h>
@@ -596,13 +597,16 @@ std::filesystem::path FreePath(const std::filesystem::path& dir, const std::wstr
   return out;
 }
 
-// Ediciones de la biblioteca (unir, cámara lenta): en un hilo de prioridad baja,
-// como el recorte. work devuelve la ruta escrita o el error; al acabar, aviso.
+// Ediciones de la biblioteca (unir, cámara lenta): en un hilo en modo de fondo,
+// como la escritura de clips: unir grabaciones largas lee y escribe GB, y el
+// juego va antes en el disco. work devuelve la ruta escrita o el error; al
+// acabar, aviso.
 void RunEdit(HWND hwnd, std::string doneText, std::function<bool(std::string* out, std::string* error)> work) {
   auto pending = std::make_shared<PendingWrite>();
   std::thread([hwnd, doneText = std::move(doneText), work = std::move(work), pending] {
     InstallThreadCrashHandler();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    BackgroundMode background;
     std::string out, error;
     bool ok = false;
     try {

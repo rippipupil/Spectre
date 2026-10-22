@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace spectre {
@@ -49,6 +50,9 @@ struct StorageInfo {
   uint64_t totalBytes = 0;
   size_t videos = 0, screenshots = 0, others = 0;
   bool valid = false;
+  // Fecha (FILETIME UTC) y tamaño de lo que el borrado por antigüedad podría
+  // quitar (de Spectre y sin estrella): Ajustes dice cuánto se iría antes de aplicar.
+  std::vector<std::pair<int64_t, uint64_t>> deletable;
 };
 
 // Una pasada del límite de espacio.

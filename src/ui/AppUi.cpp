@@ -153,6 +153,7 @@ void AppUi::OnClosed() {
   worker_.Stop(false); // una miniatura lenta (carpeta de red) no retrasa el cierre
   thumbs_.clear();
   durationsAsked_.clear();
+  durationFailed_.clear();
   player_.Close();
   playerPath_.clear();
   playerFailed_ = false;
@@ -231,7 +232,10 @@ void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
       break;
     }
     case MediaWorker::Job::Duration:
-      if (!r.ok) break;
+      if (!r.ok) {
+        durationFailed_.insert(r.path);
+        break;
+      }
       for (auto& item : m.items)
         if (item.path == r.path) {
           item.duration = r.duration;
@@ -266,6 +270,7 @@ void AppUi::RequestDuration(const MediaItem& item) {
   auto it = durationsAsked_.find(item.path);
   if (it != durationsAsked_.end() && it->second == item.modified) return;
   durationsAsked_[item.path] = item.modified;
+  durationFailed_.erase(item.path);
   worker_.Request(MediaWorker::Job::Duration, item.path);
 }
 
@@ -539,7 +544,8 @@ int64_t LocalTicks(int64_t modified) {
   return int64_t((uint64_t(local.dwHighDateTime) << 32) | local.dwLowDateTime);
 }
 
-LibraryStats ComputeStats(const std::vector<MediaItem>& items) {
+// unmeasurable: vídeos cuya duración no se pudo leer; no cuentan como pendientes.
+LibraryStats ComputeStats(const std::vector<MediaItem>& items, const std::unordered_set<std::string>& unmeasurable) {
   LibraryStats st;
   std::unordered_map<std::string, int> games;
   std::unordered_map<int64_t, int> days; // día local -> clips
@@ -556,13 +562,14 @@ LibraryStats ComputeStats(const std::vector<MediaItem>& items) {
       ++st.screenshots;
       continue;
     }
+    // Recortes, uniones, cámara lenta y copias repiten jugadas que ya cuentan.
+    if (item.kind != MediaKind::Clip && item.kind != MediaKind::Recording) continue;
     if (item.duration > 0) st.seconds += item.duration;
-    else ++st.unmeasured;
+    else if (!unmeasurable.count(item.path)) ++st.unmeasured;
     if (item.kind == MediaKind::Recording) {
       ++st.recordings;
       continue;
     }
-    if (item.kind != MediaKind::Clip) continue; // recortes, uniones y copias no son jugadas nuevas
     ++st.clips;
     ++days[day];
     ++hours[(local / kTicksPerHour) % 24];
@@ -641,7 +648,7 @@ void AppUi::StatsSection(const AppModel& m) {
     Help("Cuando guardes clips verás aquí cuánto has grabado, tu juego más clipeado y tu mejor racha.");
     return;
   }
-  const LibraryStats st = ComputeStats(m.items);
+  const LibraryStats st = ComputeStats(m.items, durationFailed_);
   const auto plural = [](int n, const char* one, const char* many) {
     return std::to_string(n) + " " + (n == 1 ? one : many);
   };
@@ -682,11 +689,13 @@ void AppUi::StatsSection(const AppModel& m) {
 }
 
 void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
-  // Las estadísticas suman la duración de todos los vídeos: las que faltan se
-  // piden antes que las miniaturas de las tarjetas, que así van delante en la
-  // cola (lo último pedido sale primero). Cada una se mide una vez y se guarda.
+  // Las estadísticas suman la duración de los clips y las grabaciones: las que
+  // faltan se piden antes que las miniaturas de las tarjetas, que así van
+  // delante en la cola (lo último pedido sale primero). Cada una se mide una
+  // vez y se guarda.
   for (const auto& item : m.items)
-    if (item.Video() && item.duration <= 0) RequestDuration(item);
+    if ((item.kind == MediaKind::Clip || item.kind == MediaKind::Recording) && item.duration <= 0)
+      RequestDuration(item);
   const Palette& p = Colors();
   const Config& c = m.config;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(32), Px(26)));
