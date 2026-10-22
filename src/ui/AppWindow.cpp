@@ -236,6 +236,7 @@ bool AppWindow::CreateGraphics() {
 }
 
 void AppWindow::DestroyGraphics() {
+  mipSampler_.Reset();
   rtv_.Reset();
   swapChain_.Reset();
   if (context_) {
@@ -267,10 +268,20 @@ bool AppWindow::ResizeBuffers() {
 std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int width, int height, bool mipmaps) {
   if (!device_ || !bgra || width <= 0 || height <= 0) return nullptr;
   UINT support = 0;
-  if (mipmaps && SUCCEEDED(device_->CheckFormatSupport(DXGI_FORMAT_B8G8R8A8_UNORM, &support)) &&
+  if (mipmaps && !mipSampler_) {
+    // Como el de ImGui (bilineal, sin repetir) pero con todos los niveles: el
+    // de ImGui tiene MaxLOD = 0 y solo leería el nivel 0.
+    D3D11_SAMPLER_DESC sd{};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    device_->CreateSamplerState(&sd, &mipSampler_);
+  }
+  if (mipmaps && mipSampler_ && SUCCEEDED(device_->CheckFormatSupport(DXGI_FORMAT_B8G8R8A8_UNORM, &support)) &&
       (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN)) {
     // Cadena completa de mipmaps generada en la GPU: el visor la muestra
-    // reducida sin dientes (el muestreador de ImGui ya filtra entre niveles).
+    // reducida sin dientes.
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = UINT(width);
     desc.Height = UINT(height);
@@ -286,6 +297,7 @@ std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int wid
         SUCCEEDED(device_->CreateShaderResourceView(tex->texture.Get(), nullptr, &tex->srv))) {
       context_->UpdateSubresource(tex->texture.Get(), 0, nullptr, bgra, UINT(width) * 4, 0);
       context_->GenerateMips(tex->srv.Get());
+      tex->sampler = mipSampler_;
       tex->width = width;
       tex->height = height;
       return tex;
@@ -308,6 +320,22 @@ std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int wid
   tex->width = width;
   tex->height = height;
   return tex;
+}
+
+void AddTextureImage(ImDrawList* dl, const UiTexture& tex, ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1, ImU32 tint) {
+  if (tex.sampler) {
+    // El backend de ImGui pone su muestreador al empezar y no lo cambia entre
+    // imágenes: se sustituye solo para esta y luego se restaura su estado.
+    dl->AddCallback(
+        [](const ImDrawList*, const ImDrawCmd* cmd) {
+          auto* rs = static_cast<ImGui_ImplDX11_RenderState*>(ImGui::GetPlatformIO().Renderer_RenderState);
+          auto* sampler = static_cast<ID3D11SamplerState*>(cmd->UserCallbackData);
+          rs->DeviceContext->PSSetSamplers(0, 1, &sampler);
+        },
+        tex.sampler.Get());
+  }
+  dl->AddImage(ImTextureID(tex.Id()), p0, p1, uv0, uv1, tint);
+  if (tex.sampler) dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 }
 
 std::shared_ptr<UiTexture> AppWindow::CreateRenderTexture(int width, int height) {

@@ -261,7 +261,7 @@ void OverlayWindow::SetupImGui() {
 
   // Solo los rangos por defecto (Latin-1): los iconos se dibujan con líneas,
   // así que no hace falta fusionar Segoe UI Symbol.
-  ui::LoadFonts(scale_, &fonts_);
+  ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu);
   fontMemoryFreed_ = false;
 
   ApplyBaseStyle(scale_);

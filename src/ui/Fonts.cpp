@@ -65,7 +65,7 @@ ImFont* FontSet::ForSize(ImFont* font, float size) const {
   return best;
 }
 
-void LoadFonts(float scale, FontSet* out) {
+void LoadFonts(float scale, FontSet* out, bool allSizes) {
   ImFontAtlas* atlas = ImGui::GetIO().Fonts;
   atlas->Clear();
   *out = FontSet{};
@@ -77,18 +77,22 @@ void LoadFonts(float scale, FontSet* out) {
   std::vector<unsigned char> regular = ReadFont(L"segoeui.ttf");
   std::vector<unsigned char> bold = ReadFont(L"segoeuib.ttf");
   for (int i = 0; i < FontSet::kCount; ++i) {
+    if (!allSizes && i != kMainIndex) continue;
     out->regular[i] = Add(regular, kSizes[i] * scale);
     out->bold[i] = Add(bold, kSizes[i] * scale);
   }
-  if (!out->regular[0]) {
+  if (!out->regular[kMainIndex]) {
     // Sin Segoe UI (Windows recortado): la fuente de ImGui a todos los tamaños.
     ImFontConfig cfg;
     cfg.SizePixels = 13.0f * scale;
     ImFont* fallback = atlas->AddFontDefault(&cfg);
     for (int i = 0; i < FontSet::kCount; ++i) out->regular[i] = fallback;
   }
-  for (int i = 0; i < FontSet::kCount; ++i)
-    if (!out->bold[i]) out->bold[i] = out->regular[i];
+  // Los tamaños que no se cargaron usan el del texto normal (escalado).
+  for (int i = 0; i < FontSet::kCount; ++i) {
+    if (!out->regular[i]) out->regular[i] = out->regular[kMainIndex];
+    if (!out->bold[i]) out->bold[i] = out->bold[kMainIndex] ? out->bold[kMainIndex] : out->regular[i];
+  }
   ImGui::GetIO().FontDefault = out->Main();
   atlas->Build();
   // Ya rasterizadas: los dos TTF (unos 2 MB) no hacen falta.

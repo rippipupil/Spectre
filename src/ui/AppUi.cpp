@@ -88,12 +88,12 @@ void DrawImage(ImDrawList* dl, const UiTexture& tex, ImVec2 a, ImVec2 b, bool co
     float k = std::max(aw / tw, ah / th);
     float uw = aw / (tw * k), uh = ah / (th * k);
     ImVec2 uv0((1.0f - uw) * 0.5f, (1.0f - uh) * 0.5f), uv1(uv0.x + uw, uv0.y + uh);
-    dl->AddImage(ImTextureID(tex.Id()), a, b, uv0, uv1, tint);
+    AddTextureImage(dl, tex, a, b, uv0, uv1, tint);
   } else {
     float k = std::min(aw / tw, ah / th);
     float w = tw * k, h = th * k;
     ImVec2 p0(a.x + (aw - w) * 0.5f, a.y + (ah - h) * 0.5f);
-    dl->AddImage(ImTextureID(tex.Id()), p0, ImVec2(p0.x + w, p0.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
+    AddTextureImage(dl, tex, p0, ImVec2(p0.x + w, p0.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
   }
 }
 
