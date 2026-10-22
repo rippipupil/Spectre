@@ -317,6 +317,8 @@ void Updater::Check(bool background) {
       // Descarga a mano (portable o sin huella): el archivo directamente, no
       // la página del repositorio.
       shared->status.manualUrl = shared->status.portable && !portableUrl.empty() ? portableUrl : url;
+      // Se abre con ShellExecute: solo https, como las descargas de HttpGet.
+      if (shared->status.manualUrl.rfind("https://", 0) != 0) shared->status.manualUrl.clear();
       shared->status.latest = latest;
       shared->status.sizeBytes = size;
       shared->status.state = newer ? UpdateStatus::State::Available : UpdateStatus::State::UpToDate;

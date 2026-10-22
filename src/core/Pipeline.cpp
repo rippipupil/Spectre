@@ -511,7 +511,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
     Log("Clip %s: %s", ok ? "guardado" : "FALLÓ", path.c_str());
     if (notify) {
       auto name = std::filesystem::path(Widen(path)).filename();
-      notify(ok ? "Clip guardado: " + Narrow(name.wstring()) : "No se pudo guardar el clip", !ok);
+      notify((ok ? "Clip guardado: " : "No se pudo guardar el clip: ") + Narrow(name.wstring()), !ok);
     }
   }).detach();
 }

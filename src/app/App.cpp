@@ -430,13 +430,14 @@ void App::SaveClip(bool shortClip) {
     if (ago >= 0 && ago <= double(seconds)) tail.push_back(ago);
   }
   library_->SetTailMarkers(path, std::move(tail));
-  // «Guardando clip» al instante: el archivo tarda lo que tarda el audio en
-  // llegar y en escribirse. El resultado (WM_SPECTRE_NOTIFY) lo cambia por
-  // «Clip guardado» en la misma tarjeta.
-  pendingClips_.emplace_back(seconds, shortClip);
+  // El clip acaba al pedirlo: antes que el aviso, que puede tener que crear
+  // su ventana. «Guardando clip» sale enseguida; el resultado
+  // (WM_SPECTRE_NOTIFY, siempre después) lo cambia por «Clip guardado» en la
+  // misma tarjeta.
+  pendingClips_[FileNameOf(path)] = {seconds, shortClip};
+  pipeline_.SaveClip(path, double(seconds));
   Notify({NoticeKind::ClipSaving, shortClip ? "Guardando clip corto" : "Guardando clip",
           "Los últimos " + ui::FormatClipLength(seconds)});
-  pipeline_.SaveClip(path, double(seconds));
 }
 
 void App::OnRecordingStopped(const std::string& path, int64_t stoppedAt) {
@@ -1288,7 +1289,7 @@ void App::Notify(Notice notice, bool continuation) {
     return;
   }
   // Los errores y lo de poco disco se ven aunque los avisos estén apagados.
-  if (!notice.error && !notice.warning && !config_.showNotifications) return;
+  if (!notice.error && !notice.warning && !config_.showNotifications && !previewing_) return;
   const ULONGLONG now = GetTickCount64();
   const bool visible = toast_.Visible() && now < toastUntil_;
   // «Guardando clip» pasa a «Clip guardado» (o al error) en la misma tarjeta:
@@ -1363,7 +1364,9 @@ void App::ToastAfter(const std::string& text, bool error) {
 }
 
 void App::PreviewToast() {
+  previewing_ = true;
   Notify({NoticeKind::ClipSaving, "Guardando clip", "Los últimos " + ui::FormatClipLength(config_.clipSeconds)});
+  previewing_ = false;
   // El archivo «tarda» lo que suele tardar uno de verdad.
   SetTimer(hwnd_, kTimerPreview, 900, nullptr);
 }
@@ -1411,7 +1414,8 @@ void App::CheckUpdatesQuietly() {
                             : "Instálala desde Ajustes > General > Actualizaciones. Tus ajustes se conservan"});
     return;
   }
-  if (!config_.notifyUpdates || now < nextUpdateCheck_) return;
+  // Sin avisos no hay a quién contárselo: tampoco se consulta GitHub.
+  if (!config_.showNotifications || !config_.notifyUpdates || now < nextUpdateCheck_) return;
   nextUpdateCheck_ = now + 12ull * 60 * 60 * 1000;
   // Lo que el usuario ya está haciendo en Ajustes manda.
   if (status.state != UpdateStatus::State::Idle && status.state != UpdateStatus::State::UpToDate &&
@@ -2019,7 +2023,9 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (wp == kTimerHealth) CheckUpdatesQuietly();
     if (wp == kTimerPreview) {
       KillTimer(hwnd_, kTimerPreview);
+      previewing_ = true;
       Notify({NoticeKind::Clip, "Clip guardado", "Así se verá cuando guardes un clip"});
+      previewing_ = false;
       if (config_.soundOnSave) PlayCue(Cue::Saved, config_.saveSound);
       return 0;
     }
@@ -2057,13 +2063,16 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     bool error = wp != 0;
     const std::string& message = *text;
     Notice notice = MakeNotice(message, error);
-    // El resultado de un «Guardando clip»: cuál era (largo o corto, cuánto).
-    const bool clipResult = StartsWith(message, "Clip guardado") || message == "No se pudo guardar el clip" ||
-                            message == "El replay no está activo";
+    // El resultado de un «Guardando clip»: cuál era (largo o corto, cuánto),
+    // por el nombre del archivo que trae el mensaje.
     std::pair<int, bool> clip{config_.clipSeconds, false};
-    if (clipResult && !pendingClips_.empty()) {
-      clip = pendingClips_.front();
-      pendingClips_.pop_front();
+    for (const char* prefix : {"Clip guardado: ", "No se pudo guardar el clip: "}) {
+      if (!StartsWith(message, prefix)) continue;
+      auto it = pendingClips_.find(message.substr(strlen(prefix)));
+      if (it != pendingClips_.end()) {
+        clip = it->second;
+        pendingClips_.erase(it);
+      }
     }
     if (!error && (StartsWith(message, "Clip guardado") || StartsWith(message, "Captura guardada") ||
                    StartsWith(message, "Recorte guardado") || StartsWith(message, "Unión guardada") ||

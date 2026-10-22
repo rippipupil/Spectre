@@ -486,10 +486,15 @@ float DrawToast(OverlayWindow& w, const Config& config, const ToastFrame& f) {
   const float ts = Px(kBody), ds = Px(kSmall);
   std::string title = TitleText(st, n), detail = n.detail;
   std::string prompt;
+  // Terminal: el alto se mide con todo el texto, no con lo ya escrito (si
+  // no, la ventana se encoge y crece mientras se escribe).
+  std::string fullTitle, fullDetail;
   if (st.toast == ToastLook::Terminal) {
     // Se escribe solo: el título a 45 letras por segundo y luego el detalle.
     prompt = "> ";
-    if (saving) title += std::string("...").substr(0, size_t(std::fmod(age * 3.0f, 4.0f)));
+    fullTitle = title + (saving ? "..." : saved ? "  [OK]" : "");
+    fullDetail = detail;
+    if (saving) title += motion ? std::string("...").substr(0, size_t(std::fmod(age * 3.0f, 4.0f))) : "...";
     if (saved) title += "  [OK]";
     const size_t titleLen = Utf8Length(title);
     const float titleTime = float(titleLen) / 45.0f;
@@ -557,6 +562,16 @@ float DrawToast(OverlayWindow& w, const Config& config, const ToastFrame& f) {
     dl->AddRectFilled(ImVec2(x0, y + Px(4)), ImVec2(x0 + len, y + Px(5)), C(tone));
   }
 
+  float textBottom = y;
+  if (st.toast == ToastLook::Terminal) {
+    textBottom = a.y + Px(l.top);
+    const float tw = wrap - TextSize(titleFont, ts, prompt.c_str()).x;
+    textBottom += titleFont->CalcTextSizeA(ts, FLT_MAX, tw, fullTitle.empty() ? " " : fullTitle.c_str()).y;
+    if (!fullDetail.empty())
+      textBottom += (fullTitle.empty() ? 0.0f : Px(kLineGap)) +
+                    detailFont->CalcTextSizeA(ds, FLT_MAX, wrap, fullDetail.c_str()).y;
+  }
+
   // ------------------------------------------------- tiempo que le queda
   const float life = std::clamp(f.life, 0.0f, 1.0f);
   switch (st.toast) {
@@ -587,7 +602,7 @@ float DrawToast(OverlayWindow& w, const Config& config, const ToastFrame& f) {
   ImGui::PopStyleVar(3);
   // Alto que pide el contenido, sin el desplazamiento de la entrada.
   const float iconBottom = l.icon ? Px(l.top) + Px(st.toast == ToastLook::Card ? kTile : kIcon) : 0.0f;
-  return std::ceil(std::max({y - a.y + Px(kPadY) + (l.header ? Px(2) : 0.0f), iconBottom + Px(kPadY), Px(58)}));
+  return std::ceil(std::max({textBottom - a.y + Px(kPadY) + (l.header ? Px(2) : 0.0f), iconBottom + Px(kPadY), Px(58)}));
 }
 
 } // namespace spectre

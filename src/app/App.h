@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -199,7 +200,10 @@ private:
   ULONGLONG toastTotalMs_ = 1;
   int toastPlacedHeight_ = 0;   // alto medido con el que ya se recolocó
   // Clips pedidos que aún se escriben: duración y si es el corto, para el aviso.
-  std::deque<std::pair<int, bool>> pendingClips_;
+  // Clips que se están escribiendo, por nombre de archivo: duración y si es
+  // el corto. Pueden terminar en otro orden que el de las teclas.
+  std::unordered_map<std::string, std::pair<int, bool>> pendingClips_;
+  bool previewing_ = false; // «Probar aviso»: se ve aunque los avisos estén apagados
   DWORD announcedGamePid_ = 0;  // juego del último «Replay listo»
   ULONGLONG nextUpdateCheck_ = 0;
   bool quietCheckPending_ = false;
