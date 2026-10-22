@@ -203,4 +203,25 @@ void TakeScreenshot(ScreenshotRequest request, std::function<void(bool ok, const
   }).detach();
 }
 
+void SaveImageAsync(std::string path, bool jpeg, std::vector<uint8_t> bgr, unsigned width, unsigned height,
+                    std::function<void(bool ok, const std::string& text)> done) {
+  auto pending = std::make_shared<PendingWrite>();
+  std::thread([path = std::move(path), jpeg, bgr = std::move(bgr), width, height, done = std::move(done), pending] {
+    InstallThreadCrashHandler();
+    HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED); // WIC
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::string error;
+    bool ok = false;
+    try {
+      ok = Encode(Widen(path), jpeg, bgr, width, height, &error);
+      if (ok) Log("Fotograma guardado: %s (%ux%u)", path.c_str(), width, height);
+    } catch (const std::exception& e) {
+      error = std::string("No se pudo guardar el fotograma: ") + e.what();
+      Log("Fotograma: excepción: %s", e.what());
+    }
+    if (done) done(ok, ok ? path : error);
+    if (SUCCEEDED(co)) CoUninitialize();
+  }).detach();
+}
+
 } // namespace spectre

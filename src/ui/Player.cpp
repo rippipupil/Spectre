@@ -227,6 +227,41 @@ std::shared_ptr<UiTexture> Player::Frame(AppWindow& window) {
   return impl_->texture;
 }
 
+bool Player::ReadFrame(std::vector<uint8_t>* bgr, int* width, int* height) const {
+  if (!impl_ || !impl_->texture || !impl_->texture->texture) return false;
+  ID3D11Texture2D* src = impl_->texture->texture.Get();
+  ComPtr<ID3D11Device> device;
+  src->GetDevice(&device);
+  ComPtr<ID3D11DeviceContext> context;
+  device->GetImmediateContext(&context);
+  D3D11_TEXTURE2D_DESC desc{};
+  src->GetDesc(&desc);
+  desc.Usage = D3D11_USAGE_STAGING;
+  desc.BindFlags = 0;
+  desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  desc.MiscFlags = 0;
+  ComPtr<ID3D11Texture2D> staging;
+  if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+  context->CopyResource(staging.Get(), src);
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+  const UINT w = desc.Width, h = desc.Height;
+  bgr->resize(size_t(w) * h * 3);
+  for (UINT y = 0; y < h; ++y) {
+    const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
+    uint8_t* out = bgr->data() + size_t(y) * w * 3;
+    for (UINT x = 0; x < w; ++x) {
+      out[x * 3 + 0] = row[x * 4 + 0];
+      out[x * 3 + 1] = row[x * 4 + 1];
+      out[x * 3 + 2] = row[x * 4 + 2];
+    }
+  }
+  context->Unmap(staging.Get(), 0);
+  *width = int(w);
+  *height = int(h);
+  return true;
+}
+
 int Player::VideoWidth() const { return impl_ ? impl_->width : 0; }
 int Player::VideoHeight() const { return impl_ ? impl_->height : 0; }
 

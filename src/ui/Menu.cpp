@@ -189,9 +189,8 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   Gap(10);
   SectionLabel("DURACIÓN DEL CLIP");
   Gap(2);
-  std::vector<std::pair<int, std::string>> lengths;
-  for (int sec : {15, 30, 60, 120, 300}) lengths.emplace_back(sec, FormatClipLength(sec));
-  if (int v = Segmented("len", lengths, c.clipSeconds); v > 0 && v != c.clipSeconds) a.setClipSeconds(v);
+  if (int v = ClipLengthPicker("len", c.clipSeconds, m.stats.replayFitSeconds); v > 0 && v != c.clipSeconds)
+    a.setClipSeconds(v);
 
   Gap(6);
   {

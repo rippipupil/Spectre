@@ -122,6 +122,10 @@ void ParseMediaName(const std::string& fileName, MediaItem* item) {
   }
   if (item->spectre && item->kind != MediaKind::Screenshot && stem.find("_recorte_") != std::string::npos)
     item->kind = MediaKind::Trim;
+  // Unidos o en cámara lenta desde la biblioteca (app/Edit.h).
+  if (item->spectre && item->kind != MediaKind::Screenshot &&
+      (stem.find("_union_") != std::string::npos || stem.find("_lenta") != std::string::npos))
+    item->kind = MediaKind::Edit;
   if (item->spectre && item->kind != MediaKind::Screenshot && IsExportStem(stem)) item->kind = MediaKind::Export;
   if (item->game == "Escritorio") item->game.clear();
 }
@@ -132,6 +136,7 @@ const char* MediaKindName(MediaKind kind) {
   case MediaKind::Recording: return "Grabación";
   case MediaKind::Trim: return "Recorte";
   case MediaKind::Export: return "Para Discord";
+  case MediaKind::Edit: return "Editado";
   case MediaKind::Screenshot: return "Captura";
   }
   return "";
@@ -365,10 +370,12 @@ bool Library::Recycle(HWND owner, const std::string& path, std::string* error, b
   return true;
 }
 
-LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath) {
+LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath,
+                                  int maxAgeDays) {
   LimitResult r;
   r.limitBytes = limitBytes;
-  if (limitBytes == 0) return r;
+  r.maxAgeDays = maxAgeDays;
+  if (limitBytes == 0 && maxAgeDays <= 0) return r;
   auto items = Scan(folder);
   // Lo de los últimos 2 minutos puede estar escribiéndose todavía y no se toca.
   FILETIME nowFt;
@@ -379,35 +386,55 @@ LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes
   auto kept = [&](const MediaItem& item) {
     return item.favorite || now - item.modified < recent || (!keep.empty() && Key(item.path) == keep);
   };
-  // Solo cuenta lo que lleva el nombre de Spectre: lo renombrado y lo de
-  // otros programas no se puede borrar, y si contara, el tope no bajaría
-  // nunca y se acabaría borrando todo lo demás.
-  for (const auto& item : items) {
-    if (!item.spectre) continue;
-    r.usedBytes += item.size;
-    if (!kept(item)) continue;
-    r.keptBytes += item.size;
-    if (item.favorite) r.favoriteBytes += item.size;
-  }
-  if (r.usedBytes <= limitBytes) return r;
-  // Si lo que no se puede borrar ya pasa del tope, borrar el resto tampoco
-  // bastaría: no se borra nada y App avisa.
-  if (r.keptBytes > limitBytes) {
-    r.blocked = true;
-    return r;
-  }
-  // Del más antiguo al más reciente.
-  for (auto it = items.rbegin(); it != items.rend() && r.usedBytes > limitBytes; ++it) {
-    if (!it->spectre || kept(*it)) continue;
-    if (!DeleteFileW(Widen(it->path).c_str())) continue; // abierto en otro programa
-    r.usedBytes -= it->size;
-    r.freedBytes += it->size;
-    if (r.deleted == 0) r.kind = it->kind;
-    else if (it->kind != r.kind) r.mixed = true;
+  auto remove = [&](const MediaItem& item, const char* why) {
+    if (!DeleteFileW(Widen(item.path).c_str())) return false; // abierto en otro programa
+    r.freedBytes += item.size;
+    if (r.deleted == 0) r.kind = item.kind;
+    else if (item.kind != r.kind) r.mixed = true;
     ++r.deleted;
-    Log("Límite de espacio: borrado %s (%s)", it->name.c_str(), FormatBytes(it->size).c_str());
+    Log("%s: borrado %s (%s)", why, item.name.c_str(), FormatBytes(item.size).c_str());
     std::lock_guard lock(mutex_);
-    meta_.erase(Key(it->path));
+    meta_.erase(Key(item.path));
+    return true;
+  };
+  // Ajustes > Almacenamiento > Borrar lo antiguo: lo de Spectre con más días
+  // que el tope, salvo favoritos y la grabación en curso.
+  std::vector<bool> gone(items.size(), false);
+  if (maxAgeDays > 0) {
+    const int64_t maxAge = int64_t(maxAgeDays) * 24 * 3600 * 10000000;
+    for (size_t i = 0; i < items.size(); ++i) {
+      const MediaItem& item = items[i];
+      if (!item.spectre || kept(item) || now - item.modified <= maxAge) continue;
+      if (remove(item, "Borrado de lo antiguo")) {
+        gone[i] = true;
+        ++r.agedDeleted;
+      }
+    }
+  }
+  if (limitBytes > 0) {
+    // Solo cuenta lo que lleva el nombre de Spectre: lo renombrado y lo de
+    // otros programas no se puede borrar, y si contara, el tope no bajaría
+    // nunca y se acabaría borrando todo lo demás.
+    for (size_t i = 0; i < items.size(); ++i) {
+      const MediaItem& item = items[i];
+      if (!item.spectre || gone[i]) continue;
+      r.usedBytes += item.size;
+      if (!kept(item)) continue;
+      r.keptBytes += item.size;
+      if (item.favorite) r.favoriteBytes += item.size;
+    }
+    // Si lo que no se puede borrar ya pasa del tope, borrar el resto tampoco
+    // bastaría: no se borra nada más y App avisa.
+    if (r.usedBytes > limitBytes && r.keptBytes > limitBytes) {
+      r.blocked = true;
+    } else {
+      // Del más antiguo al más reciente.
+      for (size_t i = items.size(); i-- > 0 && r.usedBytes > limitBytes;) {
+        const MediaItem& item = items[i];
+        if (!item.spectre || gone[i] || kept(item)) continue;
+        if (remove(item, "Límite de espacio")) r.usedBytes -= item.size;
+      }
+    }
   }
   if (r.deleted > 0) {
     std::lock_guard lock(mutex_);
@@ -457,6 +484,7 @@ StorageInfo SummarizeStorage(const std::vector<MediaItem>& items, const std::str
     }
     info.usedBytes += item.size;
     if (item.favorite) info.favoriteBytes += item.size;
+    else info.deletable.emplace_back(item.modified, item.size);
     if (item.Video()) ++info.videos;
     else ++info.screenshots;
   }

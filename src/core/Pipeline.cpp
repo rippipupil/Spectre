@@ -254,21 +254,35 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   return true;
 }
 
-size_t Pipeline::BufferLimit(double seconds) const {
-  if (settings_.maxBufferBytes) return settings_.maxBufferBytes;
+namespace {
+// La cuarta parte de la RAM: tope del replay automático.
+double RamQuarter() {
+  static const double quarter = [] {
+    MEMORYSTATUSEX mem{};
+    mem.dwLength = sizeof(mem);
+    return GlobalMemoryStatusEx(&mem) ? double(mem.ullTotalPhys) / 4.0 : double(1u << 30);
+  }();
+  return quarter;
+}
+} // namespace
+
+double Pipeline::ReplayBytesPerSecond() const {
   // Peor caso: todo el rato al bitrate máximo del preset (en VBR se llega a él
-  // en escenas con mucho movimiento), más los segundos de margen del anillo y
-  // un 10 %. Sin pasar de la cuarta parte de la RAM: con 16 GB caben 5 min en
-  // Alta a 1440p; con poca RAM el clip sale más corto antes que hacer que
-  // Windows mande el juego al archivo de paginación.
+  // en escenas con mucho movimiento), más el audio y un 10 %.
   double kbps = plan_.maxKbps;
   for (size_t i = 1; i < streams_.size(); ++i)
     if (streams_[i].params) kbps += double(streams_[i].params->bit_rate) / 1000.0;
-  double bytes = kbps * 125.0 * (seconds + ReplayBuffer::kExtraSeconds) * 1.1;
-  MEMORYSTATUSEX mem{};
-  mem.dwLength = sizeof(mem);
-  double quarter = GlobalMemoryStatusEx(&mem) ? double(mem.ullTotalPhys) / 4.0 : double(1u << 30);
-  return size_t(std::max(std::min(bytes, quarter), double(64u << 20)));
+  return kbps * 125.0 * 1.1;
+}
+
+size_t Pipeline::BufferLimit(double seconds) const {
+  if (settings_.maxBufferBytes) return settings_.maxBufferBytes;
+  // Lo que pide la duración más los segundos de margen del anillo, sin pasar
+  // de la cuarta parte de la RAM: con 16 GB caben 5 min en Alta a 1440p; con
+  // poca RAM el clip sale más corto antes que hacer que Windows mande el juego
+  // al archivo de paginación.
+  double bytes = ReplayBytesPerSecond() * (seconds + ReplayBuffer::kExtraSeconds);
+  return size_t(std::max(std::min(bytes, RamQuarter()), double(64u << 20)));
 }
 
 Pipeline::~Pipeline() {
@@ -588,6 +602,9 @@ PipelineStats Pipeline::Stats() {
     s.bufferSeconds = buffer_->DurationSeconds();
     s.bufferLimitBytes = buffer_->MaxBytes();
   }
+  const double perSecond = ReplayBytesPerSecond();
+  const double cap = settings_.maxBufferBytes ? double(settings_.maxBufferBytes) : RamQuarter();
+  if (perSecond > 0) s.replayFitSeconds = std::max(0.0, cap / perSecond - ReplayBuffer::kExtraSeconds);
   s.audioTracks = int(streams_.size()) - 1;
   s.recording = Recording();
   if (s.recording) {

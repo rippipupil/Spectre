@@ -15,12 +15,14 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace spectre {
 
 // Export: la copia de menos de 20 MB para Discord (<nombre>_discord.mp4).
-enum class MediaKind { Clip, Recording, Trim, Export, Screenshot };
+// Edit: clips unidos o en cámara lenta (<nombre>_union_<fecha>, <nombre>_lenta<n>_<fecha>).
+enum class MediaKind { Clip, Recording, Trim, Export, Edit, Screenshot };
 
 struct MediaItem {
   std::string path; // UTF-8, ruta completa
@@ -48,6 +50,9 @@ struct StorageInfo {
   uint64_t totalBytes = 0;
   size_t videos = 0, screenshots = 0, others = 0;
   bool valid = false;
+  // Fecha (FILETIME UTC) y tamaño de lo que el borrado por antigüedad podría
+  // quitar (de Spectre y sin estrella): Ajustes dice cuánto se iría antes de aplicar.
+  std::vector<std::pair<int64_t, uint64_t>> deletable;
 };
 
 // Una pasada del límite de espacio.
@@ -62,6 +67,10 @@ struct LimitResult {
   uint64_t usedBytes = 0;     // lo que cuenta, después de borrar
   uint64_t keptBytes = 0;     // favoritos, lo de los últimos minutos y la grabación en curso
   uint64_t favoriteBytes = 0; // la parte de keptBytes que son favoritos
+  // Borrado de lo antiguo (Ajustes > Almacenamiento): cuántos de los borrados
+  // lo fueron por tener más de maxAgeDays días.
+  int maxAgeDays = 0;
+  int agedDeleted = 0;
 };
 
 class Library {
@@ -95,8 +104,10 @@ public:
   // que lleva ese nombre (lo renombrado o de otros programas no es suyo).
   // Los favoritos, lo de los últimos minutos y keepPath (la grabación en
   // curso) cuentan, pero nunca se borran; si ellos solos ya pasan del tope,
-  // no borra nada (blocked).
-  LimitResult EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath);
+  // no borra nada (blocked). Antes, si maxAgeDays > 0, borra lo de Spectre
+  // con más días que eso, con las mismas excepciones.
+  LimitResult EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath,
+                           int maxAgeDays = 0);
 
 private:
   struct Meta {

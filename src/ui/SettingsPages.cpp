@@ -1,5 +1,6 @@
 #include "ui/SettingsPages.h"
 
+#include "app/Sound.h"
 #include "common/Util.h"
 #include "encode/Quality.h"
 #include "ui/Theme.h"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #ifndef SPECTRE_VERSION
 #define SPECTRE_VERSION "0.1.0"
@@ -140,6 +142,30 @@ double AutoBufferBytes(const SettingsModel& m) {
   return std::max(std::min(ReplayPeakBytes(m), quarter), double(64u << 20));
 }
 
+// «30 segundos», «1 minuto», «2 minutos 30 segundos».
+std::string LongClipLength(int seconds) {
+  char buf[48];
+  const int min = seconds / 60, sec = seconds % 60;
+  if (min == 0) snprintf(buf, sizeof(buf), "%d segundos", sec);
+  else if (sec == 0) snprintf(buf, sizeof(buf), "%d %s", min, min == 1 ? "minuto" : "minutos");
+  else snprintf(buf, sizeof(buf), "%d %s %d segundos", min, min == 1 ? "minuto" : "minutos", sec);
+  return buf;
+}
+
+// La duración más larga que cabe entera en el límite de memoria de la
+// configuración en edición, como PipelineStats::replayFitSeconds.
+double AutoFitSeconds(const SettingsModel& m) {
+  const double perSecond = double(EstimatedKbps(m)) * 125.0 * 1.1;
+  if (perSecond <= 0) return 0;
+  static const double quarter = [] {
+    MEMORYSTATUSEX mem{};
+    mem.dwLength = sizeof(mem);
+    return GlobalMemoryStatusEx(&mem) ? double(mem.ullTotalPhys) / 4.0 : double(1u << 30);
+  }();
+  const double cap = m.config.maxBufferMB == kAutoBufferMB ? quarter : double(m.config.maxBufferMB) * 1024.0 * 1024.0;
+  return std::max(0.0, cap / perSecond - ReplayBuffer::kExtraSeconds);
+}
+
 // Medidor de nivel: barra en la columna de controles, con el dispositivo y
 // formato reales debajo. Si la barra no se mueve con el juego sonando, se
 // está escuchando el dispositivo equivocado.
@@ -177,9 +203,35 @@ void PageReplay(SettingsModel& m) {
   m.dirty |= SwitchField("Solo con un juego abierto", &c.onlyInGames,
                          "El replay se pausa si no hay ninguna app a pantalla completa.");
   FieldLabel("Duración del clip");
-  m.dirty |= ChoiceCombo<int>("##len", c.clipSeconds,
-                              {{15, "15 segundos"}, {30, "30 segundos"}, {60, "1 minuto"},
-                               {120, "2 minutos"}, {300, "5 minutos"}});
+  {
+    // Las de la rejilla del panel; la que trajera config.json de antes, también.
+    std::vector<std::string> names;
+    std::vector<int> values(std::begin(kClipLengths), std::end(kClipLengths));
+    if (std::find(values.begin(), values.end(), c.clipSeconds) == values.end()) values.push_back(c.clipSeconds);
+    std::sort(values.begin(), values.end());
+    const double fit = AutoFitSeconds(m);
+    for (int sec : values)
+      names.push_back(LongClipLength(sec) + (fit > 0 && double(sec) > fit + 0.5 ? "  (no cabe en la RAM)" : ""));
+    std::vector<std::pair<int, const char*>> options;
+    for (size_t i = 0; i < values.size(); ++i) options.emplace_back(values[i], names[i].c_str());
+    m.dirty |= ChoiceCombo<int>("##len", c.clipSeconds, options);
+  }
+  FieldLabel("Clip corto", "Lo que guarda el atajo de clip corto: solo el final de lo que pasó, para no tener que "
+                           "recortar.");
+  {
+    std::vector<std::pair<int, const char*>> options = {
+        {5, "5 segundos"},   {10, "10 segundos"}, {15, "15 segundos"}, {20, "20 segundos"},
+        {30, "30 segundos"}, {45, "45 segundos"}, {60, "1 minuto"},    {120, "2 minutos"}};
+    std::string own = LongClipLength(c.shortClipSeconds);
+    if (std::none_of(options.begin(), options.end(), [&](const auto& o) { return o.first == c.shortClipSeconds; }))
+      options.emplace_back(c.shortClipSeconds, own.c_str());
+    m.dirty |= ChoiceCombo<int>("##short", c.shortClipSeconds, options);
+    std::string key = c.hotkeys.shortClip.empty() ? std::string("Sin atajo (ponle uno en Ajustes > Atajos)")
+                                                  : "Con " + c.hotkeys.shortClip + ".";
+    if (c.shortClipSeconds >= c.clipSeconds)
+      key += " Como el replay guarda " + FormatClipLength(c.clipSeconds) + ", el clip corto será igual de largo.";
+    Help(key.c_str());
+  }
   FieldLabel("Límite de memoria", "Automático reserva lo que pide la duración del clip con esta calidad, sin pasar "
                                   "de la cuarta parte de la RAM.");
   const double peak = ReplayPeakBytes(m);
@@ -222,6 +274,19 @@ void PageReplay(SettingsModel& m) {
     Help(hint);
   }
 
+  Heading("GRABACIÓN");
+  FieldLabel("Detener la grabación tras", "Para no llenar el disco si se te olvida pararla. Se guarda igual que al "
+                                          "detenerla con el atajo.");
+  {
+    std::vector<std::pair<int, const char*>> options = {{0, "Sin límite"}, {5, "5 minutos"},  {10, "10 minutos"},
+                                                        {15, "15 minutos"}, {30, "30 minutos"}, {60, "1 hora"},
+                                                        {120, "2 horas"},   {180, "3 horas"}};
+    std::string own = std::to_string(c.recordLimitMinutes) + " minutos";
+    if (std::none_of(options.begin(), options.end(), [&](const auto& o) { return o.first == c.recordLimitMinutes; }))
+      options.emplace_back(c.recordLimitMinutes, own.c_str());
+    m.dirty |= ChoiceCombo<int>("##reclimit", c.recordLimitMinutes, options);
+  }
+
   Heading("MARCAS");
   std::string marker = c.hotkeys.marker.empty() ? std::string("el atajo de Marcar (Ajustes > Atajos)")
                                                 : c.hotkeys.marker;
@@ -234,6 +299,9 @@ void PageReplay(SettingsModel& m) {
   m.dirty |= SwitchField("Una carpeta por juego", &c.folderPerGame,
                          "Guarda los clips, grabaciones y capturas de cada juego en su propia subcarpeta. La "
                          "biblioteca los muestra todos igual.");
+  m.dirty |= SwitchField("Copiar el clip al guardarlo", &c.copyClipOnSave,
+                         "Cada clip nuevo va al portapapeles: en Discord o WhatsApp basta con Ctrl+V. Sustituye lo "
+                         "que hubiera copiado.");
 }
 
 // Aviso al elegir Fuente: qué consume con los ajustes de ahora. Cancelar
@@ -473,6 +541,7 @@ struct HotkeyField {
 const HotkeyField kHotkeyFields[] = {
     {"Abrir el panel", &HotkeyConfig::overlay},
     {"Guardar clip", &HotkeyConfig::saveClip},
+    {"Guardar clip corto", &HotkeyConfig::shortClip},
     {"Grabar o detener", &HotkeyConfig::toggleRecording},
     {"Activar o pausar el replay", &HotkeyConfig::toggleReplay},
     {"Captura de pantalla", &HotkeyConfig::screenshot},
@@ -721,6 +790,48 @@ void PageStorage(SettingsModel& m, const SettingsActions& a) {
     Help("Sin límite, Spectre no borra nada por su cuenta.");
   }
 
+  Heading("BORRAR LO ANTIGUO");
+  FieldLabel("Borrar lo que tenga más de", "Para que la carpeta no crezca sin fin aunque no pongas un límite de "
+                                           "espacio.");
+  {
+    std::vector<std::pair<int, const char*>> options = {{0, "Nunca"},     {7, "7 días"},    {14, "14 días"},
+                                                        {30, "30 días"},  {60, "60 días"},  {90, "90 días"},
+                                                        {180, "6 meses"}, {365, "1 año"}};
+    std::string own = std::to_string(c.deleteAfterDays) + " días";
+    if (std::none_of(options.begin(), options.end(), [&](const auto& o) { return o.first == c.deleteAfterDays; }))
+      options.emplace_back(c.deleteAfterDays, own.c_str());
+    m.dirty |= ChoiceCombo<int>("##age", c.deleteAfterDays, options);
+  }
+  if (c.deleteAfterDays > 0) {
+    Warning("Al aplicar, al abrir Spectre y cada vez que guardes algo, se borran para siempre los clips, grabaciones "
+            "y capturas de Spectre más antiguos que eso, y te avisa. Los favoritos y los archivos renombrados o de "
+            "otros programas nunca se borran.");
+    // Lo que se iría al pulsar Aplicar, con lo que hay ahora en la carpeta: así
+    // elegir «7 días» por error no se lleva meses de clips sin verlo antes.
+    if (c.deleteAfterDays != m.base.deleteAfterDays && s.valid && c.outputDir == m.base.outputDir) {
+      FILETIME nowFt;
+      GetSystemTimeAsFileTime(&nowFt);
+      const int64_t now = int64_t((uint64_t(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime);
+      const int64_t maxAge = int64_t(c.deleteAfterDays) * 24 * 3600 * 10000000;
+      int count = 0;
+      uint64_t bytes = 0;
+      for (const auto& [modified, size] : s.deletable)
+        if (now - modified > maxAge) {
+          ++count;
+          bytes += size;
+        }
+      Gap(4);
+      if (count > 0) {
+        std::string text = "Al aplicar se borrarán para siempre " + std::to_string(count) +
+                           (count == 1 ? " archivo (" : " archivos (") + FormatBytes(bytes) +
+                           "). Marca con la estrella lo que quieras conservar antes de aplicar.";
+        Warning(text.c_str());
+      } else {
+        Help("Ahora no hay nada tan antiguo: al aplicar no se borra nada.");
+      }
+    }
+  }
+
   Heading("CAPTURAS DE PANTALLA");
   FieldLabel("Formato");
   m.dirty |= ChoiceCombo<std::string>("##shot", c.screenshotFormat,
@@ -730,7 +841,7 @@ void PageStorage(SettingsModel& m, const SettingsActions& a) {
   Help(hint.c_str());
 }
 
-void PageNotifications(SettingsModel& m) {
+void PageNotifications(SettingsModel& m, const SettingsActions& a) {
   auto& c = m.config;
   Heading("AVISOS EN PANTALLA");
   m.dirty |= SwitchField("Mostrar avisos", &c.showNotifications,
@@ -749,6 +860,17 @@ void PageNotifications(SettingsModel& m) {
   m.dirty |= SwitchField("Sonido al guardar", &c.soundOnSave,
                          "Un pitido corto al guardar un clip o una captura y al marcar un momento. Útil si el juego "
                          "tapa los avisos.");
+  if (c.soundOnSave) {
+    FieldLabel("Sonido");
+    std::vector<std::pair<std::string, const char*>> sounds(SaveSounds().begin(), SaveSounds().end());
+    ImGui::SetNextItemWidth(ControlWidth() - Px(100));
+    if (ChoiceCombo<std::string>("##sound", c.saveSound, sounds)) {
+      m.dirty = true;
+      if (a.playSound) a.playSound(c.saveSound);
+    }
+    ImGui::SameLine(0, Px(8));
+    if (GhostButton("listen", "Escuchar", Px(92), Tone::Normal, 26) && a.playSound) a.playSound(c.saveSound);
+  }
   Help("Si capturas todo el sonido del PC, el pitido puede oírse al principio del siguiente clip. Con «Solo el "
        "audio del juego» no se graba.");
 }
@@ -1048,7 +1170,7 @@ void DrawSettingsPage(SettingsPage page, SettingsModel& m, const SettingsActions
   case SettingsPage::Camera: PageCamera(m); break;
   case SettingsPage::Hotkeys: PageHotkeys(m, a); break;
   case SettingsPage::Storage: PageStorage(m, a); break;
-  case SettingsPage::Notifications: PageNotifications(m); break;
+  case SettingsPage::Notifications: PageNotifications(m, a); break;
   case SettingsPage::General: PageGeneral(m, a); break;
   case SettingsPage::Projects: PageProjects(a); break;
   default: PagePerformance(m); break;

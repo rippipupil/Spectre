@@ -33,7 +33,8 @@ private:
   LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
   // Acciones
-  void SaveClip();
+  // shortClip: solo los últimos Config::shortClipSeconds (atajo de clip corto).
+  void SaveClip(bool shortClip = false);
   void ToggleRecording();
   void ToggleReplay();
   void ToggleMicrophone();
@@ -43,6 +44,11 @@ private:
   void CaptureScreenshot();
   void AddMarker();
   void TrimClip(const std::string& path, double start, double end);
+  // Biblioteca: unir clips y cámara lenta (app/Edit.h), en otro hilo como el recorte.
+  void JoinClips(const std::vector<std::string>& paths);
+  void SlowMotion(const std::string& path, int factor);
+  // Fotograma del visor guardado como captura (PNG o JPG, como Alt+F1) junto al vídeo.
+  void SaveFrame(const MediaItem& item, std::vector<uint8_t> bgr, int width, int height);
   // Copia de menos de 20 MB en H.264 para Discord, en otro hilo; al acabar se
   // copia al portapapeles.
   void ExportForDiscord(const std::string& path);

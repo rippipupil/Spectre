@@ -1,5 +1,6 @@
 #include "ui/Widgets.h"
 
+#include "app/Config.h"
 #include "ui/Fonts.h"
 #include "ui/Theme.h"
 
@@ -9,6 +10,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 
 namespace spectre::ui {
 
@@ -131,8 +133,9 @@ std::string FormatDuration(double seconds) {
 
 std::string FormatClipLength(int seconds) {
   char buf[32];
-  if (seconds % 60 == 0) snprintf(buf, sizeof(buf), "%d min", seconds / 60);
-  else snprintf(buf, sizeof(buf), "%d s", seconds);
+  if (seconds < 60) snprintf(buf, sizeof(buf), "%d s", seconds);
+  else if (seconds % 60 == 0) snprintf(buf, sizeof(buf), "%d min", seconds / 60);
+  else snprintf(buf, sizeof(buf), "%d min %d s", seconds / 60, seconds % 60);
   return buf;
 }
 
@@ -530,6 +533,57 @@ int Segmented(const char* id, const std::vector<std::pair<int, std::string>>& op
   }
   ImGui::SetCursorScreenPos(a);
   ImGui::Dummy(ImVec2(w, h));
+  ImGui::PopID();
+  return clicked;
+}
+
+int ClipLengthPicker(const char* id, int current, double fitSeconds, float width) {
+  const Palette& p = Colors();
+  ImGui::PushID(id);
+  constexpr int kCols = 4;
+  const int count = int(std::size(kClipLengths));
+  const int rows = (count + kCols - 1) / kCols;
+  const float h = Px(28), line = Px(1);
+  ImVec2 a = ImGui::GetCursorScreenPos();
+  float w = width > 0 ? width : ImGui::GetContentRegionAvail().x;
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  // Celdas planas separadas por una línea de 1 px del color del fondo.
+  dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h * float(rows)), C(p.surface));
+  float cellW = w / float(kCols);
+  int clicked = -1;
+  for (int i = 0; i < count; ++i) {
+    const int sec = kClipLengths[i];
+    ImVec2 q(a.x + cellW * float(i % kCols), a.y + h * float(i / kCols));
+    ImGui::SetCursorScreenPos(q);
+    ImGui::PushID(i);
+    if (ImGui::InvisibleButton("len", ImVec2(cellW, h))) clicked = sec;
+    bool hov = ImGui::IsItemHovered();
+    ImGui::PopID();
+    // Con este bitrate no cabe entera en la RAM del replay: se ve atenuada y
+    // lo explica al pasar el ratón (se puede elegir igual).
+    const bool tight = fitSeconds > 0 && double(sec) > fitSeconds + 0.5;
+    if (hov) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (tight)
+        ImGui::SetTooltip("Con esta calidad no cabe entera en la memoria del replay: en escenas de mucho "
+                          "movimiento el clip saldría más corto. Caben unos %s.",
+                          FormatClipLength(std::max(5, int(fitSeconds) / 5 * 5)).c_str());
+    }
+    bool sel = sec == current;
+    ImVec2 b(q.x + cellW, q.y + h);
+    if (sel) dl->AddRectFilled(q, b, C(p.accent));
+    else if (hov) dl->AddRectFilled(q, b, C(p.surfaceHover));
+    if (i % kCols != 0) dl->AddRectFilled(q, ImVec2(q.x + line, b.y), C(p.bg));
+    if (i >= kCols) dl->AddRectFilled(q, ImVec2(b.x, q.y + line), C(p.bg));
+    float ss = Px(kSmall);
+    ImFont* font = sel ? bold_ : ImGui::GetFont();
+    std::string label = FormatClipLength(sec);
+    ImVec2 ts = TextSize(font, ss, label.c_str());
+    ImU32 fg = sel ? p.onAccent : tight ? p.textFaint : hov ? p.text : p.textMuted;
+    Text(dl, font, ss, ImVec2(q.x + (cellW - ts.x) * 0.5f, q.y + (h - ts.y) * 0.5f), C(fg), label.c_str());
+  }
+  ImGui::SetCursorScreenPos(a);
+  ImGui::Dummy(ImVec2(w, h * float(rows)));
   ImGui::PopID();
   return clicked;
 }
