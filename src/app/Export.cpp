@@ -1,5 +1,6 @@
 #include "app/Export.h"
 
+#include "app/Transcode.h"
 #include "common/Util.h"
 #include "encode/Media.h"
 
@@ -13,7 +14,6 @@ extern "C" {
 #ifdef _WIN32
 #include "app/CrashHandler.h"
 #include "core/ThreadPolicy.h"
-#include <mfapi.h>
 #include <objbase.h>
 #endif
 
@@ -36,10 +36,6 @@ fs::path PathOf(const std::string& utf8) { return fs::path(Widen(utf8)); }
 #else
 fs::path PathOf(const std::string& utf8) { return fs::path(utf8); }
 #endif
-
-// Por GPU primero (NVIDIA, AMD, Intel y Media Foundation con el encoder de la
-// tarjeta); por CPU solo si ninguno abre.
-const char* const kEncoders[] = {"h264_nvenc", "h264_amf", "h264_qsv", "h264_mf:hw", "h264_mf", "libopenh264"};
 
 // Por debajo de esto el vídeo sería una mancha: mejor pedir que se recorte.
 constexpr double kMinVideoBps = 200000;
@@ -85,31 +81,6 @@ struct Fifo {
   }
 };
 
-// h264_mf, como en VideoEncoder::TryOpen: si no encuentra el MFT, la limpieza
-// de FFmpeg 8.1 hace un MFShutdown() y un CoUninitialize() de más, que se
-// llevarían el MFStartup de main (webcam y listas de audio) y el COM de este
-// hilo. Antes de cada intento se toma uno de cada. Si el intento falla, o los
-// gastó FFmpeg o se quedan sin soltar, que no molesta; si abre, se sueltan
-// después de cerrar el encoder (por eso se declara antes que él).
-struct MfHold {
-  bool held = false;
-#ifdef _WIN32
-  static bool Take() {
-    if (!MediaFoundationAvailable() || FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return false;
-    if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return true;
-    CoUninitialize();
-    return false;
-  }
-  ~MfHold() {
-    if (!held) return;
-    MFShutdown();
-    CoUninitialize();
-  }
-#else
-  static bool Take() { return false; }
-#endif
-};
-
 bool Fail(std::string* error, std::string text) {
   if (error) *error = std::move(text);
   return false;
@@ -141,22 +112,6 @@ double DurationOf(const AVFormatContext* fmt, int video) {
 double TimeOf(const AVFrame* frame, const AVStream* st) {
   int64_t ts = frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp : frame->pts;
   return ts == AV_NOPTS_VALUE ? NAN : double(ts) * av_q2d(st->time_base);
-}
-
-bool SupportsPixFmt(const AVCodec* codec, AVPixelFormat fmt) {
-  const AVPixelFormat* fmts = nullptr;
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
-  int n = 0;
-  if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0,
-                                   reinterpret_cast<const void**>(&fmts), &n) < 0)
-    return false;
-#else
-  fmts = codec->pix_fmts;
-#endif
-  if (!fmts) return true;
-  for (; *fmts != AV_PIX_FMT_NONE; ++fmts)
-    if (*fmts == fmt) return true;
-  return false;
 }
 
 struct Probe {
@@ -252,110 +207,6 @@ bool MakePlan(const Probe& probe, double budgetBytes, Plan* plan) {
   return true;
 }
 
-bool OpenDecoder(const AVStream* st, int threads, Codec* out) {
-  const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
-  if (!codec) return false;
-  out->p = avcodec_alloc_context3(codec);
-  if (!out->p || avcodec_parameters_to_context(out->p, st->codecpar) < 0) return false;
-  out->p->pkt_timebase = st->time_base;
-  out->p->thread_count = threads;
-  return avcodec_open2(out->p, codec, nullptr) >= 0;
-}
-
-// Opciones de calidad para un tamaño fijo: VBR alrededor del bitrate del plan,
-// con picos de hasta 1,5 veces. No hay prisa (no es en directo), así que se
-// usan los modos de más calidad de cada encoder.
-void SetQualityOptions(const std::string& name, AVDictionary** opts) {
-  if (name == "h264_nvenc") {
-    av_dict_set(opts, "preset", "p6", 0);
-    av_dict_set(opts, "tune", "hq", 0);
-    av_dict_set(opts, "rc", "vbr", 0);
-    av_dict_set(opts, "multipass", "fullres", 0);
-    av_dict_set(opts, "spatial-aq", "1", 0);
-    av_dict_set(opts, "profile", "high", 0);
-  } else if (name == "h264_amf") {
-    av_dict_set(opts, "usage", "transcoding", 0);
-    av_dict_set(opts, "quality", "quality", 0);
-    av_dict_set(opts, "rc", "vbr_peak", 0);
-    av_dict_set(opts, "profile", "high", 0);
-  } else if (name == "h264_qsv") {
-    av_dict_set(opts, "preset", "slow", 0);
-    av_dict_set(opts, "profile", "high", 0);
-  } else if (name == "h264_mf") {
-    av_dict_set(opts, "rate_control", "pc_vbr", 0);
-    av_dict_set(opts, "scenario", "archive", 0);
-  } else if (name == "libopenh264") {
-    av_dict_set(opts, "rc_mode", "bitrate", 0);
-  }
-}
-
-// id: nombre de FFmpeg, con ":hw" para pedir el encoder de la GPU a Media
-// Foundation. simple: sin las opciones de calidad, por si el driver no las admite.
-bool OpenVideoEncoder(const std::string& id, const Plan& plan, const AVCodecContext* dec, bool globalHeader,
-                      bool simple, Codec* out) {
-  std::string name = id;
-  bool hw = false;
-  if (size_t colon = name.find(':'); colon != std::string::npos) {
-    hw = name.compare(colon + 1, std::string::npos, "hw") == 0;
-    name.erase(colon);
-  }
-  const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
-  if (!codec) return false;
-  AVCodecContext* c = avcodec_alloc_context3(codec);
-  out->p = c;
-  if (!c) return false;
-  c->width = plan.width;
-  c->height = plan.height;
-  c->time_base = av_inv_q(plan.rate);
-  c->framerate = plan.rate;
-  c->sample_aspect_ratio = {1, 1};
-  c->pix_fmt = SupportsPixFmt(codec, AV_PIX_FMT_NV12) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-  c->gop_size = std::max(1, int(std::lround(av_q2d(plan.rate) * 2)));
-  c->max_b_frames = 0;
-  c->bit_rate = plan.videoBps;
-  c->rc_max_rate = plan.videoBps * 3 / 2;
-  c->rc_buffer_size = int(std::min<int64_t>(plan.videoBps * 2, INT32_MAX));
-  c->color_range = AVCOL_RANGE_MPEG; // swscale entrega rango limitado
-  c->color_primaries = dec->color_primaries != AVCOL_PRI_UNSPECIFIED ? dec->color_primaries : AVCOL_PRI_BT709;
-  c->color_trc = dec->color_trc != AVCOL_TRC_UNSPECIFIED ? dec->color_trc : AVCOL_TRC_BT709;
-  c->colorspace = dec->colorspace != AVCOL_SPC_UNSPECIFIED ? dec->colorspace : AVCOL_SPC_BT709;
-  if (globalHeader) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-  AVDictionary* opts = nullptr;
-  if (!simple) SetQualityOptions(name, &opts);
-  if (hw) av_dict_set(&opts, "hw_encoding", "1", 0);
-  int err = avcodec_open2(c, codec, &opts);
-  av_dict_free(&opts);
-  if (err < 0) {
-    Log("Exportar: no se pudo abrir %s (%s): %s", id.c_str(), simple ? "simple" : "calidad", AvError(err).c_str());
-    avcodec_free_context(&out->p);
-    return false;
-  }
-  return true;
-}
-
-bool OpenAudioEncoder(const Plan& plan, const AVCodecContext* dec, bool globalHeader, Codec* out) {
-  const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-  if (!codec) return false;
-  AVCodecContext* c = avcodec_alloc_context3(codec);
-  out->p = c;
-  if (!c) return false;
-  const int channels = std::clamp(dec->ch_layout.nb_channels, 1, 2);
-  av_channel_layout_default(&c->ch_layout, channels);
-  c->sample_fmt = AV_SAMPLE_FMT_FLTP;
-  c->sample_rate = dec->sample_rate == 44100 ? 44100 : 48000;
-  c->time_base = {1, c->sample_rate};
-  c->bit_rate = channels == 1 ? plan.audioBps / 2 : plan.audioBps;
-  if (globalHeader) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-  int err = avcodec_open2(c, codec, nullptr);
-  if (err < 0) {
-    Log("Exportar: no se pudo abrir el encoder AAC: %s", AvError(err).c_str());
-    avcodec_free_context(&out->p);
-    return false;
-  }
-  return true;
-}
-
 enum class Outcome { Done, Cancelled, Failed };
 
 Outcome Transcode(const std::string& input, const std::string& output, const Plan& plan,
@@ -380,8 +231,8 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
   // hilos que crearía FFmpeg tendrían prioridad normal.
   const int threads = options.gentle ? 1 : std::clamp(int(std::thread::hardware_concurrency()) / 2, 1, 4);
   Codec vdec, adec;
-  if (!OpenDecoder(vIn, threads, &vdec)) return fail("No se pudo decodificar el vídeo");
-  if (aIndex >= 0 && !OpenDecoder(in.p->streams[aIndex], 1, &adec)) {
+  if (!OpenStreamDecoder(vIn, threads, &vdec.p)) return fail("No se pudo decodificar el vídeo");
+  if (aIndex >= 0 && !OpenStreamDecoder(in.p->streams[aIndex], 1, &adec.p)) {
     Log("Exportar: no se pudo decodificar el audio; la copia irá sin sonido");
     aIndex = -1;
   }
@@ -393,24 +244,11 @@ Outcome Transcode(const std::string& input, const std::string& output, const Pla
 
   MfHold mf;
   Codec venc;
-  std::vector<std::string> order = options.encoders;
-  if (order.empty()) order.assign(std::begin(kEncoders), std::end(kEncoders));
-  for (const auto& id : order) {
-    for (bool simple : {false, true}) {
-      const bool took = id.find("_mf") != std::string::npos && MfHold::Take();
-      if (OpenVideoEncoder(id, plan, vdec.p, globalHeader, simple, &venc)) {
-        mf.held = took;
-        break;
-      }
-    }
-    if (venc.p) {
-      *encoder = id;
-      break;
-    }
-  }
+  const VideoTarget target{plan.width, plan.height, plan.rate, plan.videoBps};
+  OpenFirstH264Encoder(options.encoders, target, vdec.p, globalHeader, &venc.p, encoder, &mf, "Exportar");
   if (!venc.p) return fail("Ningún encoder H.264 se pudo abrir en este PC");
   Codec aenc;
-  if (aIndex >= 0 && !OpenAudioEncoder(plan, adec.p, globalHeader, &aenc)) aIndex = -1;
+  if (aIndex >= 0 && !OpenAacEncoder(plan.audioBps, adec.p, globalHeader, &aenc.p, "Exportar")) aIndex = -1;
 
   AVStream* vOut = avformat_new_stream(out.p, nullptr);
   if (!vOut || avcodec_parameters_from_context(vOut->codecpar, venc.p) < 0) return fail("No se pudo crear la copia");

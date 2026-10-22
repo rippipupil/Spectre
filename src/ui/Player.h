@@ -40,12 +40,16 @@ public:
   float Volume() const;
   void SetMuted(bool muted);
   bool Muted() const;
+  // Velocidad de reproducción (vista previa del editor): 1 = normal.
+  void SetRate(double rate);
 
   // En cada frame de la interfaz: copia el fotograma nuevo (si lo hay) a la
   // textura y la devuelve (nula hasta el primero).
   std::shared_ptr<UiTexture> Frame(AppWindow& window);
   int VideoWidth() const;
   int VideoHeight() const;
+  // Cambia cada vez que Frame copia un fotograma nuevo a la textura.
+  uint64_t FrameSerial() const;
   // Copia el último fotograma mostrado (BGR de 24 bits, de arriba abajo) para
   // guardarlo como imagen. Lee la textura de la GPU: solo al pulsar el botón.
   bool ReadFrame(std::vector<uint8_t>* bgr, int* width, int* height) const;

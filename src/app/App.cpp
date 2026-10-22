@@ -3,6 +3,7 @@
 #include "app/Edit.h"
 #include "app/Screenshot.h"
 #include "app/Sound.h"
+#include "app/TextImage.h"
 
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
@@ -238,6 +239,11 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     SaveFrame(item, std::move(bgr), width, height); // solo lanza el hilo: puede ir dentro del frame
   };
   appActions_.cancelExport = [this] { exporter_.Cancel(); };
+  appActions_.saveEdit = [this](const std::string& path, const EditSettings& settings) {
+    Defer([this, path, settings] { SaveEdit(path, settings); });
+  };
+  appActions_.cancelEdit = [this] { editWorker_.Cancel(); };
+  appActions_.split = [this](const std::string& path, double at) { Defer([this, path, at] { SplitClip(path, at); }); };
   appActions_.setFavorite = [this](const std::string& path, bool favorite) {
     library_->SetFavorite(path, favorite);
     for (auto& item : appModel_.items)
@@ -340,6 +346,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   menu_.Hide();
   toast_.Hide();
   exporter_.Stop(); // una exportación a medias se cancela y se borra
+  editWorker_.Stop(); // y lo mismo una edición
   pipeline_.Stop();
   // Clips o recortes que se están escribiendo. Antes de actualizar se espera
   // lo que haga falta: el instalador no debe encontrar un MP4 a medias.
@@ -643,6 +650,107 @@ void App::SlowMotion(const std::string& path, int factor) {
   Toast(factor >= 4 ? "Haciendo la copia a un cuarto de velocidad..." : "Haciendo la copia a mitad de velocidad...");
 }
 
+void App::SplitClip(const std::string& path, double at) {
+  HWND hwnd = hwnd_;
+  auto pending = std::make_shared<PendingWrite>();
+  std::thread([hwnd, path, at, pending] {
+    InstallThreadCrashHandler();
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    BackgroundMode background;
+    std::string error, names;
+    bool ok = false;
+    try {
+      auto in = std::filesystem::path(Widen(path));
+      const std::wstring stamp = Widen(TimestampForFile());
+      auto first = FreePath(in.parent_path(), in.stem().wstring() + L"_parte1_" + stamp, L".mp4");
+      auto second = FreePath(in.parent_path(), in.stem().wstring() + L"_parte2_" + stamp, L".mp4");
+      ok = TrimFile(path, Narrow(first.wstring()), 0, at, &error) &&
+           TrimFile(path, Narrow(second.wstring()), at, 1e9, &error);
+      if (!ok) {
+        std::error_code ec;
+        std::filesystem::remove(first, ec);
+        std::filesystem::remove(second, ec);
+      }
+      names = Narrow(first.filename().wstring()) + " y " + Narrow(second.filename().wstring());
+    } catch (const std::exception& e) {
+      ok = false;
+      error = std::string("No se pudo dividir el vídeo: ") + e.what();
+      Log("Dividir: excepción: %s", e.what());
+    }
+    auto* msg = new std::string(ok ? "Dividido en dos: " + names : error.empty() ? "No se pudo dividir el vídeo" : error);
+    if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
+  }).detach();
+  Toast("Dividiendo el vídeo en dos...");
+}
+
+void App::SaveEdit(const std::string& path, const EditSettings& settings) {
+  if (editWorker_.Busy()) {
+    Toast("Ya se está guardando otra edición: espera a que termine", true);
+    return;
+  }
+  EditJob job;
+  job.input = path;
+  job.settings = settings;
+  // Con un juego abierto o grabando se guarda sin prisa (un hilo, en modo de
+  // fondo), para no quitarle CPU ni disco.
+  job.gentle = GameActive() || pipeline_.Recording();
+  job.raster = RasterizeText;
+  const wchar_t* ext = settings.format == EditFormat::Gif     ? L".gif"
+                       : settings.format == EditFormat::Audio ? L".m4a"
+                                                              : L".mp4";
+  auto in = std::filesystem::path(Widen(path));
+  job.output =
+      Narrow(FreePath(in.parent_path(), in.stem().wstring() + L"_editado_" + Widen(TimestampForFile()), ext).wstring());
+  HWND hwnd = hwnd_;
+  if (!editWorker_.Start(
+          std::move(job), [hwnd](int percent) { PostMessageW(hwnd, WM_SPECTRE_EDIT, WPARAM(percent), 0); },
+          [hwnd] { PostMessageW(hwnd, WM_SPECTRE_EDIT, kEditDone, 0); })) {
+    Toast("Ya se está guardando otra edición: espera a que termine", true);
+    return;
+  }
+  appModel_.editRenderPath = path;
+  appModel_.editPercent = 0;
+  appWindow_.Invalidate();
+  Toast(settings.format == EditFormat::Gif     ? "Haciendo el GIF..."
+        : settings.format == EditFormat::Audio ? "Guardando el sonido..."
+                                               : "Guardando la edición...");
+}
+
+void App::FinishEdit() {
+  EditResult r;
+  if (!editWorker_.TakeResult(&r)) return;
+  appModel_.editRenderPath.clear();
+  appModel_.editPercent = -1;
+  appWindow_.Invalidate();
+  if (r.cancelled) {
+    Toast("Edición cancelada");
+    return;
+  }
+  if (!r.ok) {
+    Toast(r.error.empty() ? "No se pudo guardar la edición" : r.error, true);
+    return;
+  }
+  appModel_.editSaved = r.output;
+  appModel_.editSavedFrom = r.input;
+  if (r.settings.format == EditFormat::Video && r.settings.size == EditSize::Discord) {
+    // Después, la copia de menos de 20 MB (la edición sola se borra si sale aparte).
+    if (exporter_.Busy()) {
+      Toast("Edición guardada: " + FileNameOf(r.output) +
+                ". Ya se está exportando otro vídeo: expórtala para Discord desde su menú cuando acabe",
+            true);
+    } else {
+      discordAfterEdit_ = r.output;
+      ExportForDiscord(r.output);
+    }
+  } else {
+    const std::string note = LowDiskNote();
+    Toast("Edición guardada: " + FileNameOf(r.output) + " (" + FormatBytes(r.bytes) + ")" + note, !note.empty());
+  }
+  if (menu_.Visible()) RefreshPanelClips();
+  if (appWindow_.Visible()) RescanLibrary();
+  EnforceStorageLimit(); // algo nuevo en la carpeta
+}
+
 void App::SaveFrame(const MediaItem& item, std::vector<uint8_t> bgr, int width, int height) {
   if (bgr.empty() || width <= 0 || height <= 0) {
     Toast("Aún no hay fotograma que guardar: espera a que se vea el vídeo", true);
@@ -685,13 +793,22 @@ void App::FinishExport() {
   appModel_.exportPath.clear();
   appModel_.exportPercent = -1;
   appWindow_.Invalidate();
+  const bool afterEdit = !discordAfterEdit_.empty() && r.input == discordAfterEdit_;
+  if (afterEdit) discordAfterEdit_.clear();
   if (r.cancelled) {
-    Toast("Exportación cancelada");
+    Toast(afterEdit ? "Exportación cancelada: la edición se quedó guardada" : "Exportación cancelada");
     return;
   }
   if (!r.ok) {
     Toast(r.error, true);
     return;
+  }
+  if (afterEdit && !r.alreadyFits) {
+    // De «Editar» con «Para Discord»: se queda solo la copia que cabe.
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(Widen(r.input)), ec);
+    if (ec) Log("Editor: no se pudo borrar la copia intermedia %s", r.input.c_str());
+    if (appModel_.editSaved == r.input) appModel_.editSaved = r.output;
   }
   Log("Exportado para Discord: %s, %s (%s)", r.output.c_str(), FormatBytes(r.bytes).c_str(),
       r.alreadyFits ? "ya cabía, sin recodificar" : r.encoder.c_str());
@@ -1551,6 +1668,8 @@ void App::RefreshAppModel() {
   appModel_.gameName = game_ ? game_->exeName : "";
   appModel_.exportPath = exporter_.Busy() ? exporter_.Input() : std::string();
   appModel_.exportPercent = exporter_.Busy() ? exporter_.Percent() : -1;
+  appModel_.editRenderPath = editWorker_.Busy() ? editWorker_.Input() : std::string();
+  appModel_.editPercent = editWorker_.Busy() ? editWorker_.Percent() : -1;
   SettingsModel& s = appModel_.settings;
   s.stats = appModel_.stats;
   s.hotkeyError = hotkeyError_;
@@ -1781,7 +1900,8 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     std::string message = *text;
     if (!error && (StartsWith(message, "Clip guardado") || StartsWith(message, "Captura guardada") ||
                    StartsWith(message, "Recorte guardado") || StartsWith(message, "Unión guardada") ||
-                   StartsWith(message, "Cámara lenta guardada") || StartsWith(message, "Fotograma guardado"))) {
+                   StartsWith(message, "Cámara lenta guardada") || StartsWith(message, "Fotograma guardado") ||
+                   StartsWith(message, "Dividido en dos"))) {
       if (config_.soundOnSave && (StartsWith(message, "Clip") || StartsWith(message, "Captura")))
         PlayCue(Cue::Saved, config_.saveSound);
       // Ajustes > Avisos > Copiar el clip al guardarlo: listo para Ctrl+V en Discord.
@@ -1808,6 +1928,14 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       FinishExport();
     } else if (exporter_.Busy()) {
       appModel_.exportPercent = int(wp);
+      appWindow_.Invalidate();
+    }
+    return 0;
+  case WM_SPECTRE_EDIT:
+    if (wp == kEditDone) {
+      FinishEdit();
+    } else if (editWorker_.Busy()) {
+      appModel_.editPercent = int(wp);
       appWindow_.Invalidate();
     }
     return 0;
@@ -1889,6 +2017,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (wp) {
       installerPath_.clear(); // nunca instalar mientras Windows cierra la sesión
       exporter_.Stop();
+      editWorker_.Stop();
       pipeline_.Stop();
       WaitForPendingWrites(3000);
       Quit();

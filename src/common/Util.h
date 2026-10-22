@@ -65,5 +65,7 @@ constexpr UINT WM_SPECTRE_MEDIA = WM_APP + 17;          // miniaturas o duracion
 constexpr UINT WM_SPECTRE_LIBRARY = WM_APP + 18;        // la carpeta cambió (límite de espacio)
 constexpr UINT WM_SPECTRE_EXPORT = WM_APP + 19;         // wParam = % de la exportación, o kExportDone
 constexpr WPARAM kExportDone = 1000;
+constexpr UINT WM_SPECTRE_EDIT = WM_APP + 20;           // wParam = % de la edición que se guarda, o kEditDone
+constexpr WPARAM kEditDone = 1000;
 
 } // namespace spectre

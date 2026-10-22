@@ -49,6 +49,7 @@ add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE ${SPECTRE_FFMPEG_DIR}/include)
 target_link_libraries(ffmpeg INTERFACE
   ${SPECTRE_FFMPEG_DIR}/lib/avcodec.lib
+  ${SPECTRE_FFMPEG_DIR}/lib/avfilter.lib
   ${SPECTRE_FFMPEG_DIR}/lib/avformat.lib
   ${SPECTRE_FFMPEG_DIR}/lib/avutil.lib
   ${SPECTRE_FFMPEG_DIR}/lib/swresample.lib
@@ -75,10 +76,18 @@ target_link_libraries(spectre PRIVATE imgui nlohmann_json::nlohmann_json ffmpeg
 # Media Foundation (solo la webcam) se carga en diferido: en las ediciones N de
 # Windows no existe y, enlazada directamente, Spectre ni arrancaría.
 target_link_options(spectre PRIVATE /MANIFEST:NO /DELAYLOAD:mfplat.dll /DELAYLOAD:mfreadwrite.dll /DELAYLOAD:mf.dll)
+# libavfilter solo la usa «Editar» de la biblioteca: se carga al guardar la
+# primera edición, no al arrancar (el nombre lleva la versión: avfilter-11.dll).
+file(GLOB SPECTRE_AVFILTER_DLL "${SPECTRE_FFMPEG_DIR}/bin/avfilter-*.dll")
+if(SPECTRE_AVFILTER_DLL)
+  list(GET SPECTRE_AVFILTER_DLL 0 SPECTRE_AVFILTER_DLL)
+  get_filename_component(SPECTRE_AVFILTER_NAME "${SPECTRE_AVFILTER_DLL}" NAME)
+  target_link_options(spectre PRIVATE "/DELAYLOAD:${SPECTRE_AVFILTER_NAME}")
+endif()
 
 install(TARGETS spectre RUNTIME DESTINATION .)
 install(DIRECTORY ${SPECTRE_FFMPEG_DIR}/bin/ DESTINATION . FILES_MATCHING
-  PATTERN "avcodec-*.dll" PATTERN "avformat-*.dll" PATTERN "avutil-*.dll"
+  PATTERN "avcodec-*.dll" PATTERN "avfilter-*.dll" PATTERN "avformat-*.dll" PATTERN "avutil-*.dll"
   PATTERN "swresample-*.dll" PATTERN "swscale-*.dll")
 install(FILES THIRD_PARTY.md DESTINATION .)
 install(FILES ${SPECTRE_FFMPEG_DIR}/LICENSE.txt DESTINATION . RENAME FFMPEG-LICENSE.txt OPTIONAL)

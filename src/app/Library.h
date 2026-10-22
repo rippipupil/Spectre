@@ -21,7 +21,8 @@
 namespace spectre {
 
 // Export: la copia de menos de 20 MB para Discord (<nombre>_discord.mp4).
-// Edit: clips unidos o en cámara lenta (<nombre>_union_<fecha>, <nombre>_lenta<n>_<fecha>).
+// Edit: clips unidos, en cámara lenta, divididos o del editor (<nombre>_union_<fecha>,
+// <nombre>_lenta<n>_<fecha>, <nombre>_parte1_<fecha>, <nombre>_editado_<fecha>).
 enum class MediaKind { Clip, Recording, Trim, Export, Edit, Screenshot };
 
 struct MediaItem {
@@ -31,6 +32,7 @@ struct MediaItem {
   std::string game; // del nombre del archivo; vacío si no lo dice
   MediaKind kind = MediaKind::Clip;
   bool spectre = false; // el nombre sigue el formato de Spectre (solo esos se borran solos)
+  bool audioOnly = false; // .m4a («Solo audio» del editor): se reproduce sin imagen
   uint64_t size = 0;
   int64_t modified = 0; // FILETIME en 100 ns, para ordenar
   std::string when;     // "16/10 05:30"

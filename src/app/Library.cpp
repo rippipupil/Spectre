@@ -44,8 +44,9 @@ std::wstring LowerExt(const std::wstring& name) {
 // 0 = no es de la biblioteca, 1 = vídeo, 2 = imagen
 int ClassifyExtension(const std::wstring& name) {
   std::wstring ext = LowerExt(name);
-  if (ext == L".mp4" || ext == L".mkv" || ext == L".mov") return 1;
-  if (ext == L".png" || ext == L".jpg" || ext == L".jpeg") return 2;
+  // .m4a: «Solo audio» del editor; .gif: GIF del editor (se ve como una imagen).
+  if (ext == L".mp4" || ext == L".mkv" || ext == L".mov" || ext == L".m4a") return 1;
+  if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".gif") return 2;
   return 0;
 }
 
@@ -97,8 +98,12 @@ void ParseMediaName(const std::string& fileName, MediaItem* item) {
   item->stem = stem;
   item->game.clear();
   item->spectre = false;
+  const std::wstring ext = LowerExt(Widen(fileName));
   bool image = ClassifyExtension(Widen(fileName)) == 2;
   item->kind = image ? MediaKind::Screenshot : MediaKind::Clip;
+  item->audioOnly = ext == L".m4a";
+  // GIF hecho en el editor a partir de un clip: es de Spectre aunque sea una imagen.
+  const bool editedGif = ext == L".gif" && stem.find("_editado_") != std::string::npos;
 
   struct Prefix {
     const char* text;
@@ -115,18 +120,21 @@ void ParseMediaName(const std::string& fileName, MediaItem* item) {
       if (stem[i - 1] != '_' || !IsTimestampAt(stem, i)) continue;
       if (i - 1 > n) item->game = stem.substr(n, i - 1 - n);
       item->kind = p.kind;
-      item->spectre = (p.kind == MediaKind::Screenshot) == image;
+      item->spectre = (p.kind == MediaKind::Screenshot) == image || editedGif;
       break;
     }
     break;
   }
   if (item->spectre && item->kind != MediaKind::Screenshot && stem.find("_recorte_") != std::string::npos)
     item->kind = MediaKind::Trim;
-  // Unidos o en cámara lenta desde la biblioteca (app/Edit.h).
+  // Unidos, en cámara lenta, divididos o del editor (app/Edit.h, app/VideoEdit.h).
   if (item->spectre && item->kind != MediaKind::Screenshot &&
-      (stem.find("_union_") != std::string::npos || stem.find("_lenta") != std::string::npos))
+      (stem.find("_union_") != std::string::npos || stem.find("_lenta") != std::string::npos ||
+       stem.find("_editado_") != std::string::npos || stem.find("_parte") != std::string::npos))
     item->kind = MediaKind::Edit;
   if (item->spectre && item->kind != MediaKind::Screenshot && IsExportStem(stem)) item->kind = MediaKind::Export;
+  // Las imágenes se abren siempre como imagen, aunque el nombre empiece por Clip_.
+  if (image) item->kind = MediaKind::Screenshot;
   if (item->game == "Escritorio") item->game.clear();
 }
 

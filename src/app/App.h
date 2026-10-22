@@ -6,6 +6,7 @@
 #include "app/Library.h"
 #include "app/System.h"
 #include "app/Updater.h"
+#include "app/VideoEdit.h"
 #include "core/Pipeline.h"
 #include "ui/AppUi.h"
 #include "ui/AppWindow.h"
@@ -53,6 +54,12 @@ private:
   // copia al portapapeles.
   void ExportForDiscord(const std::string& path);
   void FinishExport();
+  // «Editar» de la biblioteca: guarda una copia con los cambios en otro hilo
+  // (<nombre>_editado_<fecha>.mp4, .gif o .m4a junto al original).
+  void SaveEdit(const std::string& path, const EditSettings& settings);
+  void FinishEdit();
+  // Dos copias sin recodificar: hasta ese segundo y desde él.
+  void SplitClip(const std::string& path, double at);
   void ToggleMenu();
   void OpenMenu();
   // restoreFocus=false: el programa que se acaba de abrir desde el panel
@@ -210,6 +217,10 @@ private:
   ULONGLONG lastAppUsage_ = 0;
   ULONGLONG lastAppFrame_ = 0;
   Exporter exporter_;
+  EditWorker editWorker_;
+  // Edición guardada «Para Discord»: se exporta después y, si sale una copia
+  // aparte, esta (la intermedia) se borra.
+  std::string discordAfterEdit_;
 };
 
 } // namespace spectre

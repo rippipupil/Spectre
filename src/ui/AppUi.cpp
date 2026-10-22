@@ -65,6 +65,26 @@ std::string KindUpper(MediaKind kind) {
   return "";
 }
 
+bool IsGif(const MediaItem& item) {
+  return item.name.size() > 4 && Lower(item.name.substr(item.name.size() - 4)) == ".gif";
+}
+
+// Etiqueta de la tarjeta: el tipo, o GIF y AUDIO para lo que sale del editor.
+std::string BadgeText(const MediaItem& item) {
+  if (IsGif(item)) return "GIF";
+  if (item.audioOnly) return "AUDIO";
+  return KindUpper(item.kind);
+}
+
+std::string KindName(const MediaItem& item) {
+  if (IsGif(item)) return "GIF";
+  if (item.audioOnly) return "Audio";
+  return MediaKindName(item.kind);
+}
+
+// Se puede abrir en «Editar»: vídeo con imagen.
+bool Editable(const MediaItem& item) { return item.Video() && !item.audioOnly; }
+
 void PageTitle(const char* title, const std::string& subtitle) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 q = ImGui::GetCursorScreenPos();
@@ -149,6 +169,7 @@ bool TypingText() { return ImGui::GetIO().WantTextInput; }
 
 void AppUi::OnOpened(HWND notifyWindow, UINT notifyMsg) {
   worker_.Start(notifyWindow, notifyMsg);
+  editor_.Start(notifyWindow, notifyMsg);
   frame_ = 0;
   openedAt_ = GetTickCount64();
 }
@@ -159,6 +180,7 @@ void AppUi::OnClosed() {
   durationsAsked_.clear();
   durationFailed_.clear();
   player_.Close();
+  editor_.Stop();
   playerPath_.clear();
   playerFailed_ = false;
   image_.reset();
@@ -172,6 +194,7 @@ void AppUi::OnClosed() {
 
 void AppUi::PauseMedia() {
   if (player_.Playing()) player_.Pause();
+  editor_.Pause();
 }
 
 void AppUi::LeaveViewer() {
@@ -188,7 +211,16 @@ void AppUi::LeaveViewer() {
 
 void AppUi::Navigate(AppModel& m, AppPage page) {
   if (m.page == AppPage::Viewer && page != AppPage::Viewer) LeaveViewer();
+  if (m.page == AppPage::Editor && page != AppPage::Editor) editor_.Leave();
   m.page = page;
+}
+
+void AppUi::Edit(AppModel& m, const std::string& path) {
+  if (m.page == AppPage::Viewer) LeaveViewer();
+  else if (m.page != AppPage::Editor) m.viewBack = m.page; // Volver: al visor y de ahí, aquí
+  m.viewPath = path;
+  m.editPath = path;
+  m.page = AppPage::Editor;
 }
 
 void AppUi::View(AppModel& m, const std::string& path, AppPage back) {
@@ -225,6 +257,7 @@ void AppUi::ToggleSelected(const std::string& path) {
 }
 
 void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
+  editor_.TakeResults(w);
   for (auto& r : worker_.Take()) {
     switch (r.job) {
     case MediaWorker::Job::Thumbnail: {
@@ -319,6 +352,7 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   ++frame_;
   // Navegación desde fuera (el panel, la bandeja): el visor no se queda sonando.
   if (m.page != AppPage::Viewer && (!playerPath_.empty() || !imagePath_.empty())) LeaveViewer();
+  if (m.page != AppPage::Editor && editor_.Active()) editor_.Leave();
   // En Ajustes se ve el tema elegido antes de aplicarlo.
   const Config& look = m.page == AppPage::Settings ? m.settings.config : m.config;
   BeginFrame(Fonts{w.Scale(), w.BoldFont(), w.BigFont(), &w.FontSizes()}, look);
@@ -329,7 +363,7 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   // En el visor el teclado es del reproductor (espacio, flechas). La
   // navegación de ImGui usa las mismas teclas: el espacio pulsaría además el
   // botón con el foco y la pausa se anularía.
-  if (m.page == AppPage::Viewer) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+  if (m.page == AppPage::Viewer || m.page == AppPage::Editor) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
   else io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -350,6 +384,7 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   case AppPage::Home: PageHome(w, m, a); break;
   case AppPage::Library: PageLibrary(w, m, a); break;
   case AppPage::Viewer: PageViewer(w, m, a); break;
+  case AppPage::Editor: PageEditor(w, m, a); break;
   case AppPage::Settings: PageSettings(w, m, a); break;
   }
   ImGui::EndGroup();
@@ -456,7 +491,7 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
   if (NavItem(1, "Inicio", m.page == AppPage::Home, rowH)) Navigate(m, AppPage::Home);
   char library[48];
   snprintf(library, sizeof(library), "Biblioteca");
-  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer, rowH))
+  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer || m.page == AppPage::Editor, rowH))
     Navigate(m, AppPage::Library);
   NavLabel(m.settings.dirty ? "AJUSTES  (SIN APLICAR)" : "AJUSTES");
   for (int i = 0; i < int(SettingsPage::Count); ++i) {
@@ -847,7 +882,7 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   }
   RequestDuration(item);
   if (hov) dl->AddRect(a, b, C(p.lineStrong), 0, 0, Px(1));
-  Badge(dl, ImVec2(ta.x + Px(8), ta.y + Px(8)), KindUpper(item.kind), false);
+  Badge(dl, ImVec2(ta.x + Px(8), ta.y + Px(8)), BadgeText(item), false);
   if (item.Video() && item.duration > 0)
     Badge(dl, ImVec2(tb.x - Px(8), tb.y - Px(8) - Px(kLabel) - Px(6)), FormatDuration(item.duration), true);
 
@@ -911,10 +946,11 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   }
   std::string path = item->path;
   if (ImGui::MenuItem("Abrir")) View(m, path, m.page);
+  if (Editable(*item) && ImGui::MenuItem("Editar...")) Edit(m, path);
   if (ImGui::MenuItem("Abrir con Windows")) a.openPath(path);
   if (ImGui::MenuItem("Mostrar en la carpeta")) a.showInFolder(path);
   if (ImGui::MenuItem("Copiar para pegar en Discord")) a.copyToClipboard(path);
-  if (item->Video()) {
+  if (Editable(*item)) {
     if (m.exportPercent >= 0 && m.exportPath == path) {
       std::string label = "Cancelar la exportación (" + std::to_string(m.exportPercent) + " %)";
       if (ImGui::MenuItem(label.c_str())) a.cancelExport();
@@ -1313,6 +1349,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
   }
   const MediaItem item = *found; // copia: la lista puede cambiar en este frame (renombrar, borrar)
   const bool video = item.Video();
+  const bool editable = Editable(item); // vídeo con imagen (no el M4A de «Solo audio»)
 
   // Abre el archivo en el reproductor o pide la imagen.
   if (video && playerPath_ != item.path) {
@@ -1348,7 +1385,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
       return;
     }
     float tx = q.x + rowH + Px(10);
-    std::string title = MediaKindName(item.kind);
+    std::string title = KindName(item);
     title += "  ·  " + Title(item);
     Text(dl, Bold(), Px(kBody) + Px(2), ImVec2(tx, q.y), C(p.text), title.c_str());
     std::string sub = item.date + "  ·  " + FormatBytes(item.size);
@@ -1365,7 +1402,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     const bool exporting = m.exportPercent >= 0;
     const bool exportingThis = exporting && m.exportPath == item.path;
     if (exportingThis) sub = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %";
-    const int actions = video ? 7 : 6;
+    const int actions = editable ? 8 : 6;
     float actionsW = rowH * float(actions) + Px(4) * float(actions - 1);
     Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(exportingThis ? p.accent : p.textMuted),
          Ellipsize(ImGui::GetFont(), Px(kSmall), sub, ImGui::GetContentRegionAvail().x - rowH - actionsW - Px(30)).c_str());
@@ -1385,7 +1422,15 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     if (IconButton("copy", Icon::Copy, rowH, "Copiar el archivo para pegarlo en Discord o WhatsApp"))
       a.copyToClipboard(item.path);
     ImGui::SameLine(0, Px(4));
-    if (video) {
+    if (editable) {
+      if (IconButton("edit", Icon::Sliders, rowH,
+                     "Editar (E): recortar, velocidad, vertical para TikTok, texto, color, sonido... El original no cambia.")) {
+        Edit(m, item.path);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        return;
+      }
+      ImGui::SameLine(0, Px(4));
       if (exportingThis) {
         std::string tip = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %. Clic para cancelar.";
         if (IconButton("export", Icon::Share, rowH, tip.c_str(), true)) a.cancelExport();
@@ -1440,6 +1485,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     std::shared_ptr<UiTexture> frame = playerFailed_ ? nullptr : player_.Frame(w);
     if (frame) DrawImage(dl, *frame, va, vb, false);
     else if (UiTexture* thumb = ThumbFor(item)) DrawImage(dl, *thumb, va, vb, false, 0.5f);
+    else if (item.audioOnly) DrawIcon(dl, Icon::Volume, (va + vb) * 0.5f, Px(28), C(p.textFaint));
     if (playerFailed_ || player_.Failed()) {
       std::string err = playerFailed_ ? std::string(Player::Available() ? "No se pudo abrir el reproductor."
                                                                           : "Este Windows no tiene Media Foundation (Windows N).")
@@ -1505,21 +1551,23 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     ImGui::Dummy(ImVec2(timeW, rowH));
     ImGui::SameLine(0, Px(12));
     float volumeW = Px(110);
-    float tlW = ImGui::GetContentRegionAvail().x - volumeW - rowH - Px(24) - rowH - Px(8) - rowH - Px(8);
+    float tlW = ImGui::GetContentRegionAvail().x - volumeW - rowH - Px(24) - (editable ? (rowH + Px(8)) * 2 : 0.0f);
     Timeline(w, item, std::max(Px(100), tlW));
     ImGui::SameLine(0, Px(12));
-    if (IconButton("trim", Icon::Scissors, rowH, "Recortar (sin recodificar)", trimMode_)) {
-      trimMode_ = !trimMode_;
-      if (trimMode_ && (trimEnd_ <= trimStart_ || trimEnd_ <= 0)) {
-        trimStart_ = 0;
-        trimEnd_ = duration;
+    if (editable) {
+      if (IconButton("trim", Icon::Scissors, rowH, "Recortar (sin recodificar)", trimMode_)) {
+        trimMode_ = !trimMode_;
+        if (trimMode_ && (trimEnd_ <= trimStart_ || trimEnd_ <= 0)) {
+          trimStart_ = 0;
+          trimEnd_ = duration;
+        }
       }
+      ImGui::SameLine(0, Px(8));
+      std::string frameTip = std::string("Guardar este fotograma como captura (S), en ") +
+                             (m.config.screenshotFormat == "jpg" ? "JPG" : "PNG") + " y junto al vídeo";
+      if (IconButton("frame", Icon::Shot, rowH, frameTip.c_str())) SaveCurrentFrame(item, a);
+      ImGui::SameLine(0, Px(8));
     }
-    ImGui::SameLine(0, Px(8));
-    std::string frameTip = std::string("Guardar este fotograma como captura (S), en ") +
-                           (m.config.screenshotFormat == "jpg" ? "JPG" : "PNG") + " y junto al vídeo";
-    if (IconButton("frame", Icon::Shot, rowH, frameTip.c_str())) SaveCurrentFrame(item, a);
-    ImGui::SameLine(0, Px(8));
     if (IconButton("mute", player_.Muted() || player_.Volume() <= 0 ? Icon::Muted : Icon::Volume, rowH,
                    player_.Muted() ? "Activar el sonido (M)" : "Silenciar (M)")) {
       muted_ = !player_.Muted();
@@ -1598,16 +1646,22 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
         muted_ = !player_.Muted();
         player_.SetMuted(muted_);
       }
-      if (ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+      if (ImGui::IsKeyPressed(ImGuiKey_I, false) && editable) {
         trimMode_ = true;
         if (trimEnd_ <= 0) trimEnd_ = duration;
         trimStart_ = std::min(player_.Position(), trimEnd_ - 0.5);
       }
-      if (ImGui::IsKeyPressed(ImGuiKey_O, false)) {
+      if (ImGui::IsKeyPressed(ImGuiKey_O, false) && editable) {
         trimMode_ = true;
         trimEnd_ = std::max(player_.Position(), trimStart_ + 0.5);
       }
-      if (ImGui::IsKeyPressed(ImGuiKey_S, false)) SaveCurrentFrame(item, a);
+      if (ImGui::IsKeyPressed(ImGuiKey_S, false) && editable) SaveCurrentFrame(item, a);
+      if (ImGui::IsKeyPressed(ImGuiKey_E, false) && editable) {
+        Edit(m, item.path);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        return;
+      }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) a.setFavorite(item.path, !item.favorite);
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
@@ -1620,6 +1674,33 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
   }
   ImGui::EndChild();
   ImGui::PopStyleVar();
+}
+
+// ------------------------------------------------------------------ editar
+
+void AppUi::PageEditor(AppWindow& w, AppModel& m, const AppActions& a) {
+  const MediaItem* found = Find(m, m.editPath);
+  if (!found) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(28), Px(20)));
+    ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
+    if (GhostButton("back", "Volver", Px(110))) Navigate(m, m.viewBack);
+    Gap(10);
+    Help(m.itemsLoaded ? "Este archivo ya no está en la carpeta." : "Leyendo la carpeta...");
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    return;
+  }
+  const MediaItem item = *found; // copia: la lista puede cambiar en este frame
+  if (!editor_.Active() || editor_.Path() != item.path) editor_.Open(item.path);
+  const EditorUi::Exit exit = editor_.Draw(w, m, a, item);
+  if (!exit.view.empty()) {
+    editor_.Leave();
+    View(m, exit.view, m.viewBack);
+  } else if (exit.back) {
+    editor_.Leave();
+    m.viewPath = item.path;
+    m.page = AppPage::Viewer;
+  }
 }
 
 // ------------------------------------------------------------------ ajustes
