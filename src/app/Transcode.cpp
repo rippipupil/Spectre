@@ -190,8 +190,15 @@ void LivePacer::Wait(double seconds, const std::atomic<bool>& cancel) {
   // Hasta una décima de adelanto: el encoder recibe tandas cortas y el hilo
   // no se despierta en cada fotograma.
   for (;;) {
-    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
-    const double ahead = (seconds - from_) - elapsed;
+    const auto at = std::chrono::steady_clock::now();
+    const double ahead = (seconds - from_) - std::chrono::duration<double>(at - start_).count();
+    if (ahead < 0) {
+      // Va por detrás («Al revés» decodifica ventanas sin entregar nada): ese
+      // retraso no se recupera después de golpe.
+      from_ = seconds;
+      start_ = at;
+      return;
+    }
     if (ahead <= 0.1 || cancel || !*live_) return;
     std::this_thread::sleep_for(std::chrono::duration<double>(std::min(ahead, 0.1)));
   }
