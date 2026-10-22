@@ -50,7 +50,7 @@ enum TrayCommand {
 
 constexpr ULONGLONG kGameGraceMs = 15000; // el juego sigue "activo" 15 s después de perder el foco
 constexpr ULONGLONG kToastMs = 2600;
-constexpr size_t kPanelClips = 3;
+constexpr size_t kPanelClips = 8; // el compacto enseña 3; el lateral, los que quepan
 constexpr double kMaxMarkerAge = kMaxClipSeconds + 10; // segundos: el clip más largo y un margen
 constexpr uint64_t kLowDiskBytes = uint64_t(1) << 30; // menos de 1 GB libre: se avisa al guardar
 
@@ -714,23 +714,37 @@ void App::ToggleMenu() {
   else OpenMenu();
 }
 
-RECT App::MenuRect() const {
+App::MenuArea App::MenuPlacement() const {
   MONITORINFO mi{};
   mi.cbSize = sizeof(mi);
   if (!GetMonitorInfoW(menuMonitor_, &mi)) {
     mi.rcMonitor = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
     mi.rcWork = mi.rcMonitor;
   }
-  // Sobre un juego a pantalla completa la barra de tareas está tapada: se usa
-  // el monitor entero.
-  const RECT& work = menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
-  float scale = MonitorScale(menuMonitor_);
-  // Panel: franja estrecha pegada al borde derecho, como el overlay de NVIDIA.
-  // La ventana ocupa todo el alto del área de trabajo; solo el panel recibe
-  // clics (SetHitRegion) y el resto de la franja es transparente.
-  int width = int(std::ceil(kPanelWidth * scale));
-  int margin = int(18 * scale);
-  return RECT{work.right - margin - width, work.top + margin, work.right - margin, work.bottom - margin};
+  const bool lateral = IsLateralPanel(menuModel_.config);
+  const float scale = MonitorScale(menuMonitor_);
+  MenuArea a;
+  // Lateral: el monitor entero, de arriba abajo, como el overlay de NVIDIA.
+  // Compacto: sobre un juego a pantalla completa la barra de tareas está
+  // tapada y también se usa el monitor entero; en el escritorio, el área de
+  // trabajo, con un margen.
+  a.area = lateral || menuScreen_.fullscreen ? mi.rcMonitor : mi.rcWork;
+  a.width = int(std::ceil(kPanelWidth * scale));
+  a.margin = lateral ? 0 : int(kPanelMargin * scale);
+  return a;
+}
+
+RECT App::MenuRect() const {
+  // La ventana es una franja vertical del ancho del panel y del alto de la
+  // zona; solo el panel recibe clics (SetHitRegion) y el resto de la franja es
+  // transparente. Va donde se dejó al arrastrarlo: la fracción guardada del
+  // hueco libre, que sirve igual con otra resolución, escala o monitor.
+  const MenuArea a = MenuPlacement();
+  const Config& c = menuModel_.config;
+  const float fx = IsLateralPanel(c) ? c.panelLateralX : c.panelCompactX;
+  const LONG free = std::max<LONG>(0, a.area.right - a.area.left - 2 * a.margin - a.width);
+  const LONG left = a.area.left + a.margin + LONG(std::lround(fx * float(free)));
+  return RECT{left, a.area.top + a.margin, left + a.width, a.area.bottom - a.margin};
 }
 
 void App::PlaceMenu(bool activate) {
@@ -783,6 +797,7 @@ void App::CloseMenu(bool restoreFocus) {
 // minimizó al perder el foco se restaura: al activarse vuelve a su pantalla
 // completa.
 void App::EndMenuSession(bool giveFocusBack) {
+  EndMenuDrag(); // cerrado a mitad de un arrastre: se guarda donde iba
   ++menuGeneration_;
   menuClosedAt_ = GetTickCount64();
   keyboard_.Uninstall();
@@ -1132,7 +1147,14 @@ void App::Toast(const std::string& text, bool error) {
   bool bottom = corner == "bottom-left" || corner == "bottom-right";
   LONG x = left ? work.left + margin : work.right - margin - w;
   LONG y = bottom ? work.bottom - margin - h : work.top + margin;
-  RECT r{x, y, x + w, y + h};
+  // Con el panel abierto en esa esquina (se puede mover), el aviso se pone a
+  // su lado en vez de taparlo.
+  RECT r{x, y, x + w, y + h}, overlap{};
+  if (menu_.Visible() && menuHitValid_ && IntersectRect(&overlap, &r, &menuHitScreen_)) {
+    const bool panelOnLeft = menuHitScreen_.left + menuHitScreen_.right < work.left + work.right;
+    x = panelOnLeft ? menuHitScreen_.right + margin : menuHitScreen_.left - margin - w;
+    r = {x, y, x + w, y + h};
+  }
   if (!toast_.Show(r, false)) return;
   // "Clip guardado" tiene que verse también encima de un juego topmost.
   FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow(), false);
@@ -1199,14 +1221,15 @@ void App::RenderOverlays() {
       lastStats_ = now;
       RefreshMenuModel();
     }
+    UpdateMenuDrag();
     inFrame_ = true;
     menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_); });
     inFrame_ = false;
     if (menuModel_.panelHeight > 0) {
-      // Mismo cálculo que la posición del panel en DrawPanel (centrado en la franja).
-      LONG h = LONG(std::ceil(menuModel_.panelHeight));
-      LONG top = std::max<LONG>(0, (LONG(menu_.Height()) - h) / 2);
-      RECT hit{0, top, LONG(menu_.Width()), top + h};
+      // Donde DrawPanel puso el panel en este frame (el lateral llena la franja).
+      LONG top = std::max<LONG>(0, LONG(std::floor(menuModel_.panelTop)));
+      LONG bottom = std::min<LONG>(LONG(menu_.Height()), top + LONG(std::ceil(menuModel_.panelHeight)));
+      RECT hit{0, top, LONG(menu_.Width()), bottom};
       menu_.SetHitRegion(&hit);
       RECT win{};
       if (GetWindowRect(menu_.Hwnd(), &win)) {
@@ -1319,6 +1342,90 @@ void App::WatchGameWhileOpen() {
     Log("Panel: el juego se minimizó al perder el foco; se restaura detrás del panel");
     ShowWindow(previousForeground_, SW_SHOWNOACTIVATE);
   }
+}
+
+// El panel sigue al cursor mientras se arrastra (lo empieza DrawPanel). Se
+// mide en coordenadas de pantalla: las del ratón de ImGui son de la ventana,
+// que se está moviendo. Lateral: solo en horizontal; compacto: también en
+// vertical dentro de la franja. A menos de 16 px de un borde se pega a él.
+// La ventana se mueve sin activarse (Move), así que el juego no pierde el foco.
+void App::UpdateMenuDrag() {
+  if (!menuModel_.dragging && !menuDragActive_) return;
+  // Soltado. También si ImGui no se enteró: sin activar, la captura del ratón
+  // solo vale sobre la ventana, y soltando fuera (el compacto se para a 18 px
+  // del borde, el cursor no) el WM_LBUTTONUP va al juego. Entonces se le dice
+  // a ImGui o el siguiente clic en el panel se perdería.
+  if (!menuModel_.dragging || !AnyMouseButtonDown()) {
+    if (menuModel_.dragging) menu_.ReleaseMouseButtons();
+    EndMenuDrag();
+    return;
+  }
+  RECT win{};
+  POINT p{};
+  if (!GetWindowRect(menu_.Hwnd(), &win) || !GetCursorPos(&p)) return;
+  if (!menuDragActive_) {
+    menuDragActive_ = true;
+    menuDragFrom_ = {win.left + LONG(menuModel_.dragFromX), win.top + LONG(menuModel_.dragFromY)};
+    menuDragLeft_ = win.left;
+    menuDragTop_ = win.top + LONG(std::floor(menuModel_.panelTop));
+  }
+  if (p.x == menuDragFrom_.x && p.y == menuDragFrom_.y) return; // un clic sin mover no cambia nada
+  const MenuArea a = MenuPlacement();
+  const LONG snap = LONG(16 * MonitorScale(menuMonitor_));
+  auto place = [snap](LONG want, LONG lo, LONG hi) {
+    want = std::clamp(want, lo, hi);
+    if (want - lo < snap) return lo;
+    if (hi - want < snap) return hi;
+    return want;
+  };
+  Config& c = menuModel_.config;
+  const bool lateral = IsLateralPanel(c);
+  const LONG minX = a.area.left + a.margin;
+  const LONG freeX = std::max<LONG>(0, a.area.right - a.area.left - 2 * a.margin - a.width);
+  if (freeX > 0) {
+    const LONG left = place(menuDragLeft_ + p.x - menuDragFrom_.x, minX, minX + freeX);
+    (lateral ? c.panelLateralX : c.panelCompactX) = float(left - minX) / float(freeX);
+  }
+  if (!lateral) {
+    // La franja ya descuenta el margen: el panel va de su borde de arriba al de abajo.
+    const LONG freeY = std::max<LONG>(0, LONG(menu_.Height()) - LONG(std::ceil(menuModel_.panelHeight)));
+    if (freeY > 0) {
+      const LONG top = place(menuDragTop_ + p.y - menuDragFrom_.y, win.top, win.top + freeY);
+      c.panelCompactY = float(top - win.top) / float(freeY);
+    }
+  }
+  RECT to = MenuRect();
+  if (to.left != win.left || to.top != win.top) menu_.Move(to);
+}
+
+// Fin del arrastre: la posición nueva queda en config.json y el panel se abre
+// ahí la próxima vez.
+void App::EndMenuDrag() {
+  menuModel_.dragging = false;
+  if (!menuDragActive_) return;
+  menuDragActive_ = false;
+  const Config& m = menuModel_.config;
+  if (m.panelLateralX == config_.panelLateralX && m.panelCompactX == config_.panelCompactX &&
+      m.panelCompactY == config_.panelCompactY)
+    return;
+  config_.panelLateralX = m.panelLateralX;
+  config_.panelCompactX = m.panelCompactX;
+  config_.panelCompactY = m.panelCompactY;
+  // Con Ajustes a medio editar, su copia de trabajo también la recibe si no
+  // la había tocado: así «Devolverlo a su sitio» se activa y lo que pone se
+  // aplica (MergeEdits solo aplica lo que difiere de base).
+  SettingsModel& s = appModel_.settings;
+  auto follow = [](float& edited, float& base, float now) {
+    if (edited == base) edited = base = now;
+  };
+  follow(s.config.panelLateralX, s.base.panelLateralX, config_.panelLateralX);
+  follow(s.config.panelCompactX, s.base.panelCompactX, config_.panelCompactX);
+  follow(s.config.panelCompactY, s.base.panelCompactY, config_.panelCompactY);
+  SaveConfig(config_);
+  SyncModels();
+  Log("Panel %s movido: x %.2f, y %.2f", IsLateralPanel(config_) ? "lateral" : "compacto",
+      double(IsLateralPanel(config_) ? config_.panelLateralX : config_.panelCompactX),
+      double(IsLateralPanel(config_) ? 0.0f : config_.panelCompactY));
 }
 
 // Un clic fuera del panel lo cierra; el clic llega también a lo que haya

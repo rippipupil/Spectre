@@ -83,6 +83,15 @@ struct Config {
   std::string theme = "negro";         // "negro" | "psiquico"
   bool themeMotion = true;             // animaciones propias del tema (solo las tiene Psíquico)
 
+  // Panel Alt+Z (ver ui/Menu.h). Se arrastra y se vuelve a abrir donde se
+  // dejó: la posición se guarda como fracción del hueco libre del monitor
+  // (0 = izquierda o arriba, 1 = derecha o abajo), así sirve en cualquier
+  // monitor, resolución y escala.
+  std::string panelLayout = "lateral"; // "lateral" (todo el alto, como NVIDIA) | "compacto" (el de antes)
+  float panelLateralX = 0.0f;          // lateral: pegado a la izquierda
+  float panelCompactX = 1.0f;          // compacto: a la derecha y centrado en vertical
+  float panelCompactY = 0.5f;
+
   HotkeyConfig hotkeys;
 };
 
