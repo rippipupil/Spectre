@@ -49,6 +49,10 @@ public:
   // Zona que recibe clics (coordenadas de la ventana); fuera de ella el ratón
   // pasa a la ventana de debajo. nullptr = toda la ventana.
   void SetHitRegion(const RECT* rect);
+  // Suelta en ImGui los botones del ratón. Sin activar, la captura del ratón
+  // solo vale con el cursor sobre la ventana: un WM_xBUTTONUP fuera de ella va
+  // a la ventana de debajo y ImGui seguiría viendo el botón pulsado.
+  void ReleaseMouseButtons();
 
   // draw se ejecuta dentro de un frame de ImGui.
   void Render(const std::function<void()>& draw);

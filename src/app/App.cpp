@@ -1234,9 +1234,12 @@ void App::WatchGameWhileOpen() {
 // La ventana se mueve sin activarse (Move), así que el juego no pierde el foco.
 void App::UpdateMenuDrag() {
   if (!menuModel_.dragging && !menuDragActive_) return;
-  // Soltado. También si ImGui no se enteró (otra ventana se quedó con la
-  // captura del ratón y no llegó el WM_LBUTTONUP): ningún botón pulsado.
+  // Soltado. También si ImGui no se enteró: sin activar, la captura del ratón
+  // solo vale sobre la ventana, y soltando fuera (el compacto se para a 18 px
+  // del borde, el cursor no) el WM_LBUTTONUP va al juego. Entonces se le dice
+  // a ImGui o el siguiente clic en el panel se perdería.
   if (!menuModel_.dragging || !AnyMouseButtonDown()) {
+    if (menuModel_.dragging) menu_.ReleaseMouseButtons();
     EndMenuDrag();
     return;
   }
@@ -1291,6 +1294,16 @@ void App::EndMenuDrag() {
   config_.panelLateralX = m.panelLateralX;
   config_.panelCompactX = m.panelCompactX;
   config_.panelCompactY = m.panelCompactY;
+  // Con Ajustes a medio editar, su copia de trabajo también la recibe si no
+  // la había tocado: así «Devolverlo a su sitio» se activa y lo que pone se
+  // aplica (MergeEdits solo aplica lo que difiere de base).
+  SettingsModel& s = appModel_.settings;
+  auto follow = [](float& edited, float& base, float now) {
+    if (edited == base) edited = base = now;
+  };
+  follow(s.config.panelLateralX, s.base.panelLateralX, config_.panelLateralX);
+  follow(s.config.panelCompactX, s.base.panelCompactX, config_.panelCompactX);
+  follow(s.config.panelCompactY, s.base.panelCompactY, config_.panelCompactY);
   SaveConfig(config_);
   SyncModels();
   Log("Panel %s movido: x %.2f, y %.2f", IsLateralPanel(config_) ? "lateral" : "compacto",
