@@ -2,8 +2,10 @@
 
 #include "ui/AppWindow.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace spectre {
 
@@ -44,6 +46,9 @@ public:
   std::shared_ptr<UiTexture> Frame(AppWindow& window);
   int VideoWidth() const;
   int VideoHeight() const;
+  // Copia el último fotograma mostrado (BGR de 24 bits, de arriba abajo) para
+  // guardarlo como imagen. Lee la textura de la GPU: solo al pulsar el botón.
+  bool ReadFrame(std::vector<uint8_t>* bgr, int* width, int* height) const;
 
 private:
   struct Impl;

@@ -106,6 +106,10 @@ bool ToggleRow(const char* id, Icon icon, const char* label, bool on);
 // Control segmentado. Devuelve el valor pulsado o -1.
 int Segmented(const char* id, const std::vector<std::pair<int, std::string>>& options, int current,
               float width = 0);
+// Duración del clip: rejilla de 4 columnas con Config::kClipLengths. Las que
+// pasan de fitSeconds (lo que cabe en la RAM del replay; 0 = no se sabe) se
+// ven atenuadas. Devuelve la pulsada o -1.
+int ClipLengthPicker(const char* id, int current, double fitSeconds, float width = 0);
 bool IconButton(const char* id, Icon icon, float size, const char* tooltip, bool active = false);
 // Botón con borde de 1 px y fondo transparente (acciones secundarias).
 bool GhostButton(const char* id, const char* label, float width, Tone tone = Tone::Normal, float height = 32);

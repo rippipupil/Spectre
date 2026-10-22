@@ -55,6 +55,10 @@ struct PipelineStats {
   size_t bufferBytes = 0;
   double bufferSeconds = 0;
   size_t bufferLimitBytes = 0; // tope en uso (el automático ya calculado)
+  // La duración de clip más larga que cabe entera en el tope de RAM (el fijo o
+  // la cuarta parte de la RAM) al bitrate máximo de ahora: lo que el panel y
+  // Ajustes avisan que no cabe.
+  double replayFitSeconds = 0;
   bool encoderSoftware = false; // codifica en la CPU
   int audioTracks = 0;
   std::string systemAudio; // dispositivo y formato abiertos (vacío = no se captura)
@@ -107,6 +111,8 @@ private:
   bool Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& frame);
   RECT CameraRect(UINT camWidth, UINT camHeight) const;
   size_t BufferLimit(double seconds) const;
+  // Bytes por segundo del replay en el peor caso (todo al bitrate máximo, con audio y un 10 %).
+  double ReplayBytesPerSecond() const;
   void ReleaseRecorder();
 
   PipelineSettings settings_;

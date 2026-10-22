@@ -1,6 +1,7 @@
 #include "app/Config.h"
 
 #include "common/Util.h"
+#include "app/Sound.h"
 #include "encode/Quality.h"
 #include "ui/Theme.h"
 
@@ -12,22 +13,28 @@
 namespace spectre {
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HotkeyConfig, overlay, saveClip, toggleRecording, toggleReplay,
-                                                screenshot, marker)
+                                                screenshot, marker, shortClip)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSeconds, onlyInGames, folderPerGame,
+                                                shortClipSeconds, recordLimitMinutes,
                                                 captureMode, monitorIndex, captureApi, captureCursor, fps,
                                                 outputHeight, quality, bitrateKbps, codec, encoder, gpuPriority,
                                                 captureSystemAudio, outputDeviceId, gameAudioOnly, captureMic,
                                                 micDeviceId, systemVolume, micVolume, separateTracks, cameraEnabled,
                                                 cameraId, cameraCorner, cameraSizePercent, screenshotFormat,
-                                                outputDir, storageLimitGB, showNotifications, soundOnSave,
+                                                outputDir, storageLimitGB, deleteAfterDays, showNotifications,
+                                                soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
                                                 theme, themeMotion, hotkeys)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 
 static void Sanitize(Config& c) {
-  c.clipSeconds = std::clamp(c.clipSeconds, 5, 600);
+  c.clipSeconds = std::clamp(c.clipSeconds, 5, kMaxClipSeconds);
+  c.shortClipSeconds = std::clamp(c.shortClipSeconds, 5, 120);
+  c.recordLimitMinutes = std::clamp(c.recordLimitMinutes, 0, 24 * 60);
+  c.deleteAfterDays = std::clamp(c.deleteAfterDays, 0, 3650);
+  if (!IsKnownSaveSound(c.saveSound)) c.saveSound = "clasico";
   c.fps = std::clamp(c.fps, 15, 144);
   c.bitrateKbps = std::clamp(c.bitrateKbps, 1000, 150000);
   bool knownQuality = false;

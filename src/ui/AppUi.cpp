@@ -55,6 +55,7 @@ std::string KindUpper(MediaKind kind) {
   case MediaKind::Recording: return "GRABACIÓN";
   case MediaKind::Trim: return "RECORTE";
   case MediaKind::Export: return "DISCORD";
+  case MediaKind::Edit: return "EDITADO";
   case MediaKind::Screenshot: return "CAPTURA";
   }
   return "";
@@ -198,6 +199,26 @@ const MediaItem* AppUi::Find(const AppModel& m, const std::string& path) const {
   return nullptr;
 }
 
+void AppUi::SaveCurrentFrame(const MediaItem& item, const AppActions& a) {
+  std::vector<uint8_t> bgr;
+  int width = 0, height = 0;
+  // Lo que se ve: si se está reproduciendo, se pausa para que el fotograma
+  // guardado sea el de la pantalla.
+  if (player_.Playing()) player_.Pause();
+  if (!player_.ReadFrame(&bgr, &width, &height)) bgr.clear();
+  if (a.saveFrame) a.saveFrame(item, std::move(bgr), width, height);
+}
+
+bool AppUi::Selected(const std::string& path) const {
+  return std::find(selected_.begin(), selected_.end(), path) != selected_.end();
+}
+
+void AppUi::ToggleSelected(const std::string& path) {
+  auto it = std::find(selected_.begin(), selected_.end(), path);
+  if (it != selected_.end()) selected_.erase(it);
+  else selected_.push_back(path);
+}
+
 void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
   for (auto& r : worker_.Take()) {
     switch (r.job) {
@@ -254,7 +275,9 @@ std::vector<const MediaItem*> AppUi::Filtered(const AppModel& m) const {
   for (const auto& item : m.items) {
     switch (filter_) {
     case 1:
-      if (item.kind != MediaKind::Clip && item.kind != MediaKind::Trim && item.kind != MediaKind::Export) continue;
+      if (item.kind != MediaKind::Clip && item.kind != MediaKind::Trim && item.kind != MediaKind::Export &&
+          item.kind != MediaKind::Edit)
+        continue;
       break;
     case 2: if (item.kind != MediaKind::Recording) continue; break;
     case 3: if (item.kind != MediaKind::Screenshot) continue; break;
@@ -322,6 +345,10 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   if (!starToggle_.empty()) {
     if (const MediaItem* item = Find(m, starToggle_)) a.setFavorite(item->path, !item->favorite);
     starToggle_.clear();
+  }
+  if (!selectToggle_.empty()) {
+    ToggleSelected(selectToggle_);
+    selectToggle_.clear();
   }
 
   // Animaciones del tema solo con la ventana delante y a 30 fps: detrás de un
@@ -486,7 +513,180 @@ void AppUi::StatusCard(AppModel& m, const AppActions& a) {
   ImGui::Dummy(ImVec2(width, 0));
 }
 
+namespace {
+
+// Números de la biblioteca para Inicio. Días y horas en hora local, a partir
+// de la fecha de cada archivo.
+struct LibraryStats {
+  int clips = 0, recordings = 0, screenshots = 0, favorites = 0;
+  double seconds = 0;
+  int unmeasured = 0;
+  uint64_t bytes = 0;
+  std::string topGame;
+  int topGameCount = 0;
+  int64_t bestDay = -1, firstDay = -1;
+  int bestDayCount = 0;
+  int longestStreak = 0;
+  int topHour = -1, topHourCount = 0;
+};
+
+constexpr int64_t kTicksPerHour = int64_t(36000000000);
+constexpr int64_t kTicksPerDay = kTicksPerHour * 24;
+
+int64_t LocalTicks(int64_t modified) {
+  FILETIME utc{DWORD(uint64_t(modified) & 0xFFFFFFFFu), DWORD(uint64_t(modified) >> 32)}, local{};
+  if (!FileTimeToLocalFileTime(&utc, &local)) return modified;
+  return int64_t((uint64_t(local.dwHighDateTime) << 32) | local.dwLowDateTime);
+}
+
+LibraryStats ComputeStats(const std::vector<MediaItem>& items) {
+  LibraryStats st;
+  std::unordered_map<std::string, int> games;
+  std::unordered_map<int64_t, int> days; // día local -> clips
+  int hours[24] = {};
+  std::vector<int64_t> activeDays;
+  for (const auto& item : items) {
+    st.bytes += item.size;
+    if (item.favorite) ++st.favorites;
+    const int64_t local = LocalTicks(item.modified);
+    const int64_t day = local / kTicksPerDay;
+    if (st.firstDay < 0 || day < st.firstDay) st.firstDay = day;
+    activeDays.push_back(day);
+    if (item.kind == MediaKind::Screenshot) {
+      ++st.screenshots;
+      continue;
+    }
+    if (item.duration > 0) st.seconds += item.duration;
+    else ++st.unmeasured;
+    if (item.kind == MediaKind::Recording) {
+      ++st.recordings;
+      continue;
+    }
+    if (item.kind != MediaKind::Clip) continue; // recortes, uniones y copias no son jugadas nuevas
+    ++st.clips;
+    ++days[day];
+    ++hours[(local / kTicksPerHour) % 24];
+    if (item.spectre && !item.game.empty()) ++games[item.game];
+  }
+  for (const auto& [game, n] : games)
+    if (n > st.topGameCount || (n == st.topGameCount && game < st.topGame)) {
+      st.topGame = game;
+      st.topGameCount = n;
+    }
+  for (const auto& [day, n] : days)
+    if (n > st.bestDayCount || (n == st.bestDayCount && day > st.bestDay)) {
+      st.bestDay = day;
+      st.bestDayCount = n;
+    }
+  for (int h = 0; h < 24; ++h)
+    if (hours[h] > st.topHourCount) {
+      st.topHour = h;
+      st.topHourCount = hours[h];
+    }
+  // Racha: días seguidos en los que se guardó algo.
+  std::sort(activeDays.begin(), activeDays.end());
+  activeDays.erase(std::unique(activeDays.begin(), activeDays.end()), activeDays.end());
+  int run = 0;
+  for (size_t i = 0; i < activeDays.size(); ++i) {
+    run = i > 0 && activeDays[i] == activeDays[i - 1] + 1 ? run + 1 : 1;
+    st.longestStreak = std::max(st.longestStreak, run);
+  }
+  return st;
+}
+
+// «21 oct 2026»
+std::string DayText(int64_t day) {
+  static const char* months[] = {"ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"};
+  const int64_t ticks = day * kTicksPerDay;
+  FILETIME ft{DWORD(uint64_t(ticks) & 0xFFFFFFFFu), DWORD(uint64_t(ticks) >> 32)};
+  SYSTEMTIME t{};
+  if (!FileTimeToSystemTime(&ft, &t)) return "";
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d %s %d", t.wDay, months[(t.wMonth + 11) % 12], t.wYear);
+  return buf;
+}
+
+// «45 min», «3 h 05 min»
+std::string HoursText(double seconds) {
+  const int minutes = int(seconds / 60.0 + 0.5);
+  if (minutes < 1) return seconds > 0 ? "menos de 1 min" : "0 min";
+  if (minutes < 60) return std::to_string(minutes) + " min";
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d h %02d min", minutes / 60, minutes % 60);
+  return buf;
+}
+
+// Casilla plana con un número grande y una línea debajo.
+void StatTile(ImVec2 a, float width, float height, const std::string& label, const std::string& value,
+              const std::string& detail) {
+  const Palette& p = Colors();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(a, ImVec2(a.x + width, a.y + height), C(p.surface));
+  const float pad = Px(14), inner = width - pad * 2;
+  ImFont* font = ImGui::GetFont();
+  Text(dl, font, Px(kLabel), ImVec2(a.x + pad, a.y + pad), C(p.textMuted),
+       Ellipsize(font, Px(kLabel), label, inner).c_str());
+  Text(dl, Bold(), Px(kBody) + Px(2), ImVec2(a.x + pad, a.y + pad + Px(kLabel) + Px(8)), C(p.text),
+       Ellipsize(Bold(), Px(kBody) + Px(2), value, inner).c_str());
+  Text(dl, font, Px(kSmall), ImVec2(a.x + pad, a.y + height - pad - Px(kSmall)), C(p.textFaint),
+       Ellipsize(font, Px(kSmall), detail, inner).c_str());
+}
+
+} // namespace
+
+void AppUi::StatsSection(const AppModel& m) {
+  SectionLabel("TUS NÚMEROS");
+  Gap(6);
+  if (m.items.empty()) {
+    Help("Cuando guardes clips verás aquí cuánto has grabado, tu juego más clipeado y tu mejor racha.");
+    return;
+  }
+  const LibraryStats st = ComputeStats(m.items);
+  const auto plural = [](int n, const char* one, const char* many) {
+    return std::to_string(n) + " " + (n == 1 ? one : many);
+  };
+  struct Tile {
+    std::string label, value, detail;
+  };
+  std::vector<Tile> tiles;
+  tiles.push_back({"CLIPS", std::to_string(st.clips),
+                   plural(st.recordings, "grabación", "grabaciones") + " y " + plural(st.screenshots, "captura", "capturas")});
+  tiles.push_back({"TIEMPO GUARDADO", HoursText(st.seconds),
+                   st.unmeasured > 0 ? "midiendo " + plural(st.unmeasured, "vídeo", "vídeos") + "..."
+                                     : "entre clips y grabaciones"});
+  tiles.push_back({"JUEGO CON MÁS CLIPS", st.topGame.empty() ? std::string("Ninguno aún") : st.topGame,
+                   st.topGame.empty() ? std::string("se ve al clipear un juego") : plural(st.topGameCount, "clip", "clips")});
+  tiles.push_back({"MEJOR RACHA", plural(st.longestStreak, "día", "días"), "seguidos guardando algo"});
+  tiles.push_back({"DÍA CON MÁS CLIPS", st.bestDay >= 0 ? DayText(st.bestDay) : std::string("Ninguno aún"),
+                   st.bestDay >= 0 ? plural(st.bestDayCount, "clip", "clips") : std::string("")});
+  char hour[32] = "Sin datos";
+  if (st.topHour >= 0) snprintf(hour, sizeof(hour), "%02d:00 a %02d:00", st.topHour, (st.topHour + 1) % 24);
+  tiles.push_back({"HORA FAVORITA", hour, st.topHour >= 0 ? "cuando más clips guardas" : ""});
+  tiles.push_back({"FAVORITOS", std::to_string(st.favorites), "el límite de espacio no los borra"});
+  tiles.push_back({"OCUPA", FormatBytes(st.bytes),
+                   st.firstDay >= 0 ? "desde el " + DayText(st.firstDay) : std::string("")});
+
+  const float gap = Px(10);
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const int cols = avail > Px(760) ? 4 : 2;
+  const float tileW = std::floor((avail - gap * float(cols - 1)) / float(cols));
+  const float tileH = Px(92);
+  ImVec2 q = ImGui::GetCursorScreenPos();
+  const int rows = int((tiles.size() + size_t(cols) - 1) / size_t(cols));
+  for (size_t i = 0; i < tiles.size(); ++i) {
+    const int col = int(i) % cols, row = int(i) / cols;
+    ImVec2 a(q.x + float(col) * (tileW + gap), q.y + float(row) * (tileH + gap));
+    StatTile(a, tileW, tileH, tiles[i].label, tiles[i].value, tiles[i].detail);
+  }
+  ImGui::Dummy(ImVec2(avail, float(rows) * tileH + float(rows - 1) * gap));
+}
+
 void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
+  // Las estadísticas suman la duración de todos los vídeos: las que faltan se
+  // piden antes que las miniaturas de las tarjetas, que así van delante en la
+  // cola (lo último pedido sale primero). Cada una se mide una vez y se guarda.
+  for (const auto& item : m.items)
+    if (item.Video() && item.duration <= 0) RequestDuration(item);
   const Palette& p = Colors();
   const Config& c = m.config;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(32), Px(26)));
@@ -503,17 +703,24 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
   ImGui::PushItemWidth(colW);
   SectionLabel("DURACIÓN DEL CLIP");
   Gap(4);
-  std::vector<std::pair<int, std::string>> lengths;
-  for (int sec : {15, 30, 60, 120, 300}) lengths.emplace_back(sec, FormatClipLength(sec));
-  if (int v = Segmented("len", lengths, c.clipSeconds, colW); v > 0 && v != c.clipSeconds) a.setClipSeconds(v);
+  if (int v = ClipLengthPicker("len", c.clipSeconds, m.stats.replayFitSeconds, colW); v > 0 && v != c.clipSeconds)
+    a.setClipSeconds(v);
   Gap(8);
   {
-    char hint[200];
-    snprintf(hint, sizeof(hint), "Al guardar un clip se guardan los últimos %s. Cambiarla no borra lo que ya hay en "
-                                 "el replay.",
-             FormatClipLength(c.clipSeconds).c_str());
+    char hint[300];
+    // Una duración que no cabe en la RAM del replay se avisa en el color de aviso.
+    const double fit = m.stats.replayFitSeconds;
+    const bool tight = m.replayActive && fit > 0 && double(c.clipSeconds) > fit + 0.5;
+    if (tight)
+      snprintf(hint, sizeof(hint), "Con esta calidad, %s no caben enteros en la memoria del replay: en escenas de "
+                                   "mucho movimiento el clip saldría más corto. Caben unos %s.",
+               FormatClipLength(c.clipSeconds).c_str(), FormatClipLength(std::max(5, int(fit) / 5 * 5)).c_str());
+    else
+      snprintf(hint, sizeof(hint), "Al guardar un clip se guardan los últimos %s. Cambiarla no borra lo que ya hay "
+                                   "en el replay.",
+               FormatClipLength(c.clipSeconds).c_str());
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + colW);
-    ImGui::PushStyleColor(ImGuiCol_Text, V(p.textFaint));
+    ImGui::PushStyleColor(ImGuiCol_Text, V(tight ? p.warning : p.textFaint));
     ImGui::TextWrapped("%s", hint);
     ImGui::PopStyleColor();
     ImGui::PopTextWrapPos();
@@ -564,12 +771,20 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
   ItemMenu(m, a);
 
   Gap(24);
+  StatsSection(m);
+
+  Gap(24);
   SectionLabel("CONSEJOS");
   Gap(2);
   std::string tips = c.hotkeys.overlay + " abre el panel encima del juego sin quitarle la pantalla completa. " +
                      (c.hotkeys.marker.empty() ? std::string()
                                                : c.hotkeys.marker + " marca un momento para encontrarlo luego en el clip. ") +
-                     "Con la estrella guardas un clip como favorito: el límite de espacio nunca lo borra.";
+                     (c.hotkeys.shortClip.empty()
+                          ? std::string()
+                          : c.hotkeys.shortClip + " guarda un clip corto, solo los últimos " +
+                                FormatClipLength(std::min(c.shortClipSeconds, c.clipSeconds)) + ". ") +
+                     "Con la estrella guardas un clip como favorito: el límite de espacio nunca lo borra. En la "
+                     "biblioteca, Ctrl+clic elige varios clips para unirlos.";
   Help(tips.c_str());
   if (m.freeBytes > 0 && m.freeBytes < (uint64_t(2) << 30)) {
     Gap(8);
@@ -584,7 +799,7 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
 
 // ------------------------------------------------------------------ biblioteca
 
-bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu) {
+bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection) {
   (void)w;
   const Palette& p = Colors();
   const float thumbH = std::floor(width * 9.0f / 16.0f);
@@ -621,6 +836,27 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   }
   if (overStar) ImGui::SetTooltip(item.favorite ? "Quitar de favoritos" : "Favorito: el límite de espacio no lo borra");
 
+  // Casilla para elegir vídeos y unirlos: al pasar el ratón y, mientras haya
+  // alguno elegido, en todas las tarjetas.
+  bool overCheck = false;
+  if (selection >= 0) {
+    ImVec2 boxC(ta.x + Px(18), tb.y - Px(18));
+    overCheck = hov && std::fabs(ImGui::GetMousePos().x - boxC.x) < Px(14) &&
+                std::fabs(ImGui::GetMousePos().y - boxC.y) < Px(14);
+    if (selection > 0 || hov || !selected_.empty()) {
+      ImVec2 b0 = boxC - ImVec2(Px(8), Px(8)), b1 = boxC + ImVec2(Px(8), Px(8));
+      dl->AddRectFilled(b0, b1, C(selection > 0 ? p.accent : p.bg, selection > 0 ? 1.0f : 0.86f));
+      dl->AddRect(b0, b1, C(selection > 0 ? p.accent : overCheck ? p.text : p.lineStrong), 0, 0, Px(1));
+      if (selection > 0) {
+        ImU32 tick = C(p.onAccent);
+        dl->AddLine(boxC + ImVec2(-Px(4), 0), boxC + ImVec2(-Px(1), Px(3)), tick, Px(1.5f));
+        dl->AddLine(boxC + ImVec2(-Px(1), Px(3)), boxC + ImVec2(Px(4), -Px(3)), tick, Px(1.5f));
+      }
+    }
+    if (selection > 0) dl->AddRect(a, b, C(p.accent), 0, 0, Px(1));
+    if (overCheck) ImGui::SetTooltip(selection > 0 ? "Quitar de la selección" : "Elegir para unir con otros clips");
+  }
+
   float fs = Px(kBody);
   std::string title = Ellipsize(Bold(), fs, Title(item), width - Px(4));
   Text(dl, Bold(), fs, ImVec2(a.x, tb.y + Px(10)), C(p.text), title.c_str());
@@ -630,6 +866,10 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   if (pressed && overStar) {
     // El clic en la estrella no abre el visor; se aplica al final del frame.
     starToggle_ = item.path;
+    return false;
+  }
+  if (pressed && overCheck) {
+    selectToggle_ = item.path;
     return false;
   }
   return pressed;
@@ -654,6 +894,15 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
       if (ImGui::MenuItem(label.c_str())) a.cancelExport();
     } else if (ImGui::MenuItem("Exportar para Discord (menos de 20 MB)", nullptr, false, m.exportPercent < 0)) {
       a.exportForDiscord(path);
+    }
+    if (ImGui::MenuItem("Unir con otros clips...")) {
+      if (!Selected(path)) selected_.push_back(path);
+      Navigate(m, AppPage::Library);
+    }
+    if (ImGui::BeginMenu("Cámara lenta")) {
+      if (ImGui::MenuItem("A mitad de velocidad")) a.slowMotion(path, 2);
+      if (ImGui::MenuItem("A un cuarto de velocidad")) a.slowMotion(path, 4);
+      ImGui::EndMenu();
     }
   }
   ImGui::Separator();
@@ -815,11 +1064,72 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
     ImGui::SetNextItemWidth(Px(150));
     ChoiceCombo<int>("##sort", sort_, {{0, "Más recientes"}, {1, "Más antiguos"}, {2, "Más grandes"}, {3, "Más largos"}});
     ImGui::SameLine(0, Px(8));
+    // Un vídeo cualquiera de los que se ven, para recordar partidas.
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - Px(28)) * 0.5f);
+    if (GhostButton("random", "Al azar", Px(84), Tone::Normal, 28)) {
+      std::vector<const MediaItem*> videos;
+      for (const auto* item : list)
+        if (item->Video() && item->path != m.viewPath) videos.push_back(item);
+      if (videos.empty())
+        for (const auto* item : list) videos.push_back(item);
+      if (!videos.empty()) {
+        randomSeed_ = randomSeed_ * 1664525u + 1013904223u + unsigned(GetTickCount64());
+        View(m, videos[(randomSeed_ >> 8) % videos.size()]->path, AppPage::Library);
+      }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Abre un vídeo cualquiera de los que se ven");
+    ImGui::SameLine(0, Px(8));
     float searchW = std::max(Px(120), ImGui::GetContentRegionAvail().x);
     ImGui::SetNextItemWidth(searchW);
     ImGui::InputTextWithHint("##search", "Buscar", &search_);
   }
   Gap(16);
+
+  // Vídeos elegidos para unir: los que ya no están (borrados, renombrados) salen.
+  selected_.erase(std::remove_if(selected_.begin(), selected_.end(),
+                                 [&](const std::string& path) {
+                                   const MediaItem* item = Find(m, path);
+                                   return !item || !item->Video();
+                                 }),
+                  selected_.end());
+  if (!selected_.empty()) {
+    const Palette& pal = Colors();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    const float barW = ImGui::GetContentRegionAvail().x - Px(12), barH = Px(48);
+    dl->AddRectFilled(q, ImVec2(q.x + barW, q.y + barH), C(pal.surface));
+    dl->AddRectFilled(q, ImVec2(q.x + Px(3), q.y + barH), C(pal.accent));
+    const size_t n = selected_.size();
+    std::string text = n == 1 ? std::string("1 vídeo elegido. Elige otro con la casilla o Ctrl+clic.")
+                              : std::to_string(n) + " vídeos elegidos. Se unen del más antiguo al más reciente.";
+    const float bw = Px(150);
+    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x + Px(16), q.y + (barH - Px(kSmall)) * 0.5f), C(pal.text),
+         Ellipsize(ImGui::GetFont(), Px(kSmall), text, barW - bw * 2 - Px(48)).c_str());
+    ImGui::SetCursorScreenPos(ImVec2(q.x + barW - bw * 2 - Px(8) - Px(10), q.y + (barH - Px(30)) * 0.5f));
+    if (GhostButton("unselect", "Quitar selección", bw, Tone::Normal, 30)) selected_.clear();
+    ImGui::SameLine(0, Px(8));
+    ImGui::BeginDisabled(n < 2);
+    std::string join = n < 2 ? std::string("Unir") : "Unir " + std::to_string(n) + " vídeos";
+    if (SolidButton("join", join.c_str(), bw, 30)) {
+      std::vector<const MediaItem*> chosen;
+      for (const auto& path : selected_)
+        if (const MediaItem* item = Find(m, path)) chosen.push_back(item);
+      std::stable_sort(chosen.begin(), chosen.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
+      std::vector<std::string> paths;
+      for (const auto* item : chosen) paths.push_back(item->path);
+      a.joinClips(paths);
+      selected_.clear();
+    }
+    ImGui::EndDisabled();
+    if (n >= 2 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      ImGui::SetTooltip("Sin recodificar: solo vídeos grabados con la misma calidad, resolución y audio. El "
+                        "resultado es un vídeo nuevo; los originales no cambian.");
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + barH));
+    Gap(12);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+        !TypingText())
+      selected_.clear();
+  }
 
   if (m.items.empty()) {
     Help(m.itemsLoaded ? "La biblioteca está vacía. Los clips, grabaciones y capturas que guardes aparecerán aquí."
@@ -861,7 +1171,13 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
         if (c > 0) ImGui::SameLine(0, gap);
         ImGui::PushID(int(i));
         bool menu = false;
-        if (Card(w, *list[i], cardW, &menu)) View(m, list[i]->path, AppPage::Library);
+        const MediaItem& item = *list[i];
+        const int selection = item.Video() ? (Selected(item.path) ? 1 : 0) : -1;
+        if (Card(w, item, cardW, &menu, selection)) {
+          // Con algo elegido (o con Ctrl), el clic elige en vez de abrir.
+          if (selection >= 0 && (!selected_.empty() || ImGui::GetIO().KeyCtrl)) ToggleSelected(item.path);
+          else View(m, item.path, AppPage::Library);
+        }
         if (menu) {
           menuPath_ = list[i]->path;
           ImGui::OpenPopup("item-menu");
@@ -1163,7 +1479,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     ImGui::Dummy(ImVec2(timeW, rowH));
     ImGui::SameLine(0, Px(12));
     float volumeW = Px(110);
-    float tlW = ImGui::GetContentRegionAvail().x - volumeW - rowH - Px(24) - rowH - Px(8);
+    float tlW = ImGui::GetContentRegionAvail().x - volumeW - rowH - Px(24) - rowH - Px(8) - rowH - Px(8);
     Timeline(w, item, std::max(Px(100), tlW));
     ImGui::SameLine(0, Px(12));
     if (IconButton("trim", Icon::Scissors, rowH, "Recortar (sin recodificar)", trimMode_)) {
@@ -1173,6 +1489,10 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
         trimEnd_ = duration;
       }
     }
+    ImGui::SameLine(0, Px(8));
+    std::string frameTip = std::string("Guardar este fotograma como captura (S), en ") +
+                           (m.config.screenshotFormat == "jpg" ? "JPG" : "PNG") + " y junto al vídeo";
+    if (IconButton("frame", Icon::Shot, rowH, frameTip.c_str())) SaveCurrentFrame(item, a);
     ImGui::SameLine(0, Px(8));
     if (IconButton("mute", player_.Muted() || player_.Volume() <= 0 ? Icon::Muted : Icon::Volume, rowH,
                    player_.Muted() ? "Activar el sonido (M)" : "Silenciar (M)")) {
@@ -1261,6 +1581,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
         trimMode_ = true;
         trimEnd_ = std::max(player_.Position(), trimStart_ + 0.5);
       }
+      if (ImGui::IsKeyPressed(ImGuiKey_S, false)) SaveCurrentFrame(item, a);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) a.setFavorite(item.path, !item.favorite);
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {

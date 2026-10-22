@@ -2,8 +2,10 @@
 
 #include "capture/CaptureSource.h"
 
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace spectre {
 
@@ -20,5 +22,11 @@ struct ScreenshotRequest {
 
 // done se llama desde el hilo de la captura: ok y la ruta, o el error.
 void TakeScreenshot(ScreenshotRequest request, std::function<void(bool ok, const std::string& text)> done);
+
+// Guarda una imagen BGR de 24 bits (de arriba abajo) en PNG o JPG con WIC, en
+// un hilo propio y con prioridad baja (el fotograma del visor). done, como en
+// TakeScreenshot.
+void SaveImageAsync(std::string path, bool jpeg, std::vector<uint8_t> bgr, unsigned width, unsigned height,
+                    std::function<void(bool ok, const std::string& text)> done);
 
 } // namespace spectre

@@ -1,10 +1,12 @@
 #include "app/App.h"
 #include "app/CrashHandler.h"
+#include "app/Edit.h"
 #include "app/Screenshot.h"
 #include "app/Sound.h"
 
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
+#include "ui/Widgets.h"
 
 #include <shellscalingapi.h>
 #include <shobjidl.h>
@@ -13,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <thread>
 #include <utility>
@@ -27,13 +30,16 @@ namespace {
 constexpr wchar_t kMainClass[] = L"SpectreMain";
 
 // En el mismo orden que HotkeyText.
-enum HotkeyId { kHotkeyOverlay = 1, kHotkeySaveClip, kHotkeyRecord, kHotkeyReplay, kHotkeyScreenshot, kHotkeyMarker };
-constexpr int kHotkeyCount = 6;
+enum HotkeyId {
+  kHotkeyOverlay = 1, kHotkeySaveClip, kHotkeyRecord, kHotkeyReplay, kHotkeyScreenshot, kHotkeyMarker, kHotkeyShortClip
+};
+constexpr int kHotkeyCount = 7;
 enum TimerId { kTimerGame = 1, kTimerHealth };
 enum TrayCommand {
   kCmdOpenApp = 100,
   kCmdOpenPanel,
   kCmdSaveClip,
+  kCmdShortClip,
   kCmdRecord,
   kCmdScreenshot,
   kCmdReplay,
@@ -44,7 +50,7 @@ enum TrayCommand {
 constexpr ULONGLONG kGameGraceMs = 15000; // el juego sigue "activo" 15 s después de perder el foco
 constexpr ULONGLONG kToastMs = 2600;
 constexpr size_t kPanelClips = 3;
-constexpr double kMaxMarkerAge = 5 * 60 + 10;          // segundos: el clip más largo y un margen
+constexpr double kMaxMarkerAge = kMaxClipSeconds + 10; // segundos: el clip más largo y un margen
 constexpr uint64_t kLowDiskBytes = uint64_t(1) << 30; // menos de 1 GB libre: se avisa al guardar
 
 const std::string& HotkeyText(const HotkeyConfig& h, int index) {
@@ -54,7 +60,8 @@ const std::string& HotkeyText(const HotkeyConfig& h, int index) {
   case 2: return h.toggleRecording;
   case 3: return h.toggleReplay;
   case 4: return h.screenshot;
-  default: return h.marker;
+  case 5: return h.marker;
+  default: return h.shortClip;
   }
 }
 
@@ -77,6 +84,14 @@ const char* QualityName(const std::string& quality) {
   if (IsSourceQuality(quality)) return "Fuente";
   if (quality == "personalizada") return "Personalizada";
   return "Alta";
+}
+
+// «45 min», «1 h», «1 h 30 min»
+std::string MinutesText(int minutes) {
+  if (minutes < 60) return std::to_string(minutes) + " min";
+  std::string text = std::to_string(minutes / 60) + " h";
+  if (minutes % 60) text += " " + std::to_string(minutes % 60) + " min";
+  return text;
 }
 
 std::string FileNameOf(const std::string& path) { return Narrow(std::filesystem::path(Widen(path)).filename().wstring()); }
@@ -214,6 +229,13 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     });
   };
   appActions_.exportForDiscord = [this](const std::string& path) { Defer([this, path] { ExportForDiscord(path); }); };
+  appActions_.joinClips = [this](const std::vector<std::string>& paths) { Defer([this, paths] { JoinClips(paths); }); };
+  appActions_.slowMotion = [this](const std::string& path, int factor) {
+    Defer([this, path, factor] { SlowMotion(path, factor); });
+  };
+  appActions_.saveFrame = [this](const MediaItem& item, std::vector<uint8_t> bgr, int width, int height) {
+    SaveFrame(item, std::move(bgr), width, height); // solo lanza el hilo: puede ir dentro del frame
+  };
   appActions_.cancelExport = [this] { exporter_.Cancel(); };
   appActions_.setFavorite = [this](const std::string& path, bool favorite) {
     library_->SetFavorite(path, favorite);
@@ -255,6 +277,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   settings.suspendHotkeys = [this](bool suspend) { SuspendHotkeys(suspend); };
   settings.chooseFolder = [this] { Defer([this] { ChooseOutputFolder(); }); };
   settings.refreshStorage = appActions_.rescan;
+  settings.playSound = [](const std::string& style) { PlayCue(Cue::Saved, style); };
 
   if (!RegisterHotkeys()) Toast(hotkeyError_, true);
   SetTimer(hwnd_, kTimerGame, 2000, nullptr);
@@ -372,21 +395,23 @@ std::string App::LowDiskNote() {
   return ". Queda poco espacio en el disco (" + FormatBytes(free) + ")";
 }
 
-void App::SaveClip() {
+void App::SaveClip(bool shortClip) {
   if (!pipeline_.Running() || !config_.replayEnabled) {
     Toast("El replay no está activo", true);
     return;
   }
+  // El clip corto no puede pasar de lo que guarda el replay.
+  const int seconds = shortClip ? std::min(config_.shortClipSeconds, config_.clipSeconds) : config_.clipSeconds;
   std::string path = OutputName("Clip");
   // Las marcas de los últimos segundos van con el clip, que acaba justo ahora.
   int64_t now = QpcNow();
   std::vector<double> tail;
   for (int64_t at : markers_) {
     double ago = QpcToSeconds(now - at);
-    if (ago >= 0 && ago <= double(config_.clipSeconds)) tail.push_back(ago);
+    if (ago >= 0 && ago <= double(seconds)) tail.push_back(ago);
   }
   library_->SetTailMarkers(path, std::move(tail));
-  pipeline_.SaveClip(path, double(config_.clipSeconds));
+  pipeline_.SaveClip(path, double(seconds));
 }
 
 void App::OnRecordingStopped(const std::string& path, int64_t stoppedAt) {
@@ -410,7 +435,7 @@ void App::ToggleRecording() {
     std::string path = pipeline_.Stats().recordPath;
     int64_t stoppedAt = QpcNow();
     pipeline_.StopRecording();
-    if (config_.soundOnSave) PlayCue(Cue::Saved);
+    if (config_.soundOnSave) PlayCue(Cue::Saved, config_.saveSound);
     std::string note = LowDiskNote();
     Toast("Grabación guardada: " + FileNameOf(path) + note, !note.empty());
     OnRecordingStopped(path, stoppedAt);
@@ -475,6 +500,15 @@ void App::SetClipSeconds(int seconds) {
   Config next = config_;
   next.clipSeconds = seconds;
   ApplyConfig(next, true);
+  // Una duración que no cabe en la RAM del replay se puede elegir, pero se
+  // avisa: el anillo tiraría lo más antiguo y el clip saldría más corto.
+  PipelineStats stats = pipeline_.Stats();
+  if (stats.running && stats.replayFitSeconds > 0 && double(seconds) > stats.replayFitSeconds + 0.5)
+    Toast("Con la calidad " + std::string(QualityName(config_.quality)) + ", " + ui::FormatClipLength(seconds) +
+              " no caben enteros en la memoria del replay: en escenas de mucho movimiento el clip saldría más corto. "
+              "Caben unos " + ui::FormatClipLength(std::max(5, int(stats.replayFitSeconds) / 5 * 5)) +
+              ". Baja la calidad o sube el límite en Ajustes > Replay.",
+          true);
 }
 
 void App::SetQuality(const std::string& quality) {
@@ -522,7 +556,7 @@ void App::AddMarker() {
   markers_.push_back(now);
   while (!markers_.empty() && QpcToSeconds(now - markers_.front()) > kMaxMarkerAge) markers_.pop_front();
   if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(now);
-  if (config_.soundOnSave) PlayCue(Cue::Marker);
+  if (config_.soundOnSave) PlayCue(Cue::Marker, config_.saveSound);
   Toast(pipeline_.Recording() ? "Marca añadida a la grabación y al replay" : "Marca añadida: saldrá en el próximo clip");
 }
 
@@ -550,6 +584,77 @@ void App::TrimClip(const std::string& path, double start, double end) {
     if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
   }).detach();
   Toast("Recortando el clip...");
+}
+
+namespace {
+
+// <carpeta>\<base>.<ext> o, si ya existe, <base>_2, <base>_3...
+std::filesystem::path FreePath(const std::filesystem::path& dir, const std::wstring& base, const wchar_t* ext) {
+  std::filesystem::path out = dir / (base + ext);
+  std::error_code ec;
+  for (int i = 2; std::filesystem::exists(out, ec); ++i) out = dir / (base + L"_" + std::to_wstring(i) + ext);
+  return out;
+}
+
+// Ediciones de la biblioteca (unir, cámara lenta): en un hilo de prioridad baja,
+// como el recorte. work devuelve la ruta escrita o el error; al acabar, aviso.
+void RunEdit(HWND hwnd, std::string doneText, std::function<bool(std::string* out, std::string* error)> work) {
+  auto pending = std::make_shared<PendingWrite>();
+  std::thread([hwnd, doneText = std::move(doneText), work = std::move(work), pending] {
+    InstallThreadCrashHandler();
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::string out, error;
+    bool ok = false;
+    try {
+      ok = work(&out, &error);
+    } catch (const std::exception& e) {
+      error = std::string("No se pudo editar el vídeo: ") + e.what();
+      Log("Edición: excepción: %s", e.what());
+    }
+    auto* msg = new std::string(ok ? doneText + FileNameOf(out) : error);
+    if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
+  }).detach();
+}
+
+} // namespace
+
+void App::JoinClips(const std::vector<std::string>& paths) {
+  if (paths.size() < 2) return;
+  RunEdit(hwnd_, "Unión guardada: ", [paths](std::string* out, std::string* error) {
+    auto first = std::filesystem::path(Widen(paths.front()));
+    auto path = FreePath(first.parent_path(), first.stem().wstring() + L"_union_" + Widen(TimestampForFile()), L".mp4");
+    *out = Narrow(path.wstring());
+    return JoinFiles(paths, *out, error);
+  });
+  Toast("Uniendo " + std::to_string(paths.size()) + " vídeos...");
+}
+
+void App::SlowMotion(const std::string& path, int factor) {
+  RunEdit(hwnd_, "Cámara lenta guardada: ", [path, factor](std::string* out, std::string* error) {
+    auto in = std::filesystem::path(Widen(path));
+    auto dest = FreePath(in.parent_path(), in.stem().wstring() + L"_lenta_" + Widen(TimestampForFile()), L".mp4");
+    *out = Narrow(dest.wstring());
+    return SlowMotionFile(path, *out, factor, error);
+  });
+  Toast(factor >= 4 ? "Haciendo la copia a un cuarto de velocidad..." : "Haciendo la copia a mitad de velocidad...");
+}
+
+void App::SaveFrame(const MediaItem& item, std::vector<uint8_t> bgr, int width, int height) {
+  if (bgr.empty() || width <= 0 || height <= 0) {
+    Toast("Aún no hay fotograma que guardar: espera a que se vea el vídeo", true);
+    return;
+  }
+  // Como una captura de Alt+F1 de ese juego, en la carpeta del vídeo.
+  const bool jpeg = config_.screenshotFormat == "jpg";
+  auto dir = std::filesystem::path(Widen(item.path)).parent_path();
+  std::string game = item.spectre && !item.game.empty() ? item.game : "Escritorio";
+  auto dest = FreePath(dir, Widen(SanitizeFileName("Captura_" + game + "_" + TimestampForFile())), jpeg ? L".jpg" : L".png");
+  HWND hwnd = hwnd_;
+  SaveImageAsync(Narrow(dest.wstring()), jpeg, std::move(bgr), unsigned(width), unsigned(height),
+                 [hwnd](bool ok, const std::string& text) {
+                   auto* msg = new std::string(ok ? "Fotograma guardado: " + FileNameOf(text) : text);
+                   if (!PostMessageW(hwnd, WM_SPECTRE_NOTIFY, ok ? 0 : 1, reinterpret_cast<LPARAM>(msg))) delete msg;
+                 });
 }
 
 void App::ExportForDiscord(const std::string& path) {
@@ -737,7 +842,9 @@ void App::ApplyConfig(const Config& next, bool quiet) {
 
   const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
   if (folderChanged && appWindow_.Visible()) RescanLibrary();
-  if (old.storageLimitGB != config_.storageLimitGB || old.outputDir != config_.outputDir) EnforceStorageLimit();
+  if (old.storageLimitGB != config_.storageLimitGB || old.deleteAfterDays != config_.deleteAfterDays ||
+      old.outputDir != config_.outputDir)
+    EnforceStorageLimit();
 
   if (!hotkeysOk) Toast(hotkeyError_, true);
   else if (deferred) Toast("Se aplicará al terminar la grabación");
@@ -899,26 +1006,25 @@ void App::SuspendHotkeys(bool suspend) {
 }
 
 void App::EnforceStorageLimit() {
-  if (config_.storageLimitGB <= 0) {
-    limitWarned_.clear();
-    return;
-  }
+  if (config_.storageLimitGB <= 0) limitWarned_.clear();
+  if (config_.storageLimitGB <= 0 && config_.deleteAfterDays <= 0) return;
   // Una pasada cada vez: el hilo escanea la carpeta y borra lo más antiguo.
   static std::atomic<bool> running{false};
   if (running.exchange(true)) return;
   std::string folder = ResolveOutputDir(config_);
-  uint64_t limit = uint64_t(config_.storageLimitGB) << 30;
+  uint64_t limit = uint64_t(std::max(config_.storageLimitGB, 0)) << 30;
+  int days = config_.deleteAfterDays;
   // La grabación en curso cuenta, pero no se toca.
   std::string recording = pipeline_.Recording() ? pipeline_.Stats().recordPath : std::string();
   std::shared_ptr<Library> library = library_;
   HWND hwnd = hwnd_;
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que acabe
-  std::thread([folder, limit, recording, library, hwnd, pending] {
+  std::thread([folder, limit, days, recording, library, hwnd, pending] {
     InstallThreadCrashHandler();
-    auto result = std::make_unique<LimitResult>(library->EnforceLimit(folder, limit, recording));
+    auto result = std::make_unique<LimitResult>(library->EnforceLimit(folder, limit, recording, days));
     if (result->deleted > 0)
-      Log("Límite de espacio: %d archivos borrados, %s liberados", result->deleted,
-          FormatBytes(result->freedBytes).c_str());
+      Log("Límite de espacio: %d archivos borrados (%d por antigüedad), %s liberados", result->deleted,
+          result->agedDeleted, FormatBytes(result->freedBytes).c_str());
     if (result->blocked)
       Log("Límite de espacio: lo que no se puede borrar (%s, %s en favoritos) ya pasa de %s: no se borra nada",
           FormatBytes(result->keptBytes).c_str(), FormatBytes(result->favoriteBytes).c_str(),
@@ -942,6 +1048,7 @@ std::string DeletedText(const LimitResult& r) {
     case MediaKind::Recording: n = {"grabación", "grabaciones", true}; break;
     case MediaKind::Trim: n = {"recorte", "recortes", false}; break;
     case MediaKind::Export: n = {"vídeo para Discord", "vídeos para Discord", false}; break;
+    case MediaKind::Edit: n = {"vídeo editado", "vídeos editados", false}; break;
     case MediaKind::Screenshot: n = {"captura", "capturas", true}; break;
     }
   std::string text = r.deleted == 1 ? std::string("se borró ") + (n.female ? "una " : "un ") + n.one +
@@ -955,7 +1062,10 @@ std::string DeletedText(const LimitResult& r) {
 
 void App::ReportStorageLimit(const LimitResult& r) {
   std::string limit = std::to_string(r.limitBytes >> 30) + " GB";
+  const std::string old = "Más de " + std::to_string(r.maxAgeDays) + (r.maxAgeDays == 1 ? " día" : " días");
   if (r.blocked) {
+    // Lo que se borró por antiguo antes de ver que el límite no puede borrar más.
+    if (r.agedDeleted > 0) ToastAfter(old + ": " + DeletedText(r));
     // Una vez: sale otra vez si cambia algo (el límite, los favoritos, lo guardado).
     bool favorites = r.favoriteBytes > r.limitBytes;
     std::string key = (favorites ? "fav " : "new ") + std::to_string(r.limitBytes) + " " +
@@ -979,7 +1089,10 @@ void App::ReportStorageLimit(const LimitResult& r) {
     return;
   }
   limitWarned_.clear();
-  if (r.deleted > 0) ToastAfter("Límite de espacio (" + limit + "): " + DeletedText(r));
+  if (r.deleted == 0) return;
+  if (r.agedDeleted == r.deleted) ToastAfter(old + ": " + DeletedText(r));
+  else if (r.agedDeleted > 0) ToastAfter(old + " y límite de espacio (" + limit + "): " + DeletedText(r));
+  else ToastAfter("Límite de espacio (" + limit + "): " + DeletedText(r));
 }
 
 // ---------------------------------------------------------------------- UI
@@ -1444,14 +1557,19 @@ void App::ShowTrayMenu() {
   HMENU menu = CreatePopupMenu();
   std::wstring panel = withKey(L"Abrir panel", config_.hotkeys.overlay);
   std::wstring clip = withKey(L"Guardar clip", config_.hotkeys.saveClip);
+  std::wstring shortClip = withKey((L"Guardar clip corto (" +
+                                    Widen(ui::FormatClipLength(std::min(config_.shortClipSeconds, config_.clipSeconds))) +
+                                    L")").c_str(),
+                                   config_.hotkeys.shortClip);
   std::wstring rec = withKey(pipeline_.Recording() ? L"Detener grabación" : L"Iniciar grabación",
                              config_.hotkeys.toggleRecording);
   std::wstring shot = withKey(L"Captura de pantalla", config_.hotkeys.screenshot);
   AppendMenuW(menu, MF_STRING, kCmdOpenApp, L"Abrir Spectre");
   AppendMenuW(menu, MF_STRING, kCmdOpenPanel, panel.c_str());
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING | (pipeline_.Running() && config_.replayEnabled ? 0 : MF_GRAYED), kCmdSaveClip,
-              clip.c_str());
+  const UINT replayOn = pipeline_.Running() && config_.replayEnabled ? 0 : MF_GRAYED;
+  AppendMenuW(menu, MF_STRING | replayOn, kCmdSaveClip, clip.c_str());
+  AppendMenuW(menu, MF_STRING | replayOn, kCmdShortClip, shortClip.c_str());
   AppendMenuW(menu, MF_STRING, kCmdRecord, rec.c_str());
   AppendMenuW(menu, MF_STRING, kCmdScreenshot, shot.c_str());
   AppendMenuW(menu, MF_STRING | (config_.replayEnabled ? MF_CHECKED : 0), kCmdReplay, L"Replay activado");
@@ -1493,6 +1611,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (int(wp)) {
     case kHotkeyOverlay: ToggleMenu(); break;
     case kHotkeySaveClip: SaveClip(); break;
+    case kHotkeyShortClip: SaveClip(true); break;
     case kHotkeyRecord: ToggleRecording(); break;
     case kHotkeyReplay: ToggleReplay(); break;
     case kHotkeyScreenshot: CaptureScreenshot(); break;
@@ -1507,6 +1626,16 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (wp == kTimerHealth && restartPending_ && !pipeline_.Recording())
       UpdatePipeline(std::exchange(restartPending_, false));
     if (wp == kTimerHealth) InstallPendingUpdate();
+    // Ajustes > Replay > Detener la grabación tras: se para sola y se guarda.
+    if (wp == kTimerHealth && config_.recordLimitMinutes > 0 && pipeline_.Recording() &&
+        pipeline_.Stats().recordSeconds >= double(config_.recordLimitMinutes) * 60.0) {
+      KeyboardHook::Pause pause(keyboard_);
+      Log("Grabación: llegó al límite de %d min, se detiene", config_.recordLimitMinutes);
+      ToggleRecording();
+      ToastAfter("Se detuvo sola al llegar a " + MinutesText(config_.recordLimitMinutes) +
+                 " (Ajustes > Replay)");
+      return 0;
+    }
     if (wp == kTimerGame) {
       CheckGame();
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
@@ -1531,8 +1660,17 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     bool error = wp != 0;
     std::string message = *text;
     if (!error && (StartsWith(message, "Clip guardado") || StartsWith(message, "Captura guardada") ||
-                   StartsWith(message, "Recorte guardado"))) {
-      if (config_.soundOnSave && !StartsWith(message, "Recorte")) PlayCue(Cue::Saved);
+                   StartsWith(message, "Recorte guardado") || StartsWith(message, "Unión guardada") ||
+                   StartsWith(message, "Cámara lenta guardada") || StartsWith(message, "Fotograma guardado"))) {
+      if (config_.soundOnSave && (StartsWith(message, "Clip") || StartsWith(message, "Captura")))
+        PlayCue(Cue::Saved, config_.saveSound);
+      // Ajustes > Avisos > Copiar el clip al guardarlo: listo para Ctrl+V en Discord.
+      if (config_.copyClipOnSave && StartsWith(message, "Clip guardado: ")) {
+        const std::string name = message.substr(strlen("Clip guardado: "));
+        auto it = std::find_if(recentNames_.rbegin(), recentNames_.rend(),
+                               [&](const std::string& p) { return FileNameOf(p) == name; });
+        if (it != recentNames_.rend() && CopyFileToClipboard(hwnd_, *it)) message += ". Copiado: pégalo con Ctrl+V";
+      }
       std::string note = LowDiskNote();
       if (!note.empty()) {
         message += note;
@@ -1613,6 +1751,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kCmdOpenApp: Defer([this] { OpenApp(); }); break;
     case kCmdOpenPanel: OpenMenu(); break;
     case kCmdSaveClip: SaveClip(); break;
+    case kCmdShortClip: SaveClip(true); break;
     case kCmdRecord: ToggleRecording(); break;
     case kCmdScreenshot: CaptureScreenshot(); break;
     case kCmdReplay: ToggleReplay(); break;

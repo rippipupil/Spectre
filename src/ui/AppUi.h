@@ -58,6 +58,12 @@ struct AppActions {
   std::function<void(const std::string&)> openPath;
   std::function<void(const std::string&)> showInFolder;
   std::function<void(const std::string&, double, double)> trim;
+  // Une los vídeos en ese orden (del más antiguo al más reciente) sin recodificar.
+  std::function<void(const std::vector<std::string>&)> joinClips;
+  // Copia a 1/factor de velocidad (2 o 4), sin audio.
+  std::function<void(const std::string&, int)> slowMotion;
+  // El fotograma del visor (BGR de arriba abajo) como captura junto al vídeo.
+  std::function<void(const MediaItem&, std::vector<uint8_t>, int, int)> saveFrame;
   std::function<void(const std::string&)> copyToClipboard;
   std::function<void(const std::string&)> exportForDiscord;
   std::function<void()> cancelExport;
@@ -99,7 +105,12 @@ private:
   void PageViewer(AppWindow& w, AppModel& m, const AppActions& a);
   void PageSettings(AppWindow& w, AppModel& m, const AppActions& a);
   void StatusCard(AppModel& m, const AppActions& a);
-  bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu);
+  // selection: -1 sin casilla (Inicio), 0 o 1 en la biblioteca (elegido para unir).
+  bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection = -1);
+  void StatsSection(const AppModel& m);
+  void SaveCurrentFrame(const MediaItem& item, const AppActions& a);
+  bool Selected(const std::string& path) const;
+  void ToggleSelected(const std::string& path);
   void ItemMenu(AppModel& m, const AppActions& a);
   void Dialogs(AppModel& m, const AppActions& a);
   void Timeline(AppWindow& w, const MediaItem& item, float width);
@@ -142,6 +153,10 @@ private:
   bool openDelete_ = false;
   bool deleteHasBin_ = true; // la unidad del archivo tiene papelera
   std::string starToggle_; // estrella pulsada en una tarjeta este frame
+  // Vídeos elegidos en la biblioteca para unirlos (casilla, Ctrl+clic o «Unir con otros...»).
+  std::vector<std::string> selected_;
+  std::string selectToggle_; // casilla pulsada en una tarjeta este frame
+  unsigned randomSeed_ = 0;  // «Al azar»: no repetir el mismo vídeo dos veces seguidas
 };
 
 } // namespace spectre

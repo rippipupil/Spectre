@@ -11,7 +11,14 @@ struct HotkeyConfig {
   std::string toggleReplay = "Alt+Shift+F10";
   std::string screenshot = "Alt+F1"; // captura de pantalla (PNG o JPG)
   std::string marker = "Alt+F8";     // marca un momento de la partida en el clip o la grabación
+  std::string shortClip = "Alt+F11"; // clip corto: solo los últimos Config::shortClipSeconds
 };
+
+// Duraciones del clip que ofrecen el panel, Inicio y Ajustes (segundos). Las
+// largas solo caben si la RAM da para ellas con la calidad elegida: la
+// interfaz lo avisa (PipelineStats::replayFitSeconds).
+inline constexpr int kClipLengths[] = {10, 15, 20, 30, 45, 60, 120, 180, 300, 600, 900, 1200};
+inline constexpr int kMaxClipSeconds = 1200;
 
 struct Config {
   // Clips (replay buffer)
@@ -19,6 +26,8 @@ struct Config {
   int clipSeconds = 30;       // duración del clip = tamaño del buffer
   bool onlyInGames = false;   // activa el buffer solo con una app a pantalla completa
   bool folderPerGame = false; // guarda cada juego en su propia subcarpeta
+  int shortClipSeconds = 15;  // atajo de clip corto (como mucho, clipSeconds)
+  int recordLimitMinutes = 0; // la grabación se detiene sola tras estos minutos; 0 = sin límite
 
   // Vídeo
   std::string captureMode = "monitor"; // "monitor" | "game" (ventana en primer plano)
@@ -55,10 +64,13 @@ struct Config {
   // Almacenamiento
   std::string outputDir;               // vacío = Vídeos\Spectre
   int storageLimitGB = 0;              // 0 = sin límite; si se pasa, se borran los más antiguos (nunca los favoritos)
+  int deleteAfterDays = 0;             // 0 = nunca; borra lo de Spectre con más días (nunca los favoritos)
 
   // Avisos
   bool showNotifications = true;
   bool soundOnSave = false;            // pitido corto al guardar un clip o una captura
+  std::string saveSound = "clasico";   // clasico | suave | moneda | arcade | campana (app/Sound.h)
+  bool copyClipOnSave = false;         // el clip recién guardado va al portapapeles (pegar en Discord)
   std::string toastPosition = "top-right"; // top-right | top-left | bottom-right | bottom-left
 
   // General
