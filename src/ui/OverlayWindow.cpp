@@ -8,8 +8,6 @@
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 
-#include <filesystem>
-
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace spectre {
@@ -17,14 +15,6 @@ namespace spectre {
 namespace {
 constexpr wchar_t kMenuClass[] = L"SpectreOverlay";
 constexpr wchar_t kToastClass[] = L"SpectreToast";
-
-std::string FontPath(const wchar_t* file) {
-  wchar_t windir[MAX_PATH];
-  GetWindowsDirectoryW(windir, MAX_PATH);
-  auto p = std::filesystem::path(windir) / L"Fonts" / file;
-  std::error_code ec;
-  return std::filesystem::exists(p, ec) ? Narrow(p.wstring()) : std::string();
-}
 } // namespace
 
 void OverlayWindow::Init(HINSTANCE instance, Kind kind) {
@@ -171,7 +161,7 @@ void OverlayWindow::Hide() {
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext(imgui_);
     imgui_ = nullptr;
-    boldFont_ = bigFont_ = nullptr;
+    fonts_ = ui::FontSet{};
   }
   DestroyGraphics();
   HWND h = hwnd_;
@@ -269,23 +259,10 @@ void OverlayWindow::SetupImGui() {
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-  const float base = 15.0f;
-  auto regular = FontPath(L"segoeui.ttf");
-  auto bold = FontPath(L"segoeuib.ttf");
-  ImFont* main = nullptr;
-  if (!regular.empty()) main = io.Fonts->AddFontFromFileTTF(regular.c_str(), base * scale_);
-  if (!main) {
-    ImFontConfig cfg;
-    cfg.SizePixels = 13.0f * scale_;
-    main = io.Fonts->AddFontDefault(&cfg);
-  }
   // Solo los rangos por defecto (Latin-1): los iconos se dibujan con líneas,
-  // así que no hace falta fusionar Segoe UI Symbol (eran tres lecturas del
-  // archivo y tres copias en memoria por cada apertura del panel).
-  boldFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * scale_) : nullptr;
-  bigFont_ = !bold.empty() ? io.Fonts->AddFontFromFileTTF(bold.c_str(), base * 1.5f * scale_) : nullptr;
-  if (!boldFont_) boldFont_ = main;
-  if (!bigFont_) bigFont_ = main;
+  // así que no hace falta fusionar Segoe UI Symbol.
+  ui::LoadFonts(scale_, &fonts_);
+  fontMemoryFreed_ = false;
 
   ApplyBaseStyle(scale_);
   ImGui_ImplWin32_Init(hwnd_);
@@ -307,6 +284,8 @@ void OverlayWindow::Render(const std::function<void()>& draw) {
   context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
   context_->ClearRenderTargetView(rtv_.Get(), clear);
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+  // El atlas de fuentes ya está en la GPU desde el primer NewFrame.
+  if (!fontMemoryFreed_) fontMemoryFreed_ = ui::ReleaseFontMemory();
   HRESULT hr = swapChain_->Present(1, 0);
   if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
     if (!lost_) Log("Overlay: la GPU se reinició (0x%08X), se recrea la ventana", unsigned(hr));

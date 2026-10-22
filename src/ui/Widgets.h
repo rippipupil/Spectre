@@ -22,6 +22,8 @@ struct Config;
 
 namespace ui {
 
+struct FontSet;
+
 // Tamaños de texto en píxeles lógicos (se multiplican por la escala DPI).
 constexpr float kBody = 15.0f;  // texto del panel y de los formularios
 constexpr float kSmall = 13.0f; // filas de clips, estado, keycaps
@@ -38,11 +40,18 @@ struct Fonts {
   float scale = 1.0f;
   ImFont* bold = nullptr;
   ImFont* big = nullptr;
+  // Las mismas familias rasterizadas a cada tamaño de texto (ui/Fonts.h):
+  // Text, TextSize, Ellipsize y TrackedText dibujan con la del tamaño pedido.
+  const FontSet* sizes = nullptr;
 };
 void BeginFrame(const Fonts& fonts, const Config& config);
 float Px(float logical);
 ImFont* Bold();
 ImFont* Big();
+// La fuente de la familia de `font` hecha para `size` píxeles. Para dibujar
+// texto directamente con dl->AddText a un tamaño que no es el de la fuente:
+// con la fuente escalada el texto sale borroso.
+ImFont* Sized(ImFont* font, float size);
 
 ImU32 C(ImU32 color, float alpha = 1.0f);
 ImVec4 V(ImU32 color);

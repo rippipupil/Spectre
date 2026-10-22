@@ -5,10 +5,11 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#include "ui/Fonts.h"
+
 #include <functional>
 
 struct ImGuiContext;
-struct ImFont;
 
 namespace spectre {
 
@@ -53,8 +54,9 @@ public:
   // draw se ejecuta dentro de un frame de ImGui.
   void Render(const std::function<void()>& draw);
 
-  ImFont* BoldFont() const { return boldFont_; }
-  ImFont* BigFont() const { return bigFont_; }
+  ImFont* BoldFont() const { return fonts_.Bold(); }
+  ImFont* BigFont() const { return fonts_.Big(); }
+  const ui::FontSet& FontSizes() const { return fonts_; }
   float Scale() const { return scale_; }
 
   std::function<void()> onCloseRequested; // Alt+F4 sobre la ventana
@@ -92,8 +94,8 @@ private:
   ComPtr<IDCompositionTarget> target_;
   ComPtr<IDCompositionVisual> visual_;
   ImGuiContext* imgui_ = nullptr;
-  ImFont* boldFont_ = nullptr;
-  ImFont* bigFont_ = nullptr;
+  ui::FontSet fonts_;
+  bool fontMemoryFreed_ = false; // la copia del atlas en RAM ya se liberó
 };
 
 } // namespace spectre

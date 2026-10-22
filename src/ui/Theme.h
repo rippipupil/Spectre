@@ -35,6 +35,7 @@ struct Palette {
   ImU32 dangerHover;
   ImU32 dangerActive;
   ImU32 warning;       // nivel alto en los medidores de audio
+  ImU32 onDanger;      // texto sobre el rojo (botón de detener la grabación)
 };
 
 struct Theme {
@@ -44,9 +45,12 @@ struct Theme {
   // Tema Psíquico: marca de estado en rombo y animaciones fantasmales
   // (rastro al abrir, estela en el botón principal, marca que respira).
   bool psychic;
+  bool light = false;                // fondo claro (barra de título clara en Windows 10)
+  const char* group = "Spectre";     // grupo del selector: los de Spectre o los de RoCer0
 };
 
-// Todos los temas, en el orden del selector de Ajustes.
+// Todos los temas, en el orden del selector de Ajustes: Negro y Psíquico, y
+// después los de RoCer0.
 const std::vector<const Theme*>& Themes();
 // Tema por identificador; si no existe, el primero (Negro).
 const Theme& FindTheme(const std::string& id);

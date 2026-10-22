@@ -1,5 +1,6 @@
 #include "ui/Widgets.h"
 
+#include "ui/Fonts.h"
 #include "ui/Theme.h"
 
 #include <windows.h>
@@ -17,6 +18,7 @@ namespace {
 float s_ = 1.0f;
 ImFont* bold_ = nullptr;
 ImFont* big_ = nullptr;
+const FontSet* sizes_ = nullptr;
 
 // Sombra psíquica de cada contexto de ImGui (panel y ventana de la app pueden
 // estar abiertos a la vez y sus relojes son distintos).
@@ -52,12 +54,14 @@ void BeginFrame(const Fonts& fonts, const Config& config) {
   s_ = fonts.scale;
   bold_ = fonts.bold ? fonts.bold : ImGui::GetFont();
   big_ = fonts.big ? fonts.big : ImGui::GetFont();
+  sizes_ = fonts.sizes;
   BeginThemeFrame(config);
 }
 
 float Px(float logical) { return logical * s_; }
 ImFont* Bold() { return bold_; }
 ImFont* Big() { return big_; }
+ImFont* Sized(ImFont* font, float size) { return sizes_ ? sizes_->ForSize(font, size) : font; }
 
 ImU32 C(ImU32 color, float alpha) { return ImGui::GetColorU32(color, alpha); }
 ImVec4 V(ImU32 color) { return ImGui::ColorConvertU32ToFloat4(color); }
@@ -70,13 +74,16 @@ ImU32 Mix(ImU32 a, ImU32 b, float t) {
   return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | ch(IM_COL32_A_SHIFT);
 }
 
-ImVec2 TextSize(ImFont* font, float size, const char* text) { return font->CalcTextSizeA(size, FLT_MAX, 0.0f, text); }
+ImVec2 TextSize(ImFont* font, float size, const char* text) {
+  return Sized(font, size)->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+}
 
 void Text(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text) {
-  dl->AddText(font, size, pos, color, text);
+  dl->AddText(Sized(font, size), size, pos, color, text);
 }
 
 float TrackedWidth(ImFont* font, float size, const char* text, float tracking) {
+  font = Sized(font, size);
   float w = 0;
   int glyphs = 0;
   for (const char* c = text; *c;) {
@@ -91,6 +98,7 @@ float TrackedWidth(ImFont* font, float size, const char* text, float tracking) {
 
 void TrackedText(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text,
                  float tracking) {
+  font = Sized(font, size);
   float x = pos.x;
   for (const char* c = text; *c;) {
     const char* next = c + 1;
@@ -427,8 +435,8 @@ bool ActionButton(const char* id, const char* title, const std::string& key, Ton
     break;
   case Tone::Danger:
     bg = held ? p.dangerActive : hov ? p.dangerHover : p.danger;
-    fg = IM_COL32(255, 255, 255, 255);
-    keyBorder = IM_COL32(255, 255, 255, 120);
+    fg = p.onDanger;
+    keyBorder = Mix(p.onDanger, bg, 0.53f);
     break;
   default:
     bg = held ? p.surfaceActive : hov ? p.surfaceHover : p.surface;

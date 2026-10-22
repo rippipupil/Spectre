@@ -1305,6 +1305,15 @@ void App::RenderApp() {
   inFrame_ = true;
   appWindow_.Render([this] { appUi_.Draw(appWindow_, appModel_, appActions_); });
   inFrame_ = false;
+  // El tema no espera a Aplicar: se guarda al elegirlo y lo usan enseguida el
+  // panel (Alt+Z) y los avisos, no solo esta ventana. Tampoco cuenta como
+  // cambio sin aplicar.
+  if (s.config.theme != config_.theme || s.config.themeMotion != config_.themeMotion) {
+    config_.theme = s.base.theme = s.config.theme;
+    config_.themeMotion = s.base.themeMotion = s.config.themeMotion;
+    SaveConfig(config_);
+    SyncModels();
+  }
   // "Sin aplicar" solo si de verdad difiere de lo que había (cambiar algo y
   // volverlo a dejar como estaba no cuenta).
   if (appModel_.page == AppPage::Settings || s.dirty) s.dirty = !SameConfig(s.config, s.base);

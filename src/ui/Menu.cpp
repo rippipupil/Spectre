@@ -15,7 +15,7 @@ using namespace ui;
 
 namespace {
 
-Fonts FontsOf(const OverlayWindow& w) { return Fonts{w.Scale(), w.BoldFont(), w.BigFont()}; }
+Fonts FontsOf(const OverlayWindow& w) { return Fonts{w.Scale(), w.BoldFont(), w.BigFont(), &w.FontSizes()}; }
 
 bool ClipRow(int index, const ClipFile& clip) {
   const Palette& p = Colors();
@@ -222,13 +222,14 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
       const float pad = Px(10), bar = Px(3), fs = Px(kSmall);
       const float wrap = w - bar - pad * 2;
       ImVec2 q = ImGui::GetCursorScreenPos();
-      ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, wrap, text);
+      ImFont* font = Sized(ImGui::GetFont(), fs);
+      ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrap, text);
       ImVec2 end(q.x + w, q.y + ts.y + pad * 2);
       // Como los avisos: plano, borde de 1 px y una barra a la izquierda.
       dl->AddRectFilled(q, end, C(p.surface));
       dl->AddRect(q + ImVec2(0.5f, 0.5f), end - ImVec2(0.5f, 0.5f), C(p.line), 0, 0, Px(1));
       dl->AddRectFilled(q, ImVec2(q.x + bar, end.y), C(p.warning));
-      dl->AddText(ImGui::GetFont(), fs, ImVec2(q.x + bar + pad, q.y + pad), C(p.text), text, nullptr, wrap);
+      dl->AddText(font, fs, ImVec2(q.x + bar + pad, q.y + pad), C(p.text), text, nullptr, wrap);
       ImGui::Dummy(ImVec2(w, end.y - q.y));
       Gap(6);
       float half = (w - Px(8)) * 0.5f;

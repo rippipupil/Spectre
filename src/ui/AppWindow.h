@@ -4,12 +4,13 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
+#include "ui/Fonts.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
 
 struct ImGuiContext;
-struct ImFont;
 
 namespace spectre {
 
@@ -62,12 +63,15 @@ public:
 
   ID3D11Device* Device() const { return device_.Get(); }
   bool VideoSupport() const { return videoSupport_; }
-  std::shared_ptr<UiTexture> CreateTexture(const uint8_t* bgra, int width, int height);
+  // mipmaps=true para imágenes que se ven más pequeñas que su tamaño (capturas
+  // en el visor): sin ellas, reducir más de la mitad deja los bordes dentados.
+  std::shared_ptr<UiTexture> CreateTexture(const uint8_t* bgra, int width, int height, bool mipmaps = false);
   // Textura en la que se puede dibujar (fotogramas del reproductor).
   std::shared_ptr<UiTexture> CreateRenderTexture(int width, int height);
 
-  ImFont* BoldFont() const { return boldFont_; }
-  ImFont* BigFont() const { return bigFont_; }
+  ImFont* BoldFont() const { return fonts_.Bold(); }
+  ImFont* BigFont() const { return fonts_.Big(); }
+  const ui::FontSet& FontSizes() const { return fonts_; }
   float Scale() const { return scale_; }
   // Barra de título con los colores del tema (Windows 11; en Windows 10 solo el modo oscuro).
   void SetTitleColors(const Palette& palette);
@@ -84,7 +88,6 @@ private:
   bool CreateGraphics();
   void DestroyGraphics();
   void SetupImGui();
-  void LoadFonts();
   bool ResizeBuffers();
   void Input(); // hubo entrada: unos frames más para que el hover y las animaciones se asienten
 
@@ -114,8 +117,8 @@ private:
   ComPtr<IDXGISwapChain1> swapChain_;
   ComPtr<ID3D11RenderTargetView> rtv_;
   ImGuiContext* imgui_ = nullptr;
-  ImFont* boldFont_ = nullptr;
-  ImFont* bigFont_ = nullptr;
+  ui::FontSet fonts_;
+  bool fontMemoryFreed_ = false; // la copia del atlas en RAM ya se liberó
 };
 
 } // namespace spectre

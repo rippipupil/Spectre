@@ -2,6 +2,11 @@
 
 #include "app/Config.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <iterator>
+
 namespace spectre {
 
 namespace {
@@ -28,7 +33,8 @@ constexpr Theme kNegro{"negro",
                         IM_COL32(229, 72, 77, 255),   // danger
                         IM_COL32(239, 92, 96, 255),   // dangerHover
                         IM_COL32(204, 58, 63, 255),   // dangerActive
-                        IM_COL32(217, 163, 58, 255)}, // warning
+                        IM_COL32(217, 163, 58, 255),  // warning
+                        IM_COL32(255, 255, 255, 255)}, // onDanger
                        false};
 
 // Tema 2: paleta del personaje de Valorant que eligió Pablo. Negro violáceo
@@ -53,8 +59,133 @@ constexpr Theme kPsiquico{"psiquico",
                            IM_COL32(240, 64, 90, 255),   // danger
                            IM_COL32(247, 90, 112, 255),  // dangerHover
                            IM_COL32(214, 48, 74, 255),   // dangerActive
-                           IM_COL32(232, 170, 60, 255)}, // warning
+                           IM_COL32(232, 170, 60, 255),  // warning
+                           IM_COL32(255, 255, 255, 255)}, // onDanger
                           true};
+
+// Temas de RoCer0, la extensión de Roblox de Pablo: sus colores tal cual
+// (extension/common/themes.js, versión 1.2.0) en este orden: fondo, tarjeta,
+// tarjeta elevada, borde, texto, texto secundario, acento y rojo. accent2 y
+// success no se usan (aquí hay un solo acento). Solo los colores: el cristal,
+// los brillos, los redondeos y los fondos animados de RoCer0 no van con las
+// reglas de esta interfaz (plana, líneas de 1 px, sin esquinas redondeadas).
+// Un tema nuevo de RoCer0 = otra línea aquí.
+struct RoCer0Colors {
+  uint32_t bg, surface, surface2, border, text, muted, accent, danger;
+};
+struct RoCer0Theme {
+  const char* id;
+  const char* name;
+  bool light;
+  RoCer0Colors c;
+};
+constexpr RoCer0Theme kRoCer0[] = {
+    {"medianoche", "Medianoche", false, {0x0a0d16, 0x10141f, 0x181e2d, 0x222a3c, 0xeaf0fa, 0x8c95a8, 0x3b82f6, 0xef4444}},
+    {"daniel", "Daniel", false, {0x0f0f0f, 0x0f0f0f, 0x1c1c1c, 0x7a7a7a, 0xfdfdfd, 0xc8c8c8, 0xe5191c, 0xff3d3d}},
+    {"pablo", "Pablo", false, {0x130f2e, 0x1d1846, 0x272060, 0x4a4390, 0xf1f0ff, 0xb4aee0, 0x2be4ff, 0xff4d6a}},
+    {"amoled", "AMOLED", false, {0x000000, 0x0a0a0a, 0x141414, 0x232323, 0xf5f5f5, 0x9a9a9a, 0x00a2ff, 0xff4d4d}},
+    {"vidrio", "Vidrio esmerilado", false, {0x0b1020, 0x1a2238, 0x24304d, 0x33406a, 0xf1f5ff, 0xa5b1cf, 0x38bdf8, 0xfb7185}},
+    {"nebulosa", "Nebulosa", false, {0x0c0716, 0x150e24, 0x1f1533, 0x2c2045, 0xf1ebff, 0xa497c4, 0xa855f7, 0xf43f5e}},
+    {"galaxia", "Galaxia", false, {0x05060f, 0x0d1022, 0x151a33, 0x222947, 0xe8ecff, 0x8f97c0, 0x60a5fa, 0xf87171}},
+    {"synthwave", "Synthwave '84", false, {0x1b1029, 0x241734, 0x2e1d44, 0x43296a, 0xfdf0ff, 0xb79ad6, 0xff7edb, 0xfe4450}},
+    {"cyberpunk", "Cyberpunk", false, {0x0a0a0c, 0x121216, 0x1b1b21, 0x2d2d36, 0xf2f2f2, 0x9a9aa5, 0xfcee0a, 0xff003c}},
+    {"matrix", "Matrix", false, {0x000500, 0x031003, 0x062006, 0x0d3d0d, 0xc8ffc8, 0x5fbf5f, 0x00ff41, 0xff3b3b}},
+    {"catppuccin", "Catppuccin Mocha", false, {0x11111b, 0x1e1e2e, 0x313244, 0x45475a, 0xcdd6f4, 0xa6adc8, 0xcba6f7, 0xf38ba8}},
+    {"dracula", "Drácula", false, {0x1e1f29, 0x282a36, 0x343746, 0x44475a, 0xf8f8f2, 0x8f9bc9, 0xbd93f9, 0xff5555}},
+    {"nord", "Nord", false, {0x2a303c, 0x2e3440, 0x3b4252, 0x4c566a, 0xeceff4, 0xa9b4c7, 0x88c0d0, 0xbf616a}},
+    {"tokyo", "Tokyo Night", false, {0x16161e, 0x1a1b26, 0x24283b, 0x3b4261, 0xc0caf5, 0x7a83ad, 0x7aa2f7, 0xf7768e}},
+    {"rosepine", "Rosé Pine", false, {0x191724, 0x1f1d2e, 0x26233a, 0x403d52, 0xe0def4, 0x908caa, 0xebbcba, 0xeb6f92}},
+    {"gruvbox", "Gruvbox", false, {0x1d2021, 0x282828, 0x32302f, 0x504945, 0xebdbb2, 0xa89984, 0xfe8019, 0xfb4934}},
+    {"oceano", "Océano", false, {0x04141f, 0x082232, 0x0c2e43, 0x12405c, 0xe0f7ff, 0x7fb2c8, 0x22d3ee, 0xf87171}},
+    {"bosque", "Bosque", false, {0x0c140f, 0x121d16, 0x1a281f, 0x25392c, 0xe6f4ea, 0x8fb39b, 0x4ade80, 0xf87171}},
+    {"atardecer", "Atardecer", false, {0x170d14, 0x21121c, 0x2c1825, 0x432438, 0xffeef2, 0xc79aa9, 0xfb923c, 0xf43f5e}},
+    {"lunasangre", "Luna de sangre", false, {0x0f0507, 0x1a090c, 0x250d12, 0x3d141c, 0xffe9ea, 0xc58b91, 0xef4444, 0xff6b6b}},
+    {"oro", "Oro negro", false, {0x0b0a07, 0x15130d, 0x1f1c13, 0x3a3320, 0xf7f1de, 0xb3a77f, 0xf5c542, 0xff6b5b}},
+    {"menta", "Menta", false, {0x0d1514, 0x13201e, 0x1b2c29, 0x294440, 0xe3fbf6, 0x86b5ab, 0x2dd4bf, 0xfb7185}},
+    {"claro", "Clásico claro", true, {0xf2f4f7, 0xffffff, 0xeef1f5, 0xdde2ea, 0x1d2433, 0x5f6b7d, 0x0b6cff, 0xdc2626}},
+    {"latte", "Catppuccin Latte", true, {0xe6e9ef, 0xeff1f5, 0xdce0e8, 0xccd0da, 0x4c4f69, 0x6c6f85, 0x8839ef, 0xd20f39}},
+    {"sakura", "Sakura", true, {0xfff4f7, 0xffffff, 0xffe8ef, 0xf5cbd8, 0x4a2b36, 0x9a6b7b, 0xe75480, 0xd64545}},
+    {"papel", "Papel", true, {0xf6efdc, 0xfdf6e3, 0xeee8d5, 0xdfd6bd, 0x36454a, 0x6f7f84, 0x268bd2, 0xdc322f}},
+    {"contraste", "Alto contraste", false, {0x000000, 0x000000, 0x101010, 0xffffff, 0xffffff, 0xe6e6e6, 0xffff00, 0xff4040}},
+    {"halloween", "Halloween", false, {0x0f0a14, 0x1a1222, 0x241a30, 0x3a2a4a, 0xfff3e6, 0xbfa3c9, 0xff7a1a, 0xff4d6d}},
+    {"navidad", "Navidad", false, {0x0b1410, 0x12201a, 0x1a2c23, 0x2c4436, 0xf4fff8, 0x9cc3ad, 0xe63946, 0xff6b6b}},
+};
+
+ImU32 Rgb(uint32_t hex) { return IM_COL32((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF, 255); }
+
+ImU32 MixRgb(ImU32 a, ImU32 b, float t) {
+  auto ch = [&](int shift) {
+    float x = float((a >> shift) & 0xFF), y = float((b >> shift) & 0xFF);
+    return ImU32(std::lround(x + (y - x) * t)) << shift;
+  };
+  return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | (255u << IM_COL32_A_SHIFT);
+}
+
+// Luminancia relativa y contraste de WCAG 2.
+double Luminance(ImU32 c) {
+  auto lin = [&](int shift) {
+    double v = double((c >> shift) & 0xFF) / 255.0;
+    return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(IM_COL32_R_SHIFT) + 0.7152 * lin(IM_COL32_G_SHIFT) + 0.0722 * lin(IM_COL32_B_SHIFT);
+}
+double Contrast(ImU32 a, ImU32 b) {
+  double la = Luminance(a), lb = Luminance(b);
+  return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+// El texto más legible sobre un color: casi negro o blanco.
+ImU32 TextOn(ImU32 c) {
+  const ImU32 dark = IM_COL32(17, 17, 17, 255), white = IM_COL32(255, 255, 255, 255);
+  return Contrast(dark, c) > Contrast(white, c) ? dark : white;
+}
+
+// La paleta completa a partir de los colores de RoCer0. La tarjeta de RoCer0
+// es la columna lateral de Ajustes y la tarjeta elevada, la de los botones y
+// campos; el ratón encima y pulsado acercan la superficie al color del texto.
+// Los textos secundarios se aclaran (u oscurecen) hasta tener un contraste de
+// 4,5:1 sobre el fondo y la columna.
+Theme FromRoCer0(const RoCer0Theme& t) {
+  const ImU32 bg = Rgb(t.c.bg), text = Rgb(t.c.text), border = Rgb(t.c.border);
+  const ImU32 black = IM_COL32(0, 0, 0, 255), white = IM_COL32(255, 255, 255, 255);
+  Palette p{};
+  p.bg = bg;
+  if (t.light) {
+    // En los claros la tarjeta es blanca (más clara que el fondo): se usan
+    // tonos entre el fondo y el borde para que los botones se distingan.
+    p.bgAlt = MixRgb(bg, border, 0.25f);
+    p.surface = MixRgb(bg, border, 0.5f);
+    p.surfaceHover = MixRgb(p.surface, text, 0.05f);
+    p.surfaceActive = MixRgb(p.surface, text, 0.10f);
+  } else {
+    p.bgAlt = t.c.surface != t.c.bg ? Rgb(t.c.surface) : MixRgb(bg, Rgb(t.c.surface2), 0.5f);
+    p.surface = Rgb(t.c.surface2);
+    p.surfaceHover = MixRgb(p.surface, text, 0.06f);
+    p.surfaceActive = MixRgb(p.surface, text, 0.12f);
+  }
+  p.line = border;
+  p.lineStrong = MixRgb(border, Rgb(t.c.muted), 0.3f);
+  p.text = text;
+  auto readable = [&](ImU32 c) { return std::min(Contrast(c, bg), Contrast(c, p.bgAlt)) >= 4.5; };
+  p.textMuted = Rgb(t.c.muted);
+  for (int i = 1; i <= 20 && !readable(p.textMuted); ++i) p.textMuted = MixRgb(Rgb(t.c.muted), text, 0.05f * float(i));
+  p.textFaint = p.textMuted;
+  for (int i = 1; i <= 11; ++i) {
+    ImU32 c = MixRgb(p.textMuted, bg, 0.05f * float(i));
+    if (!readable(c)) break;
+    p.textFaint = c;
+  }
+  const ImU32 toward = t.light ? black : white;
+  p.accent = Rgb(t.c.accent);
+  p.accentHover = MixRgb(p.accent, toward, 0.15f);
+  p.accentActive = MixRgb(p.accent, black, t.light ? 0.2f : 0.15f);
+  p.onAccent = TextOn(p.accent);
+  p.danger = Rgb(t.c.danger);
+  p.dangerHover = MixRgb(p.danger, toward, 0.12f);
+  p.dangerActive = MixRgb(p.danger, black, 0.15f);
+  p.warning = t.light ? IM_COL32(183, 121, 31, 255) : IM_COL32(232, 170, 60, 255);
+  p.onDanger = TextOn(p.danger);
+  return Theme{t.id, t.name, p, false, t.light, "RoCer0"};
+}
 
 const Theme* current_ = &kNegro;
 bool motion_ = true;
@@ -69,7 +200,18 @@ ImVec4 V(ImU32 color, float alpha) {
 } // namespace
 
 const std::vector<const Theme*>& Themes() {
-  static const std::vector<const Theme*> themes = {&kNegro, &kPsiquico};
+  // Se calculan una vez; los punteros no cambian en toda la ejecución.
+  static const std::vector<Theme> rocer0 = [] {
+    std::vector<Theme> v;
+    v.reserve(std::size(kRoCer0));
+    for (const RoCer0Theme& t : kRoCer0) v.push_back(FromRoCer0(t));
+    return v;
+  }();
+  static const std::vector<const Theme*> themes = [] {
+    std::vector<const Theme*> v = {&kNegro, &kPsiquico};
+    for (const Theme& t : rocer0) v.push_back(&t);
+    return v;
+  }();
   return themes;
 }
 
