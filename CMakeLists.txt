@@ -61,12 +61,20 @@ set(SPECTRE_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Versión que muestr
 if(NOT SPECTRE_BUILD_VERSION MATCHES "^[0-9]+(\\.[0-9]+)+$")
   message(FATAL_ERROR "SPECTRE_BUILD_VERSION no válida: '${SPECTRE_BUILD_VERSION}'")
 endif()
+# Repositorio (propietario/nombre) cuyas releases sigue el actualizador. CI
+# pone el repositorio en el que se compila y publica, así la app no lleva
+# ninguno escrito. Vacío: la app no busca actualizaciones.
+set(SPECTRE_UPDATE_REPO "" CACHE STRING "Repositorio de GitHub de las releases (propietario/nombre)")
+if(SPECTRE_UPDATE_REPO AND NOT SPECTRE_UPDATE_REPO MATCHES "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+  message(FATAL_ERROR "SPECTRE_UPDATE_REPO no válido: '${SPECTRE_UPDATE_REPO}'")
+endif()
 file(GLOB_RECURSE SPECTRE_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_executable(spectre WIN32 ${SPECTRE_SOURCES} res/spectre.rc)
 target_include_directories(spectre PRIVATE src)
 target_compile_definitions(spectre PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
-  SPECTRE_VERSION="${SPECTRE_BUILD_VERSION}")
+  SPECTRE_VERSION="${SPECTRE_BUILD_VERSION}"
+  SPECTRE_UPDATE_REPO="${SPECTRE_UPDATE_REPO}")
 target_compile_options(spectre PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /EHsc)
 target_link_libraries(spectre PRIVATE imgui nlohmann_json::nlohmann_json ffmpeg
   d3d11 dxgi dcomp windowsapp mfplat mfreadwrite mf mfuuid ole32 uuid

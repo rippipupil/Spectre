@@ -1107,9 +1107,11 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
              "instalador, Spectre se actualiza solo desde aquí.");
       else
         Help("GitHub no ha publicado la huella de este instalador, así que Spectre no puede comprobarlo y no lo "
-             "instala solo. Descárgalo desde la página de la versión.");
+             "instala solo. Descárgalo y ábrelo tú.");
       Gap(4);
-      if (SolidButton("update-page", "Abrir página de descarga", bw)) a.openPath(Updater::ReleasePage());
+      if (SolidButton("update-page", u.portable ? "Descargar el zip nuevo" : "Descargar el instalador", bw) &&
+          !u.manualUrl.empty())
+        a.openPath(u.manualUrl);
     } else {
       std::string help = "Se descarga el instalador";
       if (u.sizeBytes > 0) help += " (" + FormatBytes(u.sizeBytes) + ")";

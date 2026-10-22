@@ -17,6 +17,7 @@ struct UpdateStatus {
   uint64_t sizeBytes = 0; // tamaño del instalador
   bool portable = false;  // copia portable: no hay instalador que actualizar
   bool unverified = false; // GitHub no publicó la huella del instalador: solo descarga manual
+  std::string manualUrl;   // descarga directa para portable o sin huella (zip o instalador)
 };
 
 // Comprueba la última release de GitHub y descarga Spectre-Setup.exe.
@@ -42,8 +43,6 @@ public:
 
   // Lanza el instalador en modo silencioso; con relaunch vuelve a abrir Spectre al acabar.
   static bool LaunchInstaller(const std::wstring& path, bool relaunch);
-  // Página de la release (copia portable o instalador sin huella).
-  static std::string ReleasePage();
 
 private:
   struct Shared;

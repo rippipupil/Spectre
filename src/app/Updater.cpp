@@ -20,14 +20,18 @@
 #ifndef SPECTRE_VERSION
 #define SPECTRE_VERSION "0.1.0"
 #endif
+// Lo pone CMake (CI: el repositorio donde se publica cada versión).
+#ifndef SPECTRE_UPDATE_REPO
+#define SPECTRE_UPDATE_REPO ""
+#endif
 
 namespace spectre {
 
 namespace {
 
-constexpr wchar_t kLatestApi[] = L"https://api.github.com/repos/rippipupil/Spectre/releases/latest";
-constexpr char kReleasePage[] = "https://github.com/rippipupil/Spectre/releases/latest";
+constexpr char kRepo[] = SPECTRE_UPDATE_REPO;
 constexpr char kAssetName[] = "Spectre-Setup.exe";
+constexpr char kPortableName[] = "Spectre-Portable.zip";
 constexpr uint64_t kMaxApiBytes = 1 << 20;        // la respuesta de la API ocupa unos KB
 constexpr uint64_t kMaxInstallerBytes = 512u << 20; // tope de cordura para la descarga
 
@@ -263,10 +267,15 @@ void Updater::Check(bool background) {
       shared->Set([](UpdateStatus& s) { s.state = UpdateStatus::State::Idle; });
     };
     RemoveOldDownloads();
+    if (!kRepo[0]) {
+      fail("Esta copia de Spectre no tiene de dónde descargar versiones nuevas.");
+      return;
+    }
     std::string body, error;
     DWORD status = 0;
     bool ok = HttpGet(
-        kLatestApi, L"application/vnd.github+json", cancelled, nullptr,
+        L"https://api.github.com/repos/" + Widen(kRepo) + L"/releases/latest", L"application/vnd.github+json",
+        cancelled, nullptr,
         [&](const char* data, size_t size) {
           body.append(data, size);
           return body.size() <= kMaxApiBytes;
@@ -282,9 +291,10 @@ void Updater::Check(bool background) {
       auto json = nlohmann::json::parse(body);
       std::string tag = json.at("tag_name").get<std::string>();
       std::string latest = tag.size() > 1 && (tag[0] == 'v' || tag[0] == 'V') ? tag.substr(1) : tag;
-      std::string url, digest;
+      std::string url, digest, portableUrl;
       uint64_t size = 0;
       for (const auto& asset : json.value("assets", nlohmann::json::array())) {
+        if (asset.value("name", "") == kPortableName) portableUrl = asset.value("browser_download_url", "");
         if (asset.value("name", "") != kAssetName) continue;
         url = asset.value("browser_download_url", "");
         size = asset.value("size", uint64_t(0));
@@ -304,6 +314,9 @@ void Updater::Check(bool background) {
       // instala en silencio, se ofrece la página de descarga.
       shared->status.unverified = newer && shared->sha256.empty();
       if (shared->status.unverified) Log("Actualizaciones: la release %s no publica SHA-256", latest.c_str());
+      // Descarga a mano (portable o sin huella): el archivo directamente, no
+      // la página del repositorio.
+      shared->status.manualUrl = shared->status.portable && !portableUrl.empty() ? portableUrl : url;
       shared->status.latest = latest;
       shared->status.sizeBytes = size;
       shared->status.state = newer ? UpdateStatus::State::Available : UpdateStatus::State::UpToDate;
@@ -436,7 +449,5 @@ bool Updater::LaunchInstaller(const std::wstring& path, bool relaunch) {
   Log("Actualizaciones: instalador lanzado, Spectre se cierra");
   return true;
 }
-
-std::string Updater::ReleasePage() { return kReleasePage; }
 
 } // namespace spectre
