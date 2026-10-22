@@ -22,7 +22,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 cameraId, cameraCorner, cameraSizePercent, screenshotFormat,
                                                 outputDir, storageLimitGB, showNotifications, soundOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
-                                                theme, themeMotion, hotkeys)
+                                                theme, themeMotion, panelLayout, panelLateralX, panelCompactX,
+                                                panelCompactY, hotkeys)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 
@@ -40,6 +41,10 @@ static void Sanitize(Config& c) {
   if (c.outputHeight != 0) c.outputHeight = std::clamp(c.outputHeight, 360, 2160);
   if (c.monitorIndex < 0) c.monitorIndex = 0;
   if (!IsKnownTheme(c.theme)) c.theme = "negro";
+  if (c.panelLayout != "lateral" && c.panelLayout != "compacto") c.panelLayout = "lateral";
+  // !(x >= 0) también descarta NaN (un config.json editado a mano).
+  for (float* f : {&c.panelLateralX, &c.panelCompactX, &c.panelCompactY})
+    *f = !(*f >= 0.0f) ? 0.0f : std::min(*f, 1.0f);
   if (c.screenshotFormat != "png" && c.screenshotFormat != "jpg") c.screenshotFormat = "png";
   c.storageLimitGB = std::clamp(c.storageLimitGB, 0, 100000);
   if (c.toastPosition != "top-right" && c.toastPosition != "top-left" && c.toastPosition != "bottom-right" &&

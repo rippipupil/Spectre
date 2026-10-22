@@ -102,8 +102,8 @@ void PanelStatus(const MenuModel& m) {
 // Rastro fantasma del tema Psíquico: un segundo contorno aparece 10 px por
 // dentro del panel y se funde en 240 ms mientras llega al borde. Va por encima
 // del panel y dentro de su rectángulo: el panel es opaco y la ventana recorta
-// lo que quede fuera de la zona de clic, así que fuera no se vería. Usa el
-// tamaño del frame anterior.
+// lo que quede fuera de la zona de clic, así que fuera no se vería. Usa la
+// posición y el tamaño del frame anterior.
 void DrawOpenGhost(const MenuModel& m, float width) {
   if (!ThemeMotion() || m.panelHeight <= 0) return;
   float t = float(GetTickCount64() - m.openedAt) / 240.0f;
@@ -111,7 +111,7 @@ void DrawOpenGhost(const MenuModel& m, float width) {
   t = std::clamp(t, 0.0f, 1.0f);
   float ease = 1.0f - (1.0f - t) * (1.0f - t);
   float inset = Px(10) * (1.0f - ease);
-  float top = ImGui::GetIO().DisplaySize.y * 0.5f - m.panelHeight * 0.5f;
+  float top = m.panelTop;
   ImGui::GetForegroundDrawList()->AddRect(ImVec2(inset, top + inset),
                                           ImVec2(width - inset, top + m.panelHeight - inset),
                                           ImGui::GetColorU32(Colors().accent, 0.55f * (1.0f - ease)), 0, 0, Px(1));
@@ -131,6 +131,9 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   const Palette& p = Colors();
   const float appear = OpenProgress(m.openedAt);
   const float width = Px(kPanelWidth);
+  const bool lateral = IsLateralPanel(m.config);
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  bool startDrag = false;
 
   DrawOpenGhost(m, width);
 
@@ -141,23 +144,40 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(Px(8), Px(4)));
   ImGui::PushStyleColor(ImGuiCol_WindowBg, V(p.bg));
   ImGui::PushStyleColor(ImGuiCol_Border, V(p.line));
-  // Centrado en vertical dentro de la franja; App calcula la zona de clic igual.
-  // Si no cabe (monitor pequeño con escala alta), la rueda del ratón lo desplaza.
-  ImGui::SetNextWindowPos(ImVec2(0, ImGui::GetIO().DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0, 0.5f));
-  ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, ImGui::GetIO().DisplaySize.y));
-  ImGui::Begin("##panel", nullptr,
-               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav);
+  // La ventana es una franja del ancho del panel (App::MenuRect). Lateral: el
+  // panel la llena de arriba abajo. Compacto: del alto de su contenido, a la
+  // altura guardada (0 arriba, 1 abajo; 0,5 es el centrado de antes). App
+  // calcula la zona de clic con panelTop. Si no cabe (monitor pequeño con
+  // escala alta), la rueda del ratón lo desplaza.
+  ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                           ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
+  if (lateral) {
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(display);
+  } else {
+    const float fy = m.config.panelCompactY;
+    ImGui::SetNextWindowPos(ImVec2(0, display.y * fy), ImGuiCond_Always, ImVec2(0, fy));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, display.y));
+    flags |= ImGuiWindowFlags_AlwaysAutoResize;
+  }
+  ImGui::Begin("##panel", nullptr, flags);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const auto& c = m.config;
   DrawHoverTrail(dl);
 
-  // Cabecera: marca, cerrar y estado.
+  // Cabecera: marca, cerrar y estado. La fila de la marca es el asa para
+  // mover el panel (también vale cualquier hueco sin controles).
   {
     ImVec2 q = ImGui::GetCursorScreenPos();
     float rowH = Px(28);
+    float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::InvisibleButton("move", ImVec2(avail - rowH - Px(4), rowH));
+    if (ImGui::IsItemActivated()) startDrag = true;
+    if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+    if (!m.dragging && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+      ImGui::SetTooltip("Arrastra para mover el panel");
     Wordmark(dl, ImVec2(q.x, q.y + (rowH - Px(kSmall)) * 0.5f), "SPECTRE", C(p.text));
-    ImGui::SetCursorScreenPos(ImVec2(q.x + ImGui::GetContentRegionAvail().x - rowH, q.y));
+    ImGui::SetCursorScreenPos(ImVec2(q.x + avail - rowH, q.y));
     if (IconButton("close", Icon::Close, rowH, "Cerrar (Esc)")) a.close();
     ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(6)));
     PanelStatus(m);
@@ -251,11 +271,23 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
     Text(dl, ImGui::GetFont(), ss, ImVec2(q.x, q.y + Px(6)), C(p.textFaint), "Aún no hay clips ni grabaciones.");
     ImGui::Dummy(ImVec2(0, ss + Px(12)));
   }
-  for (int i = 0; i < int(std::min<size_t>(m.clips.size(), 3)); ++i) {
+  // Lateral: el pie va pegado abajo, como en una barra lateral, y los recientes
+  // llenan el hueco que queda (al menos tres, como el compacto).
+  const float spacing = ImGui::GetStyle().ItemSpacing.y;
+  const float footerTop = ImGui::GetWindowPos().y + ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y -
+                          Px(34) - (Px(6) + Px(1) + Px(8) + spacing * 3); // el separador de encima
+  size_t shown = std::min<size_t>(m.clips.size(), 3);
+  if (lateral) {
+    float room = footerTop - ImGui::GetCursorScreenPos().y;
+    shown = std::min(m.clips.size(), std::max(shown, size_t(std::max(0.0f, room / (Px(30) + spacing)))));
+  }
+  for (int i = 0; i < int(shown); ++i) {
     const auto& clip = m.clips[size_t(i)];
     if (ClipRow(i, clip)) a.openClip(clip.path);
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) a.showInFolder(clip.path);
   }
+  if (lateral && ImGui::GetCursorScreenPos().y < footerTop)
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, footerTop));
 
   Divider(6, 8);
   float half = (ImGui::GetContentRegionAvail().x - Px(8)) * 0.5f;
@@ -264,8 +296,22 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGui::SameLine(0, Px(8));
   if (GhostButton("folder", "Carpeta", half, Tone::Normal, 34)) a.openPath(m.outputDir);
 
+  // Un hueco del panel también sirve de asa: el clic no cae en ningún control.
+  if (!m.dragging && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsWindowHovered() &&
+      !ImGui::IsAnyItemHovered())
+    startDrag = true;
+  if (startDrag && !m.dragging) {
+    m.dragging = true;
+    m.dragFromX = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left].x;
+    m.dragFromY = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left].y;
+  } else if (m.dragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    m.dragging = false;
+  }
+  if (m.dragging) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
   m.panelWidth = ImGui::GetWindowWidth();
   m.panelHeight = ImGui::GetWindowHeight();
+  m.panelTop = ImGui::GetWindowPos().y;
   ImGui::End();
   ImGui::PopStyleColor(2);
   ImGui::PopStyleVar(5);
