@@ -2212,6 +2212,13 @@ void PageTitle(const char* title, const std::string& subtitle, int index, const 
   Gap(st.pad * 0.5f);
 }
 
+float PageTitleActionY(float height) {
+  const Style& st = CurrentStyle();
+  const float ts = Px(st.titleSize);
+  const float top = st.title == TitleLook::Masthead ? Px(14) : st.title == TitleLook::Heavy ? Px(6) : 0.0f;
+  return std::max(0.0f, top + (ts - Px(height)) * 0.5f);
+}
+
 bool RailItem(int index, Icon icon, const char* name, bool selected, float height) {
   const Palette& p = Colors();
   const Style& st = CurrentStyle();

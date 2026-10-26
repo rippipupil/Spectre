@@ -94,6 +94,12 @@ public:
   void StopRecording();
   bool Recording() const { return recorder_ && recorder_->Active(); }
   void SetReplaySeconds(double seconds);
+  // Enciende, apaga o cambia la webcam con la captura en marcha: ni reinicia
+  // el pipeline (el replay sigue) ni espera a que la cámara abra (ver Camera).
+  // Solo cuentan los campos camera*. Desde el hilo de la interfaz.
+  void SetCamera(const PipelineSettings& settings);
+  // Un aviso (una vez) si la webcam lleva un rato sin dar imagen; vacío si no.
+  std::string TakeCameraStall();
   bool MicCaptured() const { return running_ && audio_.HasMic(); }
   void SetMicMuted(bool muted) { audio_.SetMicMuted(muted); }
   // Nivel de pico reciente (0..1) de cada fuente de audio, barato de leer en cada frame.
@@ -110,6 +116,7 @@ private:
   void VideoLoop();
   bool Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& frame);
   RECT CameraRect(UINT camWidth, UINT camHeight) const;
+  void StartCamera(bool userAsked);
   size_t BufferLimit(double seconds) const;
   // Bytes por segundo del replay en el peor caso (todo al bitrate máximo, con audio y un 10 %).
   double ReplayBytesPerSecond() const;
@@ -122,7 +129,10 @@ private:
   VideoConverter converter_;
   VideoEncoder encoder_;
   AudioPipeline audio_;
+  // Se cambia con GpuMutex tomado, igual que settings_.camera*: Render los lee
+  // dentro del GpuMutex del encoder.
   std::unique_ptr<Camera> camera_;
+  bool cameraComposited_ = false; // ya se registró en el log la primera composición
   std::shared_ptr<ReplayBuffer> buffer_;
   std::unique_ptr<Recorder> recorder_;
   std::vector<std::thread> recorderDrains_; // grabaciones cortadas que aún vacían su cola

@@ -1,5 +1,6 @@
 #include "app/App.h"
 #include "app/CrashHandler.h"
+#include "capture/Camera.h"
 #include "common/Util.h"
 
 #include <mfapi.h>
@@ -73,6 +74,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   }
   Log("Spectre cerrado (código %d)", code);
 
+  // Los hilos de las cámaras ya paradas usan Media Foundation hasta que el
+  // driver las suelta.
+  if (mf) Camera::WaitForThreads(2000);
   if (mf) MFShutdown();
   winrt::uninit_apartment();
   if (mutex) {

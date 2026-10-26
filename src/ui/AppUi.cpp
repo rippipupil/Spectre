@@ -87,6 +87,43 @@ std::string KindName(const MediaItem& item) {
 // Se puede abrir en «Editar»: vídeo con imagen.
 bool Editable(const MediaItem& item) { return item.Video() && !item.audioOnly; }
 
+// «Para Discord» de varios: los vídeos con imagen que no son ya una copia para Discord.
+bool ExportableForDiscord(const MediaItem& item) { return Editable(item) && item.kind != MediaKind::Export; }
+
+// «12 seleccionados», «1 vídeo»
+std::string Count(size_t n, const char* one, const char* many) {
+  return std::to_string(n) + " " + (n == 1 ? one : many);
+}
+
+// Casilla plana de 1 px (tarjetas de la biblioteca y diálogos).
+void DrawCheckbox(ImDrawList* dl, ImVec2 c, bool on, bool hover) {
+  const Palette& p = Colors();
+  ImVec2 b0 = c - ImVec2(Px(8), Px(8)), b1 = c + ImVec2(Px(8), Px(8));
+  dl->AddRectFilled(b0, b1, C(on ? p.accent : p.bg, on ? 1.0f : 0.86f));
+  dl->AddRect(b0, b1, C(on ? p.accent : hover ? p.text : p.lineStrong), 0, 0, Px(1));
+  if (on) {
+    ImU32 tick = C(p.onAccent);
+    dl->AddLine(c + ImVec2(-Px(4), 0), c + ImVec2(-Px(1), Px(3)), tick, Px(1.5f));
+    dl->AddLine(c + ImVec2(-Px(1), Px(3)), c + ImVec2(Px(4), -Px(3)), tick, Px(1.5f));
+  }
+}
+
+// Casilla con su texto; todo es clicable.
+bool CheckRow(const char* id, const char* label, bool* value) {
+  const float fs = Px(kSmall);
+  ImVec2 ts = TextSize(ImGui::GetFont(), fs, label);
+  bool pressed = ImGui::InvisibleButton(id, ImVec2(Px(16) + Px(10) + ts.x, std::max(Px(16), ts.y) + Px(4)));
+  bool hov = ImGui::IsItemHovered();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  if (pressed) *value = !*value;
+  ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const float mid = (a.y + b.y) * 0.5f;
+  DrawCheckbox(dl, ImVec2(a.x + Px(8), mid), *value, hov);
+  Text(dl, ImGui::GetFont(), fs, ImVec2(a.x + Px(26), mid - ts.y * 0.5f), C(Colors().text), label);
+  return pressed;
+}
+
 // Imagen ajustada al rectángulo; cover=true la recorta para llenarlo.
 void DrawImage(ImDrawList* dl, const UiTexture& tex, ImVec2 a, ImVec2 b, bool cover, float alpha = 1.0f) {
   float aw = b.x - a.x, ah = b.y - a.y;
@@ -231,7 +268,8 @@ void AppUi::OnClosed() {
   scrubbing_ = false;
   trimMode_ = false;
   menuPath_.clear();
-  openRename_ = openDelete_ = false;
+  openRename_ = openDelete_ = openBulkDelete_ = false;
+  EndSelection();
 }
 
 void AppUi::PauseMedia() {
@@ -289,13 +327,87 @@ void AppUi::SaveCurrentFrame(const MediaItem& item, const AppActions& a) {
 }
 
 bool AppUi::Selected(const std::string& path) const {
-  return std::find(selected_.begin(), selected_.end(), path) != selected_.end();
+  return selected_.count(path) > 0;
 }
 
 void AppUi::ToggleSelected(const std::string& path) {
-  auto it = std::find(selected_.begin(), selected_.end(), path);
-  if (it != selected_.end()) selected_.erase(it);
-  else selected_.push_back(path);
+  if (!selected_.erase(path)) selected_.insert(path);
+}
+
+void AppUi::ClickSelect(const std::vector<const MediaItem*>& list, size_t index, bool range) {
+  const std::string path = list[index]->path;
+  size_t anchor = list.size();
+  if (range)
+    for (size_t i = 0; i < list.size(); ++i)
+      if (list[i]->path == selectAnchor_) anchor = i;
+  if (anchor < list.size()) {
+    // Mayús+clic: todo el tramo entre el último pulsado y este queda elegido.
+    for (size_t i = std::min(anchor, index); i <= std::max(anchor, index); ++i)
+      selected_.insert(list[i]->path);
+  } else {
+    ToggleSelected(path);
+  }
+  selectAnchor_ = path;
+}
+
+void AppUi::EndSelection() {
+  selected_.clear();
+  selectAnchor_.clear();
+  selectMode_ = false;
+}
+
+std::vector<const MediaItem*> AppUi::SelectedItems(const AppModel& m) const {
+  std::vector<const MediaItem*> out;
+  if (selected_.empty()) return out;
+  for (const auto& item : m.items)
+    if (selected_.count(item.path)) out.push_back(&item);
+  return out;
+}
+
+void AppUi::FavoriteSelection(AppModel& m, const AppActions& a) {
+  const auto chosen = SelectedItems(m);
+  if (chosen.empty() || !a.setFavorites) return;
+  // Si ya lo son todos, se quitan; si no, todos pasan a serlo.
+  const bool all = std::all_of(chosen.begin(), chosen.end(), [](const MediaItem* item) { return item->favorite; });
+  std::vector<std::string> paths;
+  for (const auto* item : chosen) paths.push_back(item->path);
+  a.setFavorites(paths, !all);
+}
+
+void AppUi::ExportSelection(AppModel& m, const AppActions& a) {
+  std::vector<const MediaItem*> videos;
+  for (const auto* item : SelectedItems(m))
+    if (ExportableForDiscord(*item)) videos.push_back(item);
+  if (videos.empty() || !a.exportManyForDiscord) return;
+  std::stable_sort(videos.begin(), videos.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
+  std::vector<std::string> paths;
+  for (const auto* item : videos) paths.push_back(item->path);
+  a.exportManyForDiscord(paths);
+  EndSelection();
+}
+
+void AppUi::JoinSelection(AppModel& m, const AppActions& a) {
+  auto chosen = SelectedItems(m);
+  if (chosen.size() < 2) return;
+  std::stable_sort(chosen.begin(), chosen.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
+  std::vector<std::string> paths;
+  for (const auto* item : chosen) paths.push_back(item->path);
+  a.joinClips(paths);
+  EndSelection();
+}
+
+void AppUi::CopySelection(AppModel& m, const AppActions& a) {
+  std::vector<std::string> paths;
+  for (const auto* item : SelectedItems(m)) paths.push_back(item->path);
+  if (!paths.empty() && a.copyManyToClipboard) a.copyManyToClipboard(paths);
+}
+
+void AppUi::AskDeleteSelection(AppModel& m) {
+  bulkDelete_.clear();
+  for (const auto* item : SelectedItems(m)) bulkDelete_.push_back(item->path);
+  if (bulkDelete_.empty()) return;
+  bulkKeepFavorites_ = false;
+  openBulkDelete_ = true;
 }
 
 void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
@@ -476,10 +588,6 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   if (!starToggle_.empty()) {
     if (const MediaItem* item = Find(m, starToggle_)) a.setFavorite(item->path, !item->favorite);
     starToggle_.clear();
-  }
-  if (!selectToggle_.empty()) {
-    ToggleSelected(selectToggle_);
-    selectToggle_.clear();
   }
 
   // La ventana se dibuja cuando algo cambia. El movimiento de fondo del diseño
@@ -1047,6 +1155,7 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
     const int count = 4;
     float gap = Px(CurrentStyle().gap);
     float cardW = (ImGui::GetContentRegionAvail().x - gap * float(count - 1)) / float(count);
+    bool openMenu = false;
     for (int i = 0; i < count && i < int(m.items.size()); ++i) {
       if (i > 0) ImGui::SameLine(0, gap);
       ImGui::PushID(i);
@@ -1055,10 +1164,12 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
       if (Card(w, item, cardW, &menu, -1, i + 1)) View(m, item.path, AppPage::Home);
       if (menu) {
         menuPath_ = item.path;
-        ImGui::OpenPopup("item-menu");
+        openMenu = true;
       }
       ImGui::PopID();
     }
+    // Fuera del PushID de la tarjeta: ItemMenu busca el menú con el id de aquí.
+    if (openMenu) ImGui::OpenPopup("item-menu");
   }
   ItemMenu(m, a);
 
@@ -1128,25 +1239,18 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   }
   if (overStar) ImGui::SetTooltip(item.favorite ? "Quitar de favoritos" : "Favorito: el límite de espacio no lo borra");
 
-  // Casilla para elegir vídeos y unirlos: al pasar el ratón y, mientras haya
-  // alguno elegido, en todas las tarjetas.
+  // Casilla para elegir varios (borrar, favoritos, Discord, unir): al pasar
+  // el ratón y, mientras se está eligiendo, en todas las tarjetas.
   bool overCheck = false;
   if (selection >= 0) {
     ImVec2 boxC(ta.x + Px(18), tb.y - Px(18));
     overCheck = hov && std::fabs(ImGui::GetMousePos().x - boxC.x) < Px(14) &&
                 std::fabs(ImGui::GetMousePos().y - boxC.y) < Px(14);
-    if (selection > 0 || hov || !selected_.empty()) {
-      ImVec2 b0 = boxC - ImVec2(Px(8), Px(8)), b1 = boxC + ImVec2(Px(8), Px(8));
-      dl->AddRectFilled(b0, b1, C(selection > 0 ? p.accent : p.bg, selection > 0 ? 1.0f : 0.86f));
-      dl->AddRect(b0, b1, C(selection > 0 ? p.accent : overCheck ? p.text : p.lineStrong), 0, 0, Px(1));
-      if (selection > 0) {
-        ImU32 tick = C(p.onAccent);
-        dl->AddLine(boxC + ImVec2(-Px(4), 0), boxC + ImVec2(-Px(1), Px(3)), tick, Px(1.5f));
-        dl->AddLine(boxC + ImVec2(-Px(1), Px(3)), boxC + ImVec2(Px(4), -Px(3)), tick, Px(1.5f));
-      }
-    }
+    if (selection > 0 || hov || Selecting()) DrawCheckbox(dl, boxC, selection > 0, overCheck);
     if (selection > 0) dl->AddRect(a, b, C(p.accent), 0, 0, std::max(Px(1), LineW()));
-    if (overCheck) ImGui::SetTooltip(selection > 0 ? "Quitar de la selección" : "Elegir para unir con otros clips");
+    if (overCheck)
+      ImGui::SetTooltip(selection > 0 ? "Quitar de la selección"
+                                      : "Seleccionar (también Ctrl+clic, y Mayús+clic para un tramo)");
   }
 
   MediaCardCaption(dl, card, Title(item), item.date + "  ·  " + FormatBytes(item.size), mo.hover, number);
@@ -1184,7 +1288,7 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
       a.exportForDiscord(path);
     }
     if (ImGui::MenuItem("Unir con otros clips...")) {
-      if (!Selected(path)) selected_.push_back(path);
+      selected_.insert(path);
       Navigate(m, AppPage::Library);
     }
     if (ImGui::BeginMenu("Cámara lenta")) {
@@ -1209,6 +1313,38 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   ImGui::EndPopup();
 }
 
+void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
+  if (!ImGui::BeginPopup("selection-menu")) return;
+  const auto chosen = SelectedItems(m);
+  const size_t n = chosen.size();
+  if (n == 0) {
+    ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    return;
+  }
+  size_t videos = 0, favorites = 0, exportable = 0;
+  for (const auto* item : chosen) {
+    videos += item->Video() ? 1 : 0;
+    favorites += item->favorite ? 1 : 0;
+    exportable += ExportableForDiscord(*item) ? 1 : 0;
+  }
+  const std::string count = std::to_string(n);
+  if (ImGui::MenuItem(favorites == n ? "Quitar de favoritos" : "Añadir a favoritos")) FavoriteSelection(m, a);
+  // Discord acepta 10 archivos por mensaje: con más, solo se ofrece copiarlos.
+  if (ImGui::MenuItem(("Copiar " + count + (n > 10 ? " al portapapeles" : " para pegar en Discord")).c_str()))
+    CopySelection(m, a);
+  if (exportable > 0) {
+    std::string label = "Exportar " + Count(exportable, "vídeo", "vídeos") + " para Discord (menos de 20 MB)";
+    if (ImGui::MenuItem(label.c_str())) ExportSelection(m, a);
+  }
+  if (n >= 2 && videos == n && ImGui::MenuItem(("Unir " + count + " vídeos").c_str())) JoinSelection(m, a);
+  ImGui::Separator();
+  if (ImGui::MenuItem(("Mover " + count + " a la papelera...").c_str())) AskDeleteSelection(m);
+  ImGui::Separator();
+  if (ImGui::MenuItem("Quitar selección")) EndSelection();
+  ImGui::EndPopup();
+}
+
 void AppUi::Dialogs(AppModel& m, const AppActions& a) {
   const Palette& p = Colors();
   ImGuiIO& io = ImGui::GetIO();
@@ -1220,6 +1356,19 @@ void AppUi::Dialogs(AppModel& m, const AppActions& a) {
     ImGui::OpenPopup("Mover a la papelera");
     openDelete_ = false;
     deleteHasBin_ = HasRecycleBin(deletePath_);
+  }
+  if (openBulkDelete_) {
+    ImGui::OpenPopup("Mover varios a la papelera");
+    openBulkDelete_ = false;
+    // Una vez al abrir, por carpeta: todo suele estar en la misma unidad.
+    std::unordered_map<std::string, bool> binByFolder;
+    bulkNoBin_ = 0;
+    for (const auto& path : bulkDelete_) {
+      const std::string folder = path.substr(0, path.find_last_of("\\/") + 1);
+      auto it = binByFolder.find(folder);
+      if (it == binByFolder.end()) it = binByFolder.emplace(folder, HasRecycleBin(path)).first;
+      if (!it->second) ++bulkNoBin_;
+    }
   }
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(24), Px(20)));
   ImGui::PushStyleColor(ImGuiCol_PopupBg, V(p.bg));
@@ -1306,8 +1455,196 @@ void AppUi::Dialogs(AppModel& m, const AppActions& a) {
     }
     ImGui::EndPopup();
   }
+  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(Px(480), 0));
+  if (ImGui::BeginPopupModal("Mover varios a la papelera", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoSavedSettings)) {
+    // Lo que se va: lo elegido que sigue en la biblioteca, sin los favoritos si se dejan fuera.
+    std::unordered_set<std::string> asked(bulkDelete_.begin(), bulkDelete_.end());
+    std::vector<const MediaItem*> items;
+    size_t favorites = 0;
+    uint64_t bytes = 0;
+    for (const auto& item : m.items) {
+      if (!asked.count(item.path)) continue;
+      if (item.favorite) {
+        ++favorites;
+        if (bulkKeepFavorites_) continue;
+      }
+      items.push_back(&item);
+      bytes += item.size;
+    }
+    const size_t n = items.size();
+    const bool allNoBin = bulkNoBin_ > 0 && bulkNoBin_ >= bulkDelete_.size();
+    std::string title = n == 0 ? std::string("No queda nada que borrar")
+                        : allNoBin ? "¿Borrar " + Count(n, "archivo", "archivos") + " para siempre?"
+                                   : "¿Mover " + Count(n, "archivo", "archivos") + " a la papelera?";
+    Text(ImGui::GetWindowDrawList(), Bold(), Px(kBody) + Px(2), ImGui::GetCursorScreenPos(), C(p.text), title.c_str());
+    Gap(30);
+    if (n > 0) {
+      // Los primeros nombres, para saber qué se va sin tener que contarlo.
+      std::string names = FormatBytes(bytes) + "  ·  ";
+      for (size_t i = 0; i < n && i < 3; ++i) names += (i > 0 ? ", " : "") + items[i]->name;
+      if (n > 3) names += " y " + std::to_string(n - 3) + " más";
+      ImGui::PushTextWrapPos(0);
+      ImGui::TextWrapped("%s", names.c_str());
+      ImGui::PopTextWrapPos();
+      Gap(6);
+    }
+    if (favorites > 0) {
+      std::string note = bulkKeepFavorites_ ? (favorites == 1 ? std::string("El favorito se queda.")
+                                                              : "Los " + std::to_string(favorites) + " favoritos se quedan.")
+                                            : "Incluye " + Count(favorites, "favorito", "favoritos") + ".";
+      Warning(note.c_str());
+      Gap(4);
+      CheckRow("keep-favorites", "Dejar fuera los favoritos", &bulkKeepFavorites_);
+      Gap(6);
+    }
+    if (bulkNoBin_ == 0)
+      Help("Podrás recuperarlos desde la papelera de reciclaje de Windows.");
+    else if (allNoBin)
+      Help("Esta unidad no tiene papelera (memoria USB o carpeta de red): Windows te pedirá confirmarlo y no se "
+           "podrán recuperar.");
+    else
+      Help((Count(bulkNoBin_, "está", "están") + " en una unidad sin papelera (memoria USB o carpeta de red): "
+                                                  "Windows te pedirá confirmarlo y esos no se podrán recuperar.")
+               .c_str());
+    Gap(14);
+    const std::string okLabel = n == 0 ? std::string("Borrar")
+                                : allNoBin ? "Borrar " + std::to_string(n) + " para siempre"
+                                           : "Mover " + std::to_string(n) + " a la papelera";
+    const float cw = Px(130);
+    const float ow = std::max(Px(170), TextSize(ImGui::GetFont(), Px(kSmall), okLabel.c_str()).x + Px(32));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - cw - ow - Px(8));
+    bool cancel = GhostButton("cancel", "Cancelar", cw) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    ImGui::SameLine(0, Px(8));
+    ImGui::BeginDisabled(n == 0);
+    // Intro no cuenta en el frame en que se abre (el Intro que eligió la
+    // opción del menú con el teclado lo confirmaría sin verlo).
+    bool ok = GhostButton("ok", okLabel.c_str(), ow, Tone::Danger) ||
+              (n > 0 && !ImGui::IsWindowAppearing() && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
+    ImGui::EndDisabled();
+    if (cancel) {
+      bulkDelete_.clear();
+      ImGui::CloseCurrentPopup();
+    } else if (ok) {
+      std::vector<std::string> paths;
+      for (const auto* item : items) paths.push_back(item->path);
+      if (a.recycleMany) a.recycleMany(paths);
+      bulkDelete_.clear();
+      EndSelection();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
   ImGui::PopStyleColor(2);
   ImGui::PopStyleVar();
+}
+
+void AppUi::SelectionBar(AppModel& m, const AppActions& a, const std::vector<const MediaItem*>& list) {
+  const Palette& p = Colors();
+  const auto chosen = SelectedItems(m);
+  const size_t n = chosen.size();
+  size_t shown = 0;
+  for (const auto* item : list)
+    if (Selected(item->path)) ++shown;
+  const bool allShown = !list.empty() && shown == list.size();
+  uint64_t bytes = 0;
+  size_t videos = 0, favorites = 0, exportable = 0;
+  for (const auto* item : chosen) {
+    bytes += item->size;
+    videos += item->Video() ? 1 : 0;
+    favorites += item->favorite ? 1 : 0;
+    exportable += ExportableForDiscord(*item) ? 1 : 0;
+  }
+  std::string text;
+  if (n == 0) {
+    text = "Elige con la casilla o con un clic. Mayús+clic elige un tramo entero.";
+  } else {
+    text = Count(n, "seleccionado", "seleccionados") + "  ·  " + FormatBytes(bytes);
+    // Los que quedan fuera de los filtros también cuentan: que se sepa.
+    if (n > shown) text += "  ·  " + Count(n - shown, "no se ve", "no se ven") + " con estos filtros";
+  }
+
+  struct Action {
+    const char* id;
+    std::string label;
+    Tone tone;
+    bool enabled;
+    std::string tip;
+  };
+  const Action actions[] = {
+      {"sel-all", allShown ? std::string("Ninguno") : "Todos (" + std::to_string(list.size()) + ")", Tone::Normal,
+       !list.empty(),
+       allShown ? "Quita de la selección lo que se ve" : "Selecciona todo lo que se ve con estos filtros (Ctrl+A)"},
+      {"sel-fav", n > 0 && favorites == n ? "Quitar favorito" : "Favorito", Tone::Normal, n > 0,
+       "Los favoritos nunca los borra el límite de espacio"},
+      {"sel-discord", "Para Discord", Tone::Normal, exportable > 0,
+       exportable > 0
+           ? "Una copia de menos de 20 MB de " + Count(exportable, "vídeo", "vídeos") +
+                 ", uno detrás de otro. Al acabar se copian para pegarlos en Discord."
+           : std::string("Elige algún vídeo: las capturas, los audios y las copias para Discord no se exportan")},
+      {"sel-join", "Unir", Tone::Normal, n >= 2 && videos == n,
+       n >= 2 && videos == n ? "Del más antiguo al más reciente, sin recodificar: solo vídeos grabados con la misma "
+                               "calidad, resolución y audio. El resultado es un vídeo nuevo; los originales no cambian."
+                             : "Elige dos vídeos o más (sin capturas) para unirlos"},
+      {"sel-delete", "Borrar", Tone::Danger, n > 0, "A la papelera de reciclaje (Supr)"},
+  };
+  constexpr int kActions = int(sizeof(actions) / sizeof(actions[0]));
+
+  // Una fila si cabe con el texto; si no (ventana estrecha), el texto arriba y los botones debajo.
+  const float fs = Px(kSmall), gap = Px(8), pad = Px(16), closeW = Px(30);
+  float widths[kActions];
+  float total = closeW;
+  for (int i = 0; i < kActions; ++i) {
+    widths[i] = std::max(Px(64), TextSize(ImGui::GetFont(), fs, actions[i].label.c_str()).x + Px(26));
+    total += widths[i] + gap;
+  }
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 q = ImGui::GetCursorScreenPos();
+  const float barW = ImGui::GetContentRegionAvail().x - Px(12);
+  const bool oneRow = barW - pad - Px(10) - total >= Px(170);
+  const float topH = oneRow ? Px(48) : Px(40);
+  const float barH = oneRow ? topH : topH + Px(30) + Px(12);
+  // El marco de las tarjetas del diseño, con el acento a la izquierda.
+  TileFrame(dl, q, ImVec2(q.x + barW, q.y + barH), 0.4f);
+  dl->AddRectFilled(q, ImVec2(q.x + Px(3), q.y + barH), C(p.accent));
+  const float textW = oneRow ? barW - pad - Px(10) - total - Px(12) : barW - pad - Px(10) - closeW - Px(12);
+  Text(dl, ImGui::GetFont(), fs, ImVec2(q.x + pad, q.y + (topH - fs) * 0.5f), C(n > 0 ? p.text : p.textMuted),
+       Ellipsize(ImGui::GetFont(), fs, text, textW).c_str());
+
+  if (oneRow) ImGui::SetCursorScreenPos(ImVec2(q.x + barW - Px(10) - total, q.y + (barH - Px(30)) * 0.5f));
+  else ImGui::SetCursorScreenPos(ImVec2(q.x + pad, q.y + topH));
+  int pressed = -1;
+  for (int i = 0; i < kActions; ++i) {
+    if (i > 0) ImGui::SameLine(0, gap);
+    ImGui::BeginDisabled(!actions[i].enabled);
+    if (GhostButton(actions[i].id, actions[i].label.c_str(), widths[i], actions[i].tone, 30)) pressed = i;
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", actions[i].tip.c_str());
+  }
+  if (oneRow) ImGui::SameLine(0, gap);
+  else ImGui::SetCursorScreenPos(ImVec2(q.x + barW - Px(10) - closeW, q.y + (topH - closeW) * 0.5f));
+  const bool close = IconButton("sel-close", Icon::Close, closeW, "Dejar de seleccionar (Esc)");
+  ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + barH));
+  Gap(12);
+
+  switch (pressed) {
+  case 0:
+    if (allShown) {
+      for (const auto* item : list) selected_.erase(item->path);
+      selectMode_ = true; // la barra se queda para elegir otros
+    } else {
+      for (const auto* item : list) selected_.insert(item->path);
+    }
+    break;
+  case 1: FavoriteSelection(m, a); break;
+  case 2: ExportSelection(m, a); break;
+  case 3: JoinSelection(m, a); break;
+  case 4: AskDeleteSelection(m); break;
+  default: break;
+  }
+  if (close) EndSelection();
 }
 
 void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
@@ -1323,7 +1660,26 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   else
     snprintf(subtitle, sizeof(subtitle), "%zu de %zu  ·  %s  ·  %s", list.size(), m.items.size(),
              FormatBytes(bytes).c_str(), m.outputDir.c_str());
+  const ImVec2 titlePos = ImGui::GetCursorScreenPos();
+  const float titleW = ImGui::GetContentRegionAvail().x - Px(12);
   PageTitle("Biblioteca", subtitle, 2);
+  if (!m.items.empty()) {
+    // «Seleccionar», a la derecha del título: el clic elige en vez de abrir.
+    const ImVec2 back = ImGui::GetCursorScreenPos();
+    const bool selecting = Selecting();
+    const char* label = selecting ? "Cancelar" : "Seleccionar";
+    const float bw = std::max(Px(110), TextSize(ImGui::GetFont(), Px(kSmall), label).x + Px(28));
+    ImGui::SetCursorScreenPos(ImVec2(titlePos.x + titleW - bw, titlePos.y + PageTitleActionY(28)));
+    if (GhostButton("select", label, bw, Tone::Normal, 28)) {
+      if (selecting) EndSelection();
+      else selectMode_ = true;
+    }
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip(selecting ? "Deja de seleccionar (Esc)"
+                                  : "Elige varios para borrarlos, marcarlos como favoritos, exportarlos o unirlos. "
+                                    "También con Ctrl+clic, Mayús+clic o Ctrl+A");
+    ImGui::SetCursorScreenPos(back);
+  }
 
   // Barra de filtros
   {
@@ -1384,50 +1740,43 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   }
   Gap(16);
 
-  // Vídeos elegidos para unir: los que ya no están (borrados, renombrados) salen.
-  selected_.erase(std::remove_if(selected_.begin(), selected_.end(),
-                                 [&](const std::string& path) {
-                                   const MediaItem* item = Find(m, path);
-                                   return !item || !item->Video();
-                                 }),
-                  selected_.end());
+  // Los elegidos que ya no están (borrados, renombrados) salen de la selección:
+  // una pasada por la biblioteca, sin buscar cada uno en toda la lista.
   if (!selected_.empty()) {
-    const Palette& pal = Colors();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 q = ImGui::GetCursorScreenPos();
-    const float barW = ImGui::GetContentRegionAvail().x - Px(12), barH = Px(48);
-    dl->AddRectFilled(q, ImVec2(q.x + barW, q.y + barH), C(pal.surface));
-    dl->AddRectFilled(q, ImVec2(q.x + Px(3), q.y + barH), C(pal.accent));
-    const size_t n = selected_.size();
-    std::string text = n == 1 ? std::string("1 vídeo elegido. Elige otro con la casilla o Ctrl+clic.")
-                              : std::to_string(n) + " vídeos elegidos. Se unen del más antiguo al más reciente.";
-    const float bw = Px(150);
-    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x + Px(16), q.y + (barH - Px(kSmall)) * 0.5f), C(pal.text),
-         Ellipsize(ImGui::GetFont(), Px(kSmall), text, barW - bw * 2 - Px(48)).c_str());
-    ImGui::SetCursorScreenPos(ImVec2(q.x + barW - bw * 2 - Px(8) - Px(10), q.y + (barH - Px(30)) * 0.5f));
-    if (GhostButton("unselect", "Quitar selección", bw, Tone::Normal, 30)) selected_.clear();
-    ImGui::SameLine(0, Px(8));
-    ImGui::BeginDisabled(n < 2);
-    std::string join = n < 2 ? std::string("Unir") : "Unir " + std::to_string(n) + " vídeos";
-    if (SolidButton("join", join.c_str(), bw, 30)) {
-      std::vector<const MediaItem*> chosen;
-      for (const auto& path : selected_)
-        if (const MediaItem* item = Find(m, path)) chosen.push_back(item);
-      std::stable_sort(chosen.begin(), chosen.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
-      std::vector<std::string> paths;
-      for (const auto* item : chosen) paths.push_back(item->path);
-      a.joinClips(paths);
-      selected_.clear();
+    const auto chosen = SelectedItems(m);
+    if (chosen.size() < selected_.size()) {
+      std::unordered_set<std::string> still;
+      for (const auto* item : chosen) still.insert(item->path);
+      selected_ = std::move(still);
     }
-    ImGui::EndDisabled();
-    if (n >= 2 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-      ImGui::SetTooltip("Sin recodificar: solo vídeos grabados con la misma calidad, resolución y audio. El "
-                        "resultado es un vídeo nuevo; los originales no cambian.");
-    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + barH));
+  }
+  ImGuiIO& io = ImGui::GetIO();
+  if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !TypingText()) {
+    // Ctrl+A elige todo lo que se ve; Supr lo elegido va a la papelera; Esc deja de elegir.
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false))
+      for (const auto* item : list) selected_.insert(item->path);
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !selected_.empty()) AskDeleteSelection(m);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && Selecting()) EndSelection();
+  }
+  if (Selecting()) SelectionBar(m, a, list);
+  if (m.exportBatchTotal > 0) {
+    // «Para Discord» de varios: por cuál va, con una barra de toda la tanda.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    const float lineW = ImGui::GetContentRegionAvail().x - Px(12);
+    const int current = std::min(m.exportBatchDone + 1, m.exportBatchTotal);
+    std::string text = "Exportando para Discord " + std::to_string(current) + " de " + std::to_string(m.exportBatchTotal);
+    if (m.exportPercent >= 0) text += "  ·  " + std::to_string(m.exportPercent) + " %";
+    Text(dl, ImGui::GetFont(), Px(kSmall), q, C(p.textMuted), text.c_str());
+    const char* cancel = "Cancelar";
+    ImGui::SetCursorScreenPos(ImVec2(q.x + lineW - TextSize(ImGui::GetFont(), Px(kHint), cancel).x, q.y));
+    if (LinkButton("cancel-batch", cancel) && a.cancelExport) a.cancelExport();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cancela este y los que esperan; los ya hechos se quedan");
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + Px(kSmall) + Px(8)));
+    const float fraction =
+        (float(m.exportBatchDone) + float(std::max(0, m.exportPercent)) / 100.0f) / float(m.exportBatchTotal);
+    Bar(ImVec2(lineW, Px(2)), fraction, p.accent);
     Gap(12);
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
-        !TypingText())
-      selected_.clear();
   }
 
   if (m.items.empty()) {
@@ -1461,6 +1810,9 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   float cardW = std::floor((avail - gap * float(cols - 1)) / float(cols));
   float rowH = MediaCardHeight(cardW) + gap;
   int rows = int((list.size() + size_t(cols) - 1) / size_t(cols));
+  const bool selecting = Selecting();
+  int clicked = -1;
+  bool openItemMenu = false, openSelectionMenu = false;
   ImGuiListClipper clipper;
   clipper.Begin(rows, rowH);
   while (clipper.Step()) {
@@ -1472,22 +1824,37 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
         ImGui::PushID(int(i));
         bool menu = false;
         const MediaItem& item = *list[i];
-        const int selection = item.Video() ? (Selected(item.path) ? 1 : 0) : -1;
+        const int selection = Selected(item.path) ? 1 : 0;
         if (Card(w, item, cardW, &menu, selection, int(i) + 1)) {
-          // Con algo elegido (o con Ctrl), el clic elige en vez de abrir.
-          if (selection >= 0 && (!selected_.empty() || ImGui::GetIO().KeyCtrl)) ToggleSelected(item.path);
+          // Eligiendo (o con Ctrl o Mayús), el clic elige en vez de abrir.
+          if (selecting || io.KeyCtrl || io.KeyShift) clicked = int(i);
           else View(m, item.path, AppPage::Library);
         }
         if (menu) {
-          menuPath_ = list[i]->path;
-          ImGui::OpenPopup("item-menu");
+          // Sobre uno de varios elegidos, el menú es el de toda la selección.
+          if (selection > 0 && selected_.size() > 1) {
+            openSelectionMenu = true;
+          } else {
+            menuPath_ = item.path;
+            openItemMenu = true;
+          }
         }
         ImGui::PopID();
       }
       ImGui::Dummy(ImVec2(0, gap - ImGui::GetStyle().ItemSpacing.y));
     }
   }
+  // Fuera del PushID de la tarjeta: ItemMenu y SelectionMenu buscan el menú con el id de aquí.
+  if (openItemMenu) ImGui::OpenPopup("item-menu");
+  if (openSelectionMenu) ImGui::OpenPopup("selection-menu");
+  if (!selectToggle_.empty()) {
+    for (size_t i = 0; i < list.size(); ++i)
+      if (list[i]->path == selectToggle_) clicked = int(i);
+    selectToggle_.clear();
+  }
+  if (clicked >= 0) ClickSelect(list, size_t(clicked), io.KeyShift);
   ItemMenu(m, a);
+  SelectionMenu(m, a);
   ImGui::EndChild();
   ImGui::PopStyleVar();
   (void)p;

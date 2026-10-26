@@ -208,6 +208,9 @@ Entrance EnterMotion(unsigned long long since, bool fromRight);
 // página de la que cuelga (Ajustes), para "~/ajustes/replay" o "03 // AJUSTES".
 // index: el número de la página en Táctico (0 = sin número).
 void PageTitle(const char* title, const std::string& subtitle, int index = 0, const char* section = nullptr);
+// Dónde poner un botón de `height` px a la derecha del título: distancia
+// desde arriba del título, centrado en su línea (Papel lleva filetes encima).
+float PageTitleActionY(float height);
 // Una frase destacada (estado de Inicio) con la letra de títulos del diseño.
 // Devuelve el alto.
 float Headline(ImDrawList* dl, ImVec2 pos, const std::string& text, ImU32 color, float maxWidth);

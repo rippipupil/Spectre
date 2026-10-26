@@ -99,6 +99,11 @@ std::string MinutesText(int minutes) {
 
 std::string FileNameOf(const std::string& path) { return Narrow(std::filesystem::path(Widen(path)).filename().wstring()); }
 
+// «1 archivo», «12 archivos»
+std::string CountText(size_t n, const char* one, const char* many) {
+  return std::to_string(n) + " " + (n == 1 ? one : many);
+}
+
 float MonitorScale(HMONITOR monitor) {
   UINT dpiX = 96, dpiY = 96;
   if (FAILED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) dpiX = GetDpiForSystem();
@@ -118,9 +123,14 @@ bool SameCaptureSettings(const Config& a, const Config& b) {
          a.gpuPriority == b.gpuPriority && a.captureSystemAudio == b.captureSystemAudio &&
          a.outputDeviceId == b.outputDeviceId && a.gameAudioOnly == b.gameAudioOnly && a.captureMic == b.captureMic &&
          a.micDeviceId == b.micDeviceId && a.systemVolume == b.systemVolume && a.micVolume == b.micVolume &&
-         a.separateTracks == b.separateTracks && a.cameraEnabled == b.cameraEnabled && a.cameraId == b.cameraId &&
-         a.cameraCorner == b.cameraCorner && a.cameraSizePercent == b.cameraSizePercent &&
-         a.maxBufferMB == b.maxBufferMB;
+         a.separateTracks == b.separateTracks && a.maxBufferMB == b.maxBufferMB;
+}
+
+// La webcam no está aquí arriba: se cambia con la captura en marcha
+// (Pipeline::SetCamera), sin vaciar el replay ni esperar a que abra.
+bool SameCameraSettings(const Config& a, const Config& b) {
+  return a.cameraEnabled == b.cameraEnabled && a.cameraId == b.cameraId && a.cameraCorner == b.cameraCorner &&
+         a.cameraSizePercent == b.cameraSizePercent;
 }
 } // namespace
 
@@ -239,7 +249,10 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   appActions_.saveFrame = [this](const MediaItem& item, std::vector<uint8_t> bgr, int width, int height) {
     SaveFrame(item, std::move(bgr), width, height); // solo lanza el hilo: puede ir dentro del frame
   };
-  appActions_.cancelExport = [this] { exporter_.Cancel(); };
+  appActions_.cancelExport = [this] {
+    exporter_.Cancel();
+    exportQueue_.clear(); // con varios en cola se cancela la tanda entera
+  };
   appActions_.saveEdit = [this](const std::string& path, const EditSettings& settings) {
     Defer([this, path, settings] { SaveEdit(path, settings); });
   };
@@ -273,6 +286,29 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
       else if (!cancelled)
         Toast(error, true);
       RescanLibrary();
+    });
+  };
+  appActions_.recycleMany = [this](const std::vector<std::string>& paths) {
+    Defer([this, paths] { RecycleMany(paths); });
+  };
+  appActions_.setFavorites = [this](const std::vector<std::string>& paths, bool favorite) {
+    library_->SetFavorite(paths, favorite);
+    for (auto& item : appModel_.items)
+      if (std::find(paths.begin(), paths.end(), item.path) != paths.end()) item.favorite = favorite;
+    appWindow_.Invalidate();
+  };
+  appActions_.exportManyForDiscord = [this](const std::vector<std::string>& paths) {
+    Defer([this, paths] { ExportManyForDiscord(paths); });
+  };
+  appActions_.copyManyToClipboard = [this](const std::vector<std::string>& paths) {
+    Defer([this, paths] {
+      if (CopyFilesToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, paths))
+        Toast(CountText(paths.size(), "archivo copiado", "archivos copiados") +
+                  (paths.size() > 10 ? ": pégalos con Ctrl+V en una carpeta (Discord acepta 10 por mensaje)"
+                                     : ": pégalos con Ctrl+V en Discord, WhatsApp o una carpeta"),
+              false, NoticeKind::Copied);
+      else
+        Toast("No se pudieron copiar los archivos al portapapeles", true);
     });
   };
   appActions_.toast = [this](const std::string& text, bool error) { Toast(text, error); };
@@ -533,13 +569,19 @@ void App::ToggleMicrophone() {
 }
 
 void App::ToggleCamera() {
+  // Antes reiniciaba toda la captura aquí, en el hilo del panel, y abría la
+  // cámara con él: el panel se quedaba congelado lo que tardara (o para
+  // siempre si el driver no volvía). Ahora la cámara se abre y se cierra en su
+  // hilo y el replay sigue; si no abre, llega otro aviso con el motivo.
   Config next = config_;
   next.cameraEnabled = !next.cameraEnabled;
-  bool restarts = pipeline_.Running() && !pipeline_.Recording();
+  ULONGLONG t0 = GetTickCount64();
   ApplyConfig(next, true);
-  if (!restartPending_)
-    Toast(std::string(config_.cameraEnabled ? "Cámara activada" : "Cámara desactivada") +
-          (restarts ? ". El replay empieza de cero." : ""));
+  Log("Cámara %s desde el panel o la ventana (%llu ms)", config_.cameraEnabled ? "activada" : "desactivada",
+      GetTickCount64() - t0);
+  if (!config_.cameraEnabled) Toast("Cámara desactivada");
+  else if (pipeline_.Running()) Toast("Cámara activada");
+  else Toast("Cámara activada: se verá en cuanto empiece la captura");
 }
 
 void App::SetClipSeconds(int seconds) {
@@ -775,7 +817,7 @@ void App::FinishEdit() {
   appModel_.editSavedFrom = r.input;
   if (r.settings.format == EditFormat::Video && r.settings.size == EditSize::Discord) {
     // Después, la copia de menos de 20 MB (la edición sola se borra si sale aparte).
-    if (exporter_.Busy()) {
+    if (ExportBusy()) {
       Toast("Edición guardada: " + FileNameOf(r.output) +
                 ". Ya se está exportando otro vídeo: expórtala para Discord desde su menú cuando acabe",
             true);
@@ -811,10 +853,15 @@ void App::SaveFrame(const MediaItem& item, std::vector<uint8_t> bgr, int width, 
 }
 
 void App::ExportForDiscord(const std::string& path) {
-  if (exporter_.Busy()) {
+  if (ExportBusy()) {
     Toast("Ya se está exportando otro vídeo: espera a que termine", true);
     return;
   }
+  StartExport(path);
+  Toast("Exportando para Discord...");
+}
+
+void App::StartExport(const std::string& path) {
   ExportOptions options;
   // Con un juego abierto o grabando se exporta sin prisa, para no quitarle
   // CPU ni el encoder de la GPU al replay.
@@ -824,18 +871,164 @@ void App::ExportForDiscord(const std::string& path) {
   exporter_.Start(
       path, options, [hwnd](int percent) { PostMessageW(hwnd, WM_SPECTRE_EXPORT, WPARAM(percent), 0); },
       [hwnd] { PostMessageW(hwnd, WM_SPECTRE_EXPORT, kExportDone, 0); });
+  exportRunning_ = true;
   appModel_.exportPath = path;
   appModel_.exportPercent = 0;
   appWindow_.Invalidate();
-  Toast("Exportando para Discord...");
+}
+
+void App::ExportManyForDiscord(const std::vector<std::string>& paths) {
+  const std::string current = exportRunning_ ? exporter_.Input() : std::string();
+  size_t added = 0;
+  const bool batch = exportBatchTotal_ > 0;
+  for (const auto& path : paths) {
+    if (path == current || std::find(exportQueue_.begin(), exportQueue_.end(), path) != exportQueue_.end())
+      continue;
+    exportQueue_.push_back(path);
+    ++added;
+  }
+  if (added == 0) {
+    Toast("Exportando para Discord: ya estaban en la cola");
+    return;
+  }
+  if (!batch) {
+    exportBatchOutputs_.clear();
+    exportBatchFailed_ = 0;
+    exportBatchError_.clear();
+    exportBatchCancelled_ = false;
+  }
+  exportBatchTotal_ += int(added);
+  const std::string videos = CountText(added, "vídeo", "vídeos");
+  if (batch) Toast("Exportando para Discord: " + videos + " más en la cola");
+  else if (exportRunning_) Toast("Exportando para Discord: " + videos + " al acabar el que está en marcha");
+  else Toast("Exportando para Discord: " + videos + ", uno detrás de otro");
+  StartQueuedExport();
+}
+
+void App::StartQueuedExport() {
+  if (exportRunning_) return;
+  while (!exportQueue_.empty()) {
+    std::string path = exportQueue_.front();
+    exportQueue_.pop_front();
+    // Borrado o renombrado mientras esperaba su turno: ya no cuenta.
+    if (GetFileAttributesW(Widen(path).c_str()) == INVALID_FILE_ATTRIBUTES) {
+      --exportBatchTotal_;
+      continue;
+    }
+    exportBatchInput_ = path;
+    StartExport(path);
+    return;
+  }
+  if (exportBatchTotal_ > 0) EndExportBatch();
+}
+
+void App::FinishBatchExport(const ExportResult& r) {
+  if (r.cancelled) {
+    exportBatchCancelled_ = true;
+    exportQueue_.clear();
+  } else if (!r.ok) {
+    ++exportBatchFailed_;
+    exportBatchError_ = r.error;
+    Log("Exportar para Discord: %s: %s", r.input.c_str(), r.error.c_str());
+  } else {
+    exportBatchOutputs_.push_back(r.output);
+    Log("Exportado para Discord: %s, %s (%s)", r.output.c_str(), FormatBytes(r.bytes).c_str(),
+        r.alreadyFits ? "ya cabía, sin recodificar" : r.encoder.c_str());
+    // La copia aparece en la biblioteca según se hace.
+    if (!r.alreadyFits && appWindow_.Visible()) RescanLibrary();
+  }
+  appWindow_.Invalidate();
+}
+
+void App::EndExportBatch() {
+  const int failed = exportBatchFailed_;
+  const bool cancelled = exportBatchCancelled_;
+  const std::string error = exportBatchError_;
+  std::vector<std::string> outputs = std::move(exportBatchOutputs_);
+  exportBatchOutputs_.clear();
+  exportBatchTotal_ = exportBatchFailed_ = 0;
+  exportBatchError_.clear();
+  exportBatchCancelled_ = false;
+  exportBatchInput_.clear();
+  appWindow_.Invalidate();
+  const size_t done = outputs.size();
+  // Todas las copias al portapapeles: se pegan juntas en Discord.
+  const bool copied = done > 0 && CopyFilesToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, outputs);
+  if (done > 0) {
+    if (menu_.Visible()) RefreshPanelClips();
+    if (appWindow_.Visible()) RescanLibrary();
+    EnforceStorageLimit(); // algo nuevo en la carpeta
+  }
+  const std::string copiedText = !copied ? "" : done == 1 ? " y copiado" : " y copiados";
+  if (cancelled) {
+    Toast(done == 0 ? std::string("Exportación cancelada")
+                    : "Exportación cancelada: " + CountText(done, "vídeo listo", "vídeos listos") + copiedText +
+                          (copied ? " para pegar con Ctrl+V" : ""));
+  } else if (failed == 0 && done > 0) {
+    // Discord acepta 10 archivos por mensaje.
+    Toast("Listos para Discord: " + CountText(done, "vídeo", "vídeos") +
+              (!copied     ? " junto a los originales"
+               : done > 10 ? ", copiados (Discord acepta 10 por mensaje: pégalos en tandas)"
+                           : ", copiados para pegar con Ctrl+V"),
+          false, NoticeKind::Export);
+  } else if (done > 0) {
+    Toast("Listos para Discord " + std::to_string(done) + " de " + std::to_string(done + size_t(failed)) +
+              (copied ? ", copiados. " : ". ") + (failed == 1 ? "El otro: " : "Los otros: ") + error,
+          true);
+  } else if (failed > 0) {
+    Toast(error, true);
+  }
+}
+
+void App::RecycleMany(std::vector<std::string> paths) {
+  // Lo que se está exportando o guardando como edición sigue abierto: se queda.
+  const std::string exporting = exportRunning_ ? exporter_.Input() : std::string();
+  const std::string editing = editWorker_.Busy() ? editWorker_.Input() : std::string();
+  const size_t asked = paths.size();
+  paths.erase(std::remove_if(paths.begin(), paths.end(),
+                             [&](const std::string& path) { return path == exporting || path == editing; }),
+              paths.end());
+  const size_t inUse = asked - paths.size();
+  bool bin = true;
+  for (const auto& path : paths) bin = bin && HasRecycleBin(path);
+  std::string error;
+  bool cancelled = false;
+  std::vector<std::string> gone;
+  if (!paths.empty())
+    gone = library_->Recycle(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, paths, &error, &cancelled);
+  const std::string kept = inUse == 0   ? std::string()
+                           : inUse == 1 ? std::string(". El que se está exportando o editando se queda")
+                                        : std::string(". Los que se están exportando o editando se quedan");
+  if (!gone.empty() && gone.size() == paths.size()) {
+    if (gone.size() == 1)
+      Toast((bin ? "Movido a la papelera: " : "Borrado: ") + FileNameOf(gone[0]) + kept, false, NoticeKind::Storage);
+    else
+      Toast((bin ? "Movidos a la papelera: " : "Borrados: ") + CountText(gone.size(), "archivo", "archivos") + kept,
+            false, NoticeKind::Storage);
+  } else if (!gone.empty()) {
+    Toast("Movidos a la papelera " + std::to_string(gone.size()) + " de " + std::to_string(asked) + ". " +
+              (cancelled ? "Los demás no se han borrado" : "Los demás están abiertos en otro programa"),
+          !cancelled, NoticeKind::Storage);
+  } else if (paths.empty()) {
+    Toast("No se ha borrado: se está exportando o editando", true);
+  } else if (!cancelled) {
+    Toast(error, true);
+  }
+  RescanLibrary();
 }
 
 void App::FinishExport() {
   ExportResult r;
   if (!exporter_.TakeResult(&r)) return;
+  exportRunning_ = false;
   appModel_.exportPath.clear();
   appModel_.exportPercent = -1;
   appWindow_.Invalidate();
+  if (!exportBatchInput_.empty() && r.input == exportBatchInput_) {
+    exportBatchInput_.clear();
+    FinishBatchExport(r);
+    return;
+  }
   const bool afterEdit = !discordAfterEdit_.empty() && r.input == discordAfterEdit_;
   if (afterEdit) discordAfterEdit_.clear();
   if (r.cancelled) {
@@ -1020,6 +1213,8 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   } else if (pipeline_.Running()) {
     pipeline_.SetReplaySeconds(config_.replayEnabled ? config_.clipSeconds : 3.0);
   }
+  // También grabando: la cámara solo se compone encima, no corta nada.
+  if (!SameCameraSettings(old, config_) && pipeline_.Running()) pipeline_.SetCamera(BuildSettings());
   UpdatePipeline();
 
   const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
@@ -1036,7 +1231,7 @@ void App::ApplyConfig(const Config& next, bool quiet) {
 void App::InstallPendingUpdate() {
   // Ni a mitad de una grabación ni de una edición o una exportación, que se
   // cancelarían al cerrar: el temporizador de cada segundo vuelve a probar.
-  if (installerPath_.empty() || pipeline_.Recording() || editWorker_.Busy() || exporter_.Busy()) return;
+  if (installerPath_.empty() || pipeline_.Recording() || editWorker_.Busy() || ExportBusy()) return;
   relaunchAfterUpdate_ = true;
   Quit();
 }
@@ -1830,6 +2025,8 @@ void App::RefreshAppModel() {
   appModel_.gameName = game_ ? game_->exeName : "";
   appModel_.exportPath = exporter_.Busy() ? exporter_.Input() : std::string();
   appModel_.exportPercent = exporter_.Busy() ? exporter_.Percent() : -1;
+  appModel_.exportBatchTotal = exportBatchTotal_;
+  appModel_.exportBatchDone = int(exportBatchOutputs_.size()) + exportBatchFailed_;
   appModel_.editRenderPath = editWorker_.Busy() ? editWorker_.Input() : std::string();
   appModel_.editPercent = editWorker_.Busy() ? editWorker_.Percent() : -1;
   SettingsModel& s = appModel_.settings;
@@ -2031,6 +2228,10 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       UpdatePipeline(std::exchange(restartPending_, false));
     if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerHealth) CheckUpdatesQuietly();
+    if (wp == kTimerHealth) {
+      std::string stall = pipeline_.TakeCameraStall();
+      if (!stall.empty()) Toast(stall, true);
+    }
     if (wp == kTimerPreview) {
       KillTimer(hwnd_, kTimerPreview);
       previewing_ = true;
@@ -2117,6 +2318,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SPECTRE_EXPORT:
     if (wp == kExportDone) {
       FinishExport();
+      StartQueuedExport(); // el siguiente de «Para Discord» de varios
     } else if (exporter_.Busy()) {
       appModel_.exportPercent = int(wp);
       appWindow_.Invalidate();
@@ -2152,7 +2354,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // exportación: espera a que acaben.
     if (pipeline_.Recording()) Toast("La actualización se instalará al terminar la grabación");
     else if (editWorker_.Busy()) Toast("La actualización se instalará al terminar de guardar la edición");
-    else if (exporter_.Busy()) Toast("La actualización se instalará al terminar la exportación");
+    else if (ExportBusy()) Toast("La actualización se instalará al terminar la exportación");
     else InstallPendingUpdate();
     return 0;
   }
