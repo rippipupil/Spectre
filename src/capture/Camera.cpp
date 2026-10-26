@@ -308,7 +308,9 @@ void Camera::Run(std::shared_ptr<Session> s, std::wstring id, UINT wantWidth) {
   // Declarado después de Finish: el lector se suelta antes de apagar la fuente.
   ComPtr<IMFSourceReader> reader;
 
-  // 1. Qué cámara: la elegida si sigue conectada; si no, la primera.
+  // 1. Qué cámara: la elegida en Ajustes o, en «Automática», la primera. Si
+  // la elegida no está conectada no se abre otra: la del portátil o una
+  // virtual acabaría en los clips sin que nadie la haya elegido.
   ULONGLONG t0 = GetTickCount64();
   auto cams = EnumerateCameras();
   if (cams.empty()) {
@@ -327,7 +329,11 @@ void Camera::Run(std::shared_ptr<Session> s, std::wstring id, UINT wantWidth) {
         break;
       }
     }
-    if (!found) Log("Cámara: la elegida en Ajustes no está conectada; se usa «%s»", pick->name.c_str());
+    if (!found) {
+      Log("Cámara: la elegida en Ajustes no está conectada (hay %zu); no se abre otra", cams.size());
+      fail("La cámara elegida no está conectada. Conéctala o elige otra en Ajustes > Cámara");
+      return;
+    }
   }
   Log("Cámara: abriendo «%s» (%zu conectadas)", pick->name.c_str(), cams.size());
   if (!s->running) return;
