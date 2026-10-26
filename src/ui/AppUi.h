@@ -122,7 +122,11 @@ private:
     int requested = 0;    // ancho pedido al hilo de la biblioteca (px)
   };
 
+  // Navegación según el diseño (ui/Theme.h NavLayout).
   void Sidebar(AppWindow& w, AppModel& m, const AppActions& a);
+  void NavRail(AppModel& m);
+  void NavTopbar(AppModel& m);
+  void SettingsNav(AppModel& m);
   void PageHome(AppWindow& w, AppModel& m, const AppActions& a);
   void PageLibrary(AppWindow& w, AppModel& m, const AppActions& a);
   void PageViewer(AppWindow& w, AppModel& m, const AppActions& a);
@@ -132,7 +136,8 @@ private:
   void PageSettings(AppWindow& w, AppModel& m, const AppActions& a);
   void StatusCard(AppModel& m, const AppActions& a);
   // selection: -1 sin casilla (Inicio), 0 o 1 en la biblioteca (elegido o no).
-  bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection = -1);
+  // number: su posición, que Táctico escribe en el pie (#01).
+  bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection = -1, int number = 0);
   void StatsSection(const AppModel& m);
   void SaveCurrentFrame(const MediaItem& item, const AppActions& a);
   // Selección de la biblioteca: casillas, Ctrl+clic, Mayús+clic (un tramo) y «Seleccionar».

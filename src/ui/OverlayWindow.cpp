@@ -260,6 +260,13 @@ void OverlayWindow::DestroyGraphics() {
   device_.Reset();
 }
 
+void OverlayWindow::SetFonts(Face body, Face display) {
+  if (body == fontBody_ && display == fontDisplay_) return;
+  fontBody_ = body;
+  fontDisplay_ = display;
+  if (imgui_) rebuildFonts_ = true;
+}
+
 void OverlayWindow::SetupImGui() {
   IMGUI_CHECKVERSION();
   imgui_ = ImGui::CreateContext();
@@ -271,8 +278,9 @@ void OverlayWindow::SetupImGui() {
 
   // Solo los rangos por defecto (Latin-1): los iconos se dibujan con líneas,
   // así que no hace falta fusionar Segoe UI Symbol.
-  ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu);
+  ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu ? ui::FontUse::Panel : ui::FontUse::Toast, fontBody_, fontDisplay_);
   fontMemoryFreed_ = false;
+  rebuildFonts_ = false;
 
   ApplyBaseStyle(scale_);
   ImGui_ImplWin32_Init(hwnd_);
@@ -285,11 +293,20 @@ void OverlayWindow::Render(const std::function<void()>& draw) {
   // menú se aplazan hasta después del frame (ver App::RenderOverlays).
   EnsureAbove();
   ImGui::SetCurrentContext(imgui_);
+  if (rebuildFonts_) {
+    rebuildFonts_ = false;
+    ImGui_ImplDX11_InvalidateDeviceObjects();
+    ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu ? ui::FontUse::Panel : ui::FontUse::Toast, fontBody_, fontDisplay_);
+    fontMemoryFreed_ = false;
+    ImGui::GetStyle() = ImGuiStyle();
+    ApplyBaseStyle(scale_);
+  }
   ImGui_ImplDX11_NewFrame();
   ImGui_ImplWin32_NewFrame();
   ImGui::NewFrame();
   draw();
   ImGui::Render();
+  if (ui::TakeFontRequest(&fontBody_, &fontDisplay_)) rebuildFonts_ = true;
   const float clear[4] = {0, 0, 0, 0};
   context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
   context_->ClearRenderTargetView(rtv_.Get(), clear);

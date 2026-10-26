@@ -58,6 +58,10 @@ public:
   // draw se ejecuta dentro de un frame de ImGui.
   void Render(const std::function<void()>& draw);
 
+  // Letras del diseño del tema. Antes de Show: se cargan al crear la
+  // ventana. Visible: se cambian antes del siguiente frame.
+  void SetFonts(Face body, Face display);
+
   ImFont* BoldFont() const { return fonts_.Bold(); }
   ImFont* BigFont() const { return fonts_.Big(); }
   const ui::FontSet& FontSizes() const { return fonts_; }
@@ -100,6 +104,8 @@ private:
   ImGuiContext* imgui_ = nullptr;
   ui::FontSet fonts_;
   bool fontMemoryFreed_ = false; // la copia del atlas en RAM ya se liberó
+  Face fontBody_ = Face::Segoe, fontDisplay_ = Face::Segoe;
+  bool rebuildFonts_ = false;
 };
 
 } // namespace spectre

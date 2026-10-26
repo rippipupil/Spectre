@@ -1,6 +1,7 @@
 #include "ui/Menu.h"
 
 #include "common/Util.h"
+#include "ui/Backdrop.h"
 #include "ui/OverlayWindow.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
@@ -146,6 +147,45 @@ void PanelDecor(ImDrawList* dl, ImVec2 a, ImVec2 b, bool onRight) {
   }
 }
 
+// Marca de la cabecera con la letra y el estilo de títulos del diseño.
+void PanelBrand(ImDrawList* dl, ImVec2 q, float rowH) {
+  const Palette& p = Colors();
+  const float mid = q.y + rowH * 0.5f;
+  switch (CurrentStyle().title) {
+  case TitleLook::Masthead: {
+    // Papel: el nombre con serifa, como la cabecera de un periódico.
+    const float fs = Px(kTitle);
+    Text(dl, Display(fs), fs, ImVec2(q.x, mid - fs * 0.55f), C(p.text), "Spectre");
+    break;
+  }
+  case TitleLook::Chroma: {
+    // Neón: con las dos copias desplazadas de sus títulos.
+    const float fs = Px(kBody + 2), tr = Px(4);
+    ImFont* df = Display(fs);
+    const ImVec2 pos(q.x, mid - fs * 0.5f);
+    TrackedText(dl, df, fs, pos - ImVec2(Px(1.5f), 0), C(p.danger, 0.55f), "SPECTRE", tr);
+    TrackedText(dl, df, fs, pos + ImVec2(Px(1.5f), 0), C(p.accent, 0.8f), "SPECTRE", tr);
+    TrackedText(dl, df, fs, pos, C(p.text), "SPECTRE", tr);
+    break;
+  }
+  case TitleLook::Echo:
+  case TitleLook::Rule:
+  case TitleLook::Soft:
+  case TitleLook::Block: {
+    // La "S" del raíl delante del nombre.
+    const float mono = rowH * 0.86f;
+    Monogram(dl, ImVec2(q.x + mono * 0.5f, mid), mono);
+    Wordmark(dl, ImVec2(q.x + mono + Px(10), mid - Px(kSmall) * 0.5f), "SPECTRE", C(p.text));
+    break;
+  }
+  case TitleLook::Index:
+  case TitleLook::Prompt:
+  case TitleLook::Heavy:
+    Wordmark(dl, ImVec2(q.x, mid - Px(kSmall) * 0.5f), "SPECTRE", C(p.text));
+    break;
+  }
+}
+
 } // namespace
 
 void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
@@ -193,6 +233,8 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
   ImGui::Begin("##panel", nullptr, flags);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const auto& c = m.config;
+  // El fondo ilustrado del tema detrás de todo el panel.
+  DrawBackdrop(dl, ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize(), 0.7f);
   DrawHoverTrail(dl);
 
   // Cabecera: marca, cerrar y estado. La fila de la marca es el asa para
@@ -206,7 +248,7 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a) {
     if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
     if (!m.dragging && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
       ImGui::SetTooltip("Arrastra para mover el panel");
-    Wordmark(dl, ImVec2(q.x, q.y + (rowH - Px(kSmall)) * 0.5f), "SPECTRE", C(p.text));
+    PanelBrand(dl, q, rowH);
     ImGui::SetCursorScreenPos(ImVec2(q.x + avail - rowH, q.y));
     if (IconButton("close", Icon::Close, rowH, "Cerrar (Esc)")) a.close();
     ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(6)));

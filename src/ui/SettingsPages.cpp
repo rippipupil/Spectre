@@ -3,6 +3,7 @@
 #include "app/Sound.h"
 #include "common/Util.h"
 #include "encode/Quality.h"
+#include "ui/Backdrop.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
@@ -923,6 +924,10 @@ void StyleFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, const Style& st, ImU32 edge,
     dl->AddRect(a, b, edge, 0, 0, thickness);
     dl->AddRectFilled(a, ImVec2(a.x + Px(3), b.y), accent);
     break;
+  case ButtonShape::Double:
+    dl->AddRect(a, b, edge, 0, 0, thickness);
+    dl->AddRect(a + ImVec2(Px(3), Px(3)), b - ImVec2(Px(3), Px(3)), C(accent, 0.45f), 0, 0, Px(1));
+    break;
   default:
     dl->AddRect(a, b, edge, 0, 0, thickness);
     if (st.toast == ToastLook::TopLine) dl->AddRectFilled(a, ImVec2(b.x, a.y + Px(2)), accent);
@@ -930,38 +935,245 @@ void StyleFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, const Style& st, ImU32 edge,
   }
 }
 
-// Tarjeta del selector de temas: se pinta con los colores del tema que
-// representa y la forma de su diseño, con su nombre y tres muestras (fondo,
-// superficie y acento).
-bool ThemeCard(const Theme& t, bool selected, float width) {
-  const Palette& p = Colors();
-  ImGui::PushID(t.id);
-  bool pressed = ImGui::InvisibleButton("theme", ImVec2(width, Px(40)));
-  bool hov = ImGui::IsItemHovered();
-  ImGui::PopID();
-  if (hov) {
-    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    ImGui::SetTooltip("Diseño %s", FindStyle(t.style).name);
+// Rectángulo con las esquinas cortadas de un diseño (miniaturas).
+void ChamferFill(ImDrawList* dl, ImVec2 a, ImVec2 b, const Style& st, ImU32 color) {
+  const float cut = std::min(Px(st.cut) * 0.5f, std::min(b.x - a.x, b.y - a.y) * 0.4f);
+  ImVec2 pts[8];
+  int n = 0;
+  if (st.cutCorners & 1) { pts[n++] = ImVec2(a.x, a.y + cut); pts[n++] = ImVec2(a.x + cut, a.y); } else pts[n++] = a;
+  if (st.cutCorners & 2) { pts[n++] = ImVec2(b.x - cut, a.y); pts[n++] = ImVec2(b.x, a.y + cut); } else pts[n++] = ImVec2(b.x, a.y);
+  if (st.cutCorners & 4) { pts[n++] = ImVec2(b.x, b.y - cut); pts[n++] = ImVec2(b.x - cut, b.y); } else pts[n++] = b;
+  if (st.cutCorners & 8) { pts[n++] = ImVec2(a.x + cut, b.y); pts[n++] = ImVec2(a.x, b.y - cut); } else pts[n++] = ImVec2(a.x, b.y);
+  dl->AddConvexPolyFilled(pts, n, color);
+}
+
+// Botón principal de muestra con la forma del diseño.
+void PreviewButton(ImDrawList* dl, ImVec2 a, ImVec2 b, const Style& st, const Palette& c) {
+  switch (st.button) {
+  case ButtonShape::Flat: dl->AddRectFilled(a, b, C(c.accent)); break;
+  case ButtonShape::Chamfer: ChamferFill(dl, a, b, st, C(c.accent)); break;
+  case ButtonShape::Outline: dl->AddRect(a, b, C(c.accent), 0, 0, Px(st.line)); break;
+  case ButtonShape::Double:
+    dl->AddRect(a, b, C(c.accent), 0, 0, Px(1));
+    dl->AddRect(a - ImVec2(Px(2), Px(2)), b + ImVec2(Px(2), Px(2)), C(c.accent, 0.4f), 0, 0, Px(1));
+    break;
+  case ButtonShape::Bracket: DrawBrackets(dl, a, b, C(c.accent), Px(4), Px(1)); break;
+  case ButtonShape::Rail:
+    dl->AddRectFilled(a, b, C(c.surface));
+    dl->AddRectFilled(a, ImVec2(a.x + Px(2), b.y), C(c.accent));
+    break;
   }
+}
+
+// Tarjeta de la biblioteca de muestra con la forma del diseño.
+void PreviewCard(ImDrawList* dl, ImVec2 a, ImVec2 b, const Style& st, const Palette& c) {
+  const float t = Px(1);
+  const float textH = (b.y - a.y) * 0.28f;
+  ImVec2 ta = a, tb(b.x, b.y - textH);
+  switch (st.card) {
+  case CardLook::Tile:
+  case CardLook::Polaroid:
+    dl->AddRectFilled(a, b, C(c.surface));
+    if (st.card == CardLook::Polaroid) dl->AddRect(a, b, C(c.line), 0, 0, t);
+    ta += ImVec2(Px(2), Px(2));
+    tb.x -= Px(2);
+    break;
+  case CardLook::Framed:
+    dl->AddRect(a, b, C(c.lineStrong), 0, 0, t);
+    ta += ImVec2(Px(2), Px(2));
+    tb.x -= Px(2);
+    break;
+  case CardLook::Neon:
+    dl->AddRect(a, b, C(c.lineStrong), 0, 0, t);
+    dl->AddRect(a - ImVec2(Px(2), Px(2)), b + ImVec2(Px(2), Px(2)), C(c.accent, 0.35f), 0, 0, t);
+    ta += ImVec2(Px(2), Px(2));
+    tb.x -= Px(2);
+    break;
+  case CardLook::Ascii:
+    for (float x = a.x; x < b.x; x += Px(4)) {
+      dl->AddRectFilled(ImVec2(x, a.y), ImVec2(std::min(x + Px(2), b.x), a.y + t), C(c.lineStrong));
+      dl->AddRectFilled(ImVec2(x, b.y - t), ImVec2(std::min(x + Px(2), b.x), b.y), C(c.lineStrong));
+    }
+    ta += ImVec2(Px(2), Px(2));
+    tb.x -= Px(2);
+    break;
+  case CardLook::Heavy:
+    dl->AddRectFilled(ImVec2(a.x, tb.y), b, C(c.text));
+    break;
+  case CardLook::Plain:
+  case CardLook::Hud:
+    break;
+  }
+  if (st.card == CardLook::Tile) dl->AddRectFilled(ta, tb, C(c.bgAlt));
+  else if (st.button == ButtonShape::Chamfer) ChamferFill(dl, ta, tb, st, C(c.surfaceActive));
+  else dl->AddRectFilled(ta, tb, C(c.surfaceActive));
+  if (st.card == CardLook::Hud) DrawBrackets(dl, ta - ImVec2(Px(2), Px(2)), tb + ImVec2(Px(2), Px(2)), C(c.lineStrong), Px(4), t);
+  // Dos líneas de texto en el pie.
+  const ImU32 ink = st.card == CardLook::Heavy ? C(c.bg) : C(c.textMuted);
+  const float y = tb.y + Px(3), x = ta.x + (st.card == CardLook::Heavy ? Px(2) : 0.0f);
+  const float w = tb.x - x;
+  if (st.card == CardLook::Polaroid) {
+    dl->AddRectFilled(ImVec2(x + w * 0.2f, y), ImVec2(x + w * 0.8f, y + Px(2)), ink);
+  } else {
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w * 0.7f, y + Px(2)), ink);
+    dl->AddRectFilled(ImVec2(x, y + Px(4)), ImVec2(x + w * 0.45f, y + Px(5)), C(c.textFaint));
+  }
+}
+
+// Título de muestra: una barra con el estilo de títulos del diseño.
+void PreviewTitle(ImDrawList* dl, ImVec2 q, float avail, const Style& st, const Palette& c) {
+  const float h = Px(st.titleSize >= 30 ? 6.0f : 5.0f), w = avail * 0.42f;
+  const ImU32 ink = C(c.text);
+  switch (st.title) {
+  case TitleLook::Block:
+    dl->AddRectFilled(q, ImVec2(q.x + Px(2), q.y + h), C(c.accent));
+    dl->AddRectFilled(ImVec2(q.x + Px(5), q.y), ImVec2(q.x + Px(5) + w, q.y + h), ink);
+    break;
+  case TitleLook::Echo:
+    dl->AddRectFilled(q + ImVec2(Px(2), Px(2)), q + ImVec2(Px(2) + w, Px(2) + h * 0.6f), C(c.accent, 0.5f));
+    dl->AddRectFilled(q, ImVec2(q.x + w, q.y + h * 0.6f), ink);
+    break;
+  case TitleLook::Chroma:
+    dl->AddRectFilled(q - ImVec2(Px(1), 0), ImVec2(q.x - Px(1) + w, q.y + h), C(c.danger, 0.6f));
+    dl->AddRectFilled(q + ImVec2(Px(1), 0), ImVec2(q.x + Px(1) + w, q.y + h), C(c.accent, 0.8f));
+    dl->AddRectFilled(q, ImVec2(q.x + w, q.y + h), ink);
+    break;
+  case TitleLook::Index:
+    dl->AddRectFilled(q, ImVec2(q.x + Px(5), q.y + h), C(c.accent));
+    dl->AddRectFilled(ImVec2(q.x + Px(8), q.y), ImVec2(q.x + Px(8) + w, q.y + h), ink);
+    dl->AddRectFilled(ImVec2(q.x, q.y + h + Px(2)), ImVec2(q.x + avail, q.y + h + Px(3)), C(c.line));
+    break;
+  case TitleLook::Prompt:
+    dl->AddRectFilled(q, ImVec2(q.x + w * 0.6f, q.y + h * 0.7f), C(c.accent));
+    dl->AddRectFilled(ImVec2(q.x + w * 0.6f + Px(3), q.y), ImVec2(q.x + w * 0.6f + Px(6), q.y + h * 0.7f), C(c.accent));
+    break;
+  case TitleLook::Rule:
+    dl->AddRectFilled(q, ImVec2(q.x + w, q.y + h * 0.8f), ink);
+    dl->AddRectFilled(ImVec2(q.x, q.y + h + Px(2)), ImVec2(q.x + w, q.y + h + Px(3)), C(c.accent));
+    dl->AddRectFilled(ImVec2(q.x + w, q.y + h + Px(2)), ImVec2(q.x + avail, q.y + h + Px(2) + 1), C(c.line));
+    break;
+  case TitleLook::Soft:
+    dl->AddRectFilled(q, ImVec2(q.x + Px(5), q.y + h), C(c.accent));
+    dl->AddRectFilled(ImVec2(q.x + Px(6), q.y), ImVec2(q.x + w, q.y + h), ink);
+    break;
+  case TitleLook::Masthead: {
+    dl->AddRectFilled(q, ImVec2(q.x + avail, q.y + 1), ink);
+    const float x = q.x + (avail - w) * 0.5f;
+    dl->AddRectFilled(ImVec2(x, q.y + Px(3)), ImVec2(x + w, q.y + Px(3) + h), ink);
+    dl->AddRectFilled(ImVec2(q.x, q.y + h + Px(5)), ImVec2(q.x + avail, q.y + h + Px(5) + 1), C(c.lineStrong));
+    break;
+  }
+  case TitleLook::Heavy:
+    dl->AddRectFilled(q, ImVec2(q.x + w + Px(6), q.y + h + Px(4)), ink);
+    dl->AddRectFilled(ImVec2(q.x + Px(3), q.y + Px(2)), ImVec2(q.x + w + Px(3), q.y + h + Px(2)), C(c.bg));
+    break;
+  }
+}
+
+// Miniatura de la app con un tema: sus colores, su fondo ilustrado y, en
+// pequeño, la estructura de su diseño (barra lateral, raíl o pestañas; título,
+// botón principal y dos tarjetas).
+void ThemePreview(ImDrawList* dl, ImVec2 a, ImVec2 b, const Theme& t, const Style& st) {
+  const Palette& c = t.colors;
+  dl->PushClipRect(a, b, true);
+  dl->AddRectFilled(a, b, C(c.bg));
+  DrawMotif(dl, t.motif, c, t.light, a, b, Px(0.5f), 12.5, 1.3f);
+  const float w = b.x - a.x, h = b.y - a.y;
+  ImVec2 ca = a, cb = b; // zona de la página
+  switch (st.nav) {
+  case NavLayout::Sidebar: {
+    const float m = st.floatingNav ? Px(3) : 0.0f;
+    const ImVec2 na(a.x + m, a.y + m), nb(a.x + m + w * 0.25f, b.y - m);
+    dl->AddRectFilled(na, nb, C(c.bgAlt));
+    if (!st.floatingNav) dl->AddRectFilled(ImVec2(nb.x - 1, na.y), nb, C(c.line));
+    for (int i = 0; i < 5; ++i) {
+      const float y = na.y + Px(10) + float(i) * Px(7);
+      if (y + Px(4) > nb.y) break;
+      if (i == 0) dl->AddRectFilled(ImVec2(na.x, y - Px(2)), ImVec2(nb.x - 1, y + Px(4)), C(c.surface));
+      if (i == 0) dl->AddRectFilled(ImVec2(na.x, y - Px(2)), ImVec2(na.x + Px(2), y + Px(4)), C(c.accent));
+      dl->AddRectFilled(ImVec2(na.x + Px(5), y), ImVec2(na.x + Px(5) + (nb.x - na.x) * (i == 0 ? 0.5f : 0.4f), y + Px(2)),
+                        C(i == 0 ? c.text : c.textFaint));
+    }
+    ca.x = nb.x;
+    break;
+  }
+  case NavLayout::Rail: {
+    const ImVec2 nb(a.x + std::max(Px(14), w * 0.11f), b.y);
+    dl->AddRectFilled(a, nb, C(c.bgAlt));
+    dl->AddRectFilled(ImVec2(nb.x - 1, a.y), nb, C(c.line));
+    const float cx = (a.x + nb.x) * 0.5f, s = Px(2.5f);
+    dl->AddRectFilled(ImVec2(cx - s - 1, a.y + Px(5)), ImVec2(cx + s + 1, a.y + Px(5) + s * 2 + 2), C(c.accent));
+    for (int i = 0; i < 3; ++i) {
+      const float y = a.y + Px(18) + float(i) * Px(10);
+      dl->AddRect(ImVec2(cx - s, y), ImVec2(cx + s, y + s * 2), C(i == 0 ? c.accent : c.textFaint), 0, 0, 1);
+    }
+    ca.x = nb.x;
+    break;
+  }
+  case NavLayout::Topbar: {
+    const ImVec2 nb(b.x, a.y + std::max(Px(12), h * 0.16f));
+    dl->AddRectFilled(a, nb, C(c.bgAlt));
+    dl->AddRectFilled(ImVec2(a.x, nb.y - 1), nb, C(c.line));
+    const float mid = (a.y + nb.y) * 0.5f;
+    dl->AddRectFilled(ImVec2(a.x + Px(5), mid - Px(2)), ImVec2(a.x + Px(9), mid + Px(2)), C(c.accent));
+    for (int i = 0; i < 3; ++i) {
+      const float x = a.x + Px(16) + float(i) * Px(16);
+      dl->AddRectFilled(ImVec2(x, mid - 1), ImVec2(x + Px(11), mid + 1), C(i == 0 ? c.text : c.textFaint));
+      if (i == 0) dl->AddRectFilled(ImVec2(x, nb.y - Px(2)), ImVec2(x + Px(11), nb.y), C(c.accent));
+    }
+    ca.y = nb.y;
+    break;
+  }
+  }
+  // Página: título, botón y dos tarjetas, con el margen del diseño.
+  const float pad = Px(st.pad * 0.22f);
+  ca += ImVec2(pad, pad * 0.8f);
+  cb -= ImVec2(pad, pad * 0.6f);
+  const float avail = cb.x - ca.x;
+  PreviewTitle(dl, ca, avail, st, c);
+  const float by = ca.y + Px(14);
+  PreviewButton(dl, ImVec2(ca.x, by), ImVec2(ca.x + avail * 0.32f, by + Px(8)), st, c);
+  const float gap = Px(st.gap * 0.3f), cardW = (avail - gap) * 0.5f, cy = by + Px(14);
+  const float cardH = std::min(cb.y - cy, cardW * 0.82f);
+  if (cardH > Px(10))
+    for (int i = 0; i < 2; ++i) {
+      const float x = ca.x + float(i) * (cardW + gap);
+      PreviewCard(dl, ImVec2(x, cy), ImVec2(x + cardW, cy + cardH), st, c);
+    }
+  dl->PopClipRect();
+}
+
+// Tarjeta del selector de temas: una miniatura de la app con ese tema y su
+// diseño, y debajo su nombre y el del diseño.
+float ThemeCardHeight(float width) { return std::floor(width * 0.56f) + Px(28); }
+
+bool ThemeCard(const Theme& t, bool selected, float width, const std::string& styleOverride) {
+  const Palette& p = Colors();
+  const Style& st = StyleFor(t, styleOverride);
+  ImGui::PushID(t.id);
+  const float previewH = std::floor(width * 0.56f);
+  bool pressed = ImGui::InvisibleButton("theme", ImVec2(width, ThemeCardHeight(width)));
+  bool hov = ImGui::IsItemHovered();
+  Motion mo = Animate();
+  ImGui::PopID();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(a, b, C(t.colors.bg));
-  StyleFrame(dl, a, b, FindStyle(t.style), C(selected ? p.accent : hov ? p.lineStrong : p.line), C(t.colors.accent),
-             Px(1));
-  const float sw = Px(10), gap = Px(3);
-  float x = b.x - Px(10) - sw * 3 - gap * 2;
-  float mid = (a.y + b.y) * 0.5f, fs = Px(kSmall);
+  const ImVec2 pb(b.x, a.y + previewH);
+  ThemePreview(dl, a, pb, t, st);
+  StyleFrame(dl, a, pb, st, C(selected ? p.accent : Mix(p.line, p.lineStrong, mo.hover)), C(t.colors.accent),
+             selected ? Px(2) : Px(1));
+  // Nombre del tema y, a la derecha, el del diseño.
+  const float fs = Px(kSmall), y = pb.y + Px(7);
   ImFont* font = selected ? Bold() : ImGui::GetFont();
-  std::string name = Ellipsize(font, fs, t.name, x - a.x - Px(18));
-  Text(dl, font, fs, ImVec2(a.x + Px(10), mid - fs * 0.5f), C(selected ? t.colors.text : t.colors.textMuted),
-       name.c_str());
-  ImVec2 s0(x, mid - sw * 0.5f);
-  dl->AddRectFilled(s0, s0 + ImVec2(sw, sw), C(t.colors.bg));
-  dl->AddRect(s0, s0 + ImVec2(sw, sw), C(t.colors.lineStrong), 0, 0, Px(1));
-  ImVec2 s1 = s0 + ImVec2(sw + gap, 0);
-  dl->AddRectFilled(s1, s1 + ImVec2(sw, sw), C(t.colors.surface));
-  ImVec2 s2 = s1 + ImVec2(sw + gap, 0);
-  dl->AddRectFilled(s2, s2 + ImVec2(sw, sw), C(t.colors.accent));
+  const float styleW = TextSize(ImGui::GetFont(), Px(kHint), st.name).x;
+  std::string name = Ellipsize(font, fs, t.name, width - styleW - Px(12));
+  if (selected) DrawMark(dl, ImVec2(a.x + Px(4), y + fs * 0.5f), Px(3), C(p.accent), true);
+  const float nx = a.x + (selected ? Px(14) : 0.0f);
+  Text(dl, font, fs, ImVec2(nx, y), C(selected || mo.hover > 0.5f ? p.text : p.textMuted), name.c_str());
+  Text(dl, ImGui::GetFont(), Px(kHint), ImVec2(b.x - styleW, y + (fs - Px(kHint)) * 0.5f + Px(1)), C(p.textFaint),
+       st.name);
+  PaintPress(dl, a, pb, Role::Quiet, mo);
   return pressed;
 }
 
@@ -975,9 +1187,9 @@ void AppearanceSection(SettingsModel& m) {
   // Spectre y los de RoCer0. Al pulsar una, el tema se aplica y se guarda
   // (App lo detecta tras el frame): la app, el panel y los avisos lo usan ya.
   ImGui::BeginGroup();
-  const float gap = Px(8);
-  const float avail = std::max(ImGui::GetContentRegionAvail().x, Px(180));
-  const int cols = std::clamp(int((avail + gap) / (Px(180) + gap)), 1, 4);
+  const float gap = Px(12);
+  const float avail = std::max(ImGui::GetContentRegionAvail().x, Px(170));
+  const int cols = std::clamp(int((avail + gap) / (Px(170) + gap)), 1, 4);
   const float cardW = std::floor((avail - gap * float(cols - 1)) / float(cols));
   const char* group = nullptr;
   int col = 0;
@@ -995,7 +1207,7 @@ void AppearanceSection(SettingsModel& m) {
       ImGui::Dummy(ImVec2(0, ls + Px(6)));
     }
     if (col > 0) ImGui::SameLine(0, gap);
-    if (ThemeCard(*t, c.theme == t->id, cardW) && c.theme != t->id) c.theme = t->id;
+    if (ThemeCard(*t, c.theme == t->id, cardW, c.themeStyle) && c.theme != t->id) c.theme = t->id;
     col = (col + 1) % cols;
   }
   ImGui::EndGroup();
@@ -1017,6 +1229,11 @@ void AppearanceSection(SettingsModel& m) {
               "Al pasar por encima y al pulsar un botón, al abrir el panel, al cambiar de página y en los avisos "
               "(la de «Clip guardado» es distinta en cada diseño). Apagadas, todo aparece sin movimiento.");
   ImGui::EndDisabled();
+  FieldLabel("Fondo del tema", "Cada tema trae un dibujo de líneas finas detrás de las páginas, del panel y de los "
+                               "avisos: estrellas, lluvia de código, una ciudad, olas... Animado solo se mueve con "
+                               "esta ventana delante y con el panel abierto; quieto o sin fondo no gasta nada.");
+  ChoiceCombo<std::string>("##backdrop", c.themeBackdrop,
+                           {{"animado", "Animado"}, {"quieto", "Quieto"}, {"no", "Sin fondo"}});
   Help("El tema y el diseño se guardan al elegirlos y se usan en esta ventana, en el panel (Alt+Z) y en los avisos.");
 }
 
