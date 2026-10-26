@@ -448,6 +448,7 @@ void EditorUi::Leave() {
   camBg_.reset();
   camBusy_ = false;
   camAsked_ = -1;
+  camGap_ = false;
   // Lo que llegue del hilo para el reproductor de antes ya no vale (el
   // análisis se vuelve a pedir si no había llegado).
   ++serial_;
@@ -482,7 +483,8 @@ void EditorUi::TakeResults(AppWindow& w) {
       break;
     case Worker::Kind::CamFrame:
       camBusy_ = false;
-      if (r.ok) camBg_ = w.CreateTexture(r.bgra.data(), r.width, r.height);
+      camGap_ = !r.ok;
+      camBg_ = r.ok ? w.CreateTexture(r.bgra.data(), r.width, r.height) : nullptr;
       break;
     case Worker::Kind::Overlays:
       overlays_.clear();
@@ -850,7 +852,7 @@ void EditorUi::Preview(AppWindow& w, const MediaItem& item, ImVec2 va, ImVec2 vb
     quad(fa, fb, g.cropX, g.cropY, g.cropW, g.cropH, IM_COL32_WHITE);
 
     // Cámara: lo que había debajo en su sitio de antes y la cámara donde va.
-    if (camLive && src_.width > 0 && src_.height > 0) {
+    if (camLive && !camGap_ && src_.width > 0 && src_.height > 0) {
       const double cx = double(src_.camX) / src_.width, cy = double(src_.camY) / src_.height;
       const double cw = double(src_.camW) / src_.width, ch = double(src_.camH) / src_.height;
       if (camBg_) {
@@ -1110,7 +1112,7 @@ void EditorUi::RequestCamFrame() {
   if (!worker_ || camBusy_ || !player_.Ready()) return;
   const double t = player_.Position();
   const double step = src_.fps > 1 ? 1.0 / src_.fps : 1.0 / 30.0;
-  if (camBg_ && std::fabs(t - camAsked_) < step * 0.5) return;
+  if ((camBg_ || camGap_) && std::fabs(t - camAsked_) < step * 0.5) return;
   Worker::Job job;
   job.kind = Worker::Kind::CamFrame;
   job.serial = serial_;

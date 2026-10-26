@@ -187,11 +187,13 @@ public:
   void Close();
   bool IsOpen() const;
   const std::string& Path() const { return path_; }
-  // El fotograma de la pista que se ve en el segundo t del original (el
-  // último que empieza antes; si t es anterior al primero, el primero).
-  // nullptr si no hay ninguno. Vale hasta la siguiente llamada.
+  // El fotograma de la pista con el mismo tiempo que el del vídeo en el
+  // segundo t del original; al principio del clip, antes de que empiece la
+  // pista, su primer fotograma. nullptr si en ese fotograma no se veía la
+  // cámara (no hay que tocarlo). Vale hasta la siguiente llamada.
   const AVFrame* At(double t);
-  // Lo mismo en BGRA (para la vista previa en movimiento).
+  // Lo mismo en BGRA para la vista previa (t es el momento del reproductor:
+  // vale el fotograma que se está viendo).
   bool ReadBgra(double t, std::vector<uint8_t>* bgra, int* width, int* height);
 
 private:

@@ -3,6 +3,7 @@
 #include "audio/AudioPipeline.h"
 #include "capture/Camera.h"
 #include "capture/CaptureSource.h"
+#include "core/CamBackground.h"
 #include "core/Mp4Writer.h"
 #include "core/PerfMonitor.h"
 #include "core/ReplayBuffer.h"
@@ -36,6 +37,9 @@ struct PipelineSettings {
   std::string cameraId;
   std::string cameraCorner = "bottom-right";
   int cameraSizePercent = 25;
+  // Guardar aparte lo que hay debajo de la webcam para poder moverla o
+  // quitarla en el editor (ver CamBackground).
+  bool cameraEditable = true;
   double replaySeconds = 30;
   // Tope de RAM del replay; 0 = automático: lo que ocupa la duración pedida
   // al bitrate máximo del preset, sin pasar de la cuarta parte de la RAM.
@@ -94,6 +98,11 @@ public:
   void StopRecording();
   bool Recording() const { return recorder_ && recorder_->Active(); }
   void SetReplaySeconds(double seconds);
+  // «Poder editar la cámara después», con la captura en marcha.
+  void SetCameraEditable(bool editable) {
+    settings_.cameraEditable = editable;
+    camEditable_ = editable;
+  }
   bool MicCaptured() const { return running_ && audio_.HasMic(); }
   void SetMicMuted(bool muted) { audio_.SetMicMuted(muted); }
   // Nivel de pico reciente (0..1) de cada fuente de audio, barato de leer en cada frame.
@@ -123,6 +132,12 @@ private:
   VideoEncoder encoder_;
   AudioPipeline audio_;
   std::unique_ptr<Camera> camera_;
+  CamBackground camBackground_;
+  std::atomic<bool> camEditable_{true};
+  // Dónde pintó Render la cámara en el fotograma que se acaba de codificar
+  // (solo el hilo de vídeo).
+  RECT camRect_{};
+  bool camDrawn_ = false;
   std::shared_ptr<ReplayBuffer> buffer_;
   std::unique_ptr<Recorder> recorder_;
   std::vector<std::thread> recorderDrains_; // grabaciones cortadas que aún vacían su cola

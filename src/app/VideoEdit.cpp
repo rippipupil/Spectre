@@ -819,14 +819,22 @@ struct CamBackgroundReader::Impl {
     }
   }
 
-  const AVFrame* At(double t) {
+  // La pista solo tiene los fotogramas sobre los que se pintó la cámara, con
+  // el mismo tiempo que en el vídeo (ver CamBackground): si no hay uno en t
+  // (con `slack` de margen), la cámara no estaba ahí y no hay fondo.
+  const AVFrame* At(double t, double slack) {
     if (!dec.p) return nullptr;
-    if (!positioned || (haveCur && t < curTime - half) || (!haveCur && haveNext && t < nextTime - half && t > 0.5) ||
-        (haveCur && t > curTime + 3.0))
+    // Hacia atrás, o muy por delante sin saber aún qué viene (en un hueco de
+    // la pista ya se sabe: next está más allá de t).
+    if (!positioned || (haveCur && t < curTime - half) ||
+        (haveCur && !eof && t > curTime + 3.0 && !(haveNext && nextTime > t + half)))
       Seek(t);
     Advance(t);
-    if (haveCur) return cur.p;
-    return haveNext ? next.p : nullptr;
+    if (haveCur && t - curTime <= slack) return cur.p;
+    // Al principio del clip la pista empieza en su primer keyframe (uno cada
+    // 0,25 s), un poco después que el vídeo: hasta ahí vale su primer fotograma.
+    if (!haveCur && haveNext && nextTime <= 0.5) return next.p;
+    return nullptr;
   }
 };
 
@@ -869,10 +877,12 @@ void CamBackgroundReader::Close() {
 
 bool CamBackgroundReader::IsOpen() const { return impl_ && impl_->dec.p; }
 
-const AVFrame* CamBackgroundReader::At(double t) { return impl_ ? impl_->At(t) : nullptr; }
+const AVFrame* CamBackgroundReader::At(double t) { return impl_ ? impl_->At(t, impl_->half) : nullptr; }
 
 bool CamBackgroundReader::ReadBgra(double t, std::vector<uint8_t>* bgra, int* width, int* height) {
-  const AVFrame* f = At(t);
+  // La vista previa pide el momento del reproductor, que no cae justo en un
+  // fotograma: vale el que se está viendo.
+  const AVFrame* f = impl_ ? impl_->At(t, impl_->half * 3) : nullptr;
   if (!f || !PlainFormat(f->format) || f->width < 2 || f->height < 2) return false;
   impl_->sws = sws_getCachedContext(impl_->sws, f->width, f->height, AVPixelFormat(f->format), f->width, f->height,
                                     AV_PIX_FMT_BGRA, SWS_POINT, nullptr, nullptr, nullptr);
@@ -960,6 +970,11 @@ public:
     rw = std::min(rw, (frame->width - rx) & ~1);
     rh = std::min(rh, (frame->height - ry) & ~1);
     if (rw < 8 || rh < 8) return false;
+    // Sin fondo, en este fotograma no se veía la cámara (ver
+    // CamBackgroundReader::At): se deja como está y encima no va nada (el
+    // grafo repetiría la cámara anterior si no le llegara una transparente).
+    if (!background || !PlainFormat(background->format) || background->width < 2 || background->height < 2)
+      return box_.w <= 0 || Transparent(cam);
 
     // 1. La cámara, antes de taparla.
     if (box_.w > 0) {
@@ -977,24 +992,36 @@ public:
       Finish(cam);
     }
     // 2. Debajo, el fondo grabado aparte.
-    if (background && PlainFormat(background->format) && background->width >= 2 && background->height >= 2) {
-      const AVFrame* patch = background;
-      if (background->format != frame->format || background->width != rw || background->height != rh) {
-        av_frame_unref(bg_.p);
-        bg_.p->format = frame->format;
-        bg_.p->width = rw;
-        bg_.p->height = rh;
-        if (av_frame_get_buffer(bg_.p, 0) < 0 ||
-            !ScaleRegion(&bgSws_, background, 0, 0, background->width & ~1, background->height & ~1, bg_.p))
-          return true;
-        patch = bg_.p;
-      }
-      Blit(frame, patch, rx, ry);
+    const AVFrame* patch = background;
+    if (background->format != frame->format || background->width != rw || background->height != rh) {
+      av_frame_unref(bg_.p);
+      bg_.p->format = frame->format;
+      bg_.p->width = rw;
+      bg_.p->height = rh;
+      if (av_frame_get_buffer(bg_.p, 0) < 0 ||
+          !ScaleRegion(&bgSws_, background, 0, 0, background->width & ~1, background->height & ~1, bg_.p))
+        return true;
+      patch = bg_.p;
     }
+    Blit(frame, patch, rx, ry);
     return true;
   }
 
 private:
+  // Una cámara del tamaño final que no tapa nada.
+  bool Transparent(AVFrame* cam) const {
+    cam->format = AV_PIX_FMT_YUVA420P;
+    cam->width = box_.w;
+    cam->height = box_.h;
+    if (av_frame_get_buffer(cam, 0) < 0) return false;
+    const int ch = (box_.h + 1) / 2;
+    memset(cam->data[0], 16, size_t(cam->linesize[0]) * size_t(box_.h));
+    memset(cam->data[1], 128, size_t(cam->linesize[1]) * size_t(ch));
+    memset(cam->data[2], 128, size_t(cam->linesize[2]) * size_t(ch));
+    memset(cam->data[3], 0, size_t(cam->linesize[3]) * size_t(box_.h));
+    return true;
+  }
+
   // Espejo, borde y forma sobre la cámara ya escalada.
   void Finish(AVFrame* cam) {
     const int w = cam->width, h = cam->height;

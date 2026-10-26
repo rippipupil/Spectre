@@ -154,13 +154,14 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
       name_ = cand.id;
       label_ = cand.label;
       software_ = !cand.hardware;
-      Log("Encoder de vídeo: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s%s, opciones %s)", name_.c_str(),
-          settings.width, settings.height, settings.fps, settings.quality.targetKbps, settings.quality.maxKbps,
-          settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema", software_ ? ", CPU" : "", opened);
+      Log("Encoder de %s: %s %dx%d@%d, %d kbps (tope %d, cq %d) (%s%s, opciones %s)", settings.role.c_str(),
+          name_.c_str(), settings.width, settings.height, settings.fps, settings.quality.targetKbps,
+          settings.quality.maxKbps, settings.quality.cq, ZeroCopy() ? "cero copias" : "memoria de sistema",
+          software_ ? ", CPU" : "", opened);
       return true;
     }
   }
-  Log("Ningún encoder de vídeo se pudo abrir");
+  Log("Ningún encoder de %s se pudo abrir", settings.role.c_str());
   Close();
   return false;
 }
@@ -191,7 +192,7 @@ bool VideoEncoder::TryOpen(const AVCodec* codec, const Candidate& cand, const Vi
   ctx_->framerate = {s.fps, 1};
   // Keyframe cada 2 s: los clips se cortan sin recodificar y, frente a uno
   // por segundo, sobran bits para el resto de fotogramas.
-  ctx_->gop_size = s.fps * 2;
+  ctx_->gop_size = s.gopFrames > 0 ? s.gopFrames : s.fps * 2;
   ctx_->max_b_frames = 0;
   ctx_->bit_rate = target;
   ctx_->rc_max_rate = cap;

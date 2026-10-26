@@ -21,6 +21,11 @@ public:
 
   void Configure(const StreamList& streams, double seconds, size_t maxBytes);
   void Clear();
+  // Una pista más con la captura en marcha (el fondo de la webcam, ver
+  // CamBackground); devuelve su índice. Hasta Configure no se quita ninguna,
+  // así que los índices de un Snapshot valen con las pistas de Streams().
+  int AddStream(const StreamDesc& stream);
+  StreamList Streams();
 
   void Push(const AVPacket* packet, int stream);
 

@@ -57,6 +57,7 @@ struct Config {
   std::string cameraId;
   std::string cameraCorner = "bottom-right"; // top-left | top-right | bottom-left | bottom-right
   int cameraSizePercent = 25;          // ancho de la cámara respecto al vídeo
+  bool cameraEditable = true;          // guardar aparte lo que hay debajo para moverla o quitarla en el editor
 
   // Capturas de pantalla
   std::string screenshotFormat = "png"; // "png" (sin pérdida) | "jpg" (ocupa menos)

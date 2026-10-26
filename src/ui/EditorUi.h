@@ -157,6 +157,7 @@ private:
   std::shared_ptr<UiTexture> camBg_;
   bool camBusy_ = false;
   double camAsked_ = -1;
+  bool camGap_ = false; // en ese momento no se veía la cámara: el fotograma se ve tal cual
 };
 
 } // namespace spectre

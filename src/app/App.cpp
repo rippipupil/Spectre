@@ -1054,6 +1054,7 @@ void App::ApplyConfig(const Config& next, bool quiet) {
     pipeline_.SetReplaySeconds(config_.replayEnabled ? config_.clipSeconds : 3.0);
   }
   UpdatePipeline();
+  if (pipeline_.Running()) pipeline_.SetCameraEditable(config_.cameraEditable);
 
   const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
   if (folderChanged && appWindow_.Visible()) RescanLibrary();
@@ -1120,6 +1121,7 @@ PipelineSettings App::BuildSettings() const {
   s.cameraId = config_.cameraId;
   s.cameraCorner = config_.cameraCorner;
   s.cameraSizePercent = config_.cameraSizePercent;
+  s.cameraEditable = config_.cameraEditable;
   s.replaySeconds = config_.replayEnabled ? config_.clipSeconds : 3.0;
   // 1024 MB es el valor por defecto de siempre: con él, el tope lo calcula el
   // pipeline según calidad, duración y RAM (con 5 min en Alta se quedaba corto).
