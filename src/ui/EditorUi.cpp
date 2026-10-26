@@ -4,6 +4,7 @@
 #include "app/TextImage.h"
 #include "common/Util.h"
 #include "ui/AppUi.h"
+#include "ui/EditorWidgets.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
@@ -59,6 +60,11 @@ std::string Length(double seconds) {
   return s;
 }
 
+} // namespace
+
+// Piezas de las herramientas que comparte el editor de fotos (EditorWidgets.h).
+namespace editui {
+
 bool TypingText() { return ImGui::GetIO().WantTextInput; }
 
 std::string NameOf(const std::string& path) {
@@ -68,7 +74,7 @@ std::string NameOf(const std::string& path) {
 
 // Título de una herramienta. Con `on`, un interruptor a la derecha y toda la
 // fila lo cambia; bold=false para las opciones dentro de una herramienta.
-bool SwitchRow(const char* label, bool* on, bool bold = false) {
+bool SwitchRow(const char* label, bool* on, bool bold) {
   const Palette& p = Colors();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const float w = ImGui::GetContentRegionAvail().x, h = Px(28);
@@ -92,7 +98,7 @@ bool SwitchRow(const char* label, bool* on, bool bold = false) {
   return changed;
 }
 
-bool ToolHeader(const char* title, bool* on = nullptr) { return SwitchRow(title, on, true); }
+bool ToolHeader(const char* title, bool* on) { return SwitchRow(title, on, true); }
 
 // Texto pequeño encima de un control.
 void Label(const char* text) {
@@ -180,11 +186,23 @@ bool PercentSlider(const char* id, float* value) {
   return changed;
 }
 
+// 0xRRGGBB de un color de ImGui (ABGR).
+uint32_t Rgb(ImU32 c) { return ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu); }
+
+} // namespace editui
+
+using namespace editui;
+
+namespace {
+
 // Lo que cambia la forma de la imagen: con lo mismo, una vista previa exacta
 // anterior sigue sirviendo mientras llega la nueva (color, texto).
 bool SameShape(const EditSettings& a, const EditSettings& b) {
   return a.aspect == b.aspect && a.fit == b.fit && a.zoom == b.zoom && a.panX == b.panX && a.panY == b.panY &&
-         a.rotate == b.rotate && a.flipH == b.flipH && a.flipV == b.flipV;
+         a.rotate == b.rotate && a.flipH == b.flipH && a.flipV == b.flipV && a.camEdit == b.camEdit &&
+         a.camHide == b.camHide && a.camX == b.camX && a.camY == b.camY && a.camW == b.camW &&
+         a.camShape == b.camShape && a.camBorder == b.camBorder && a.camBorderColor == b.camBorderColor &&
+         a.camMirror == b.camMirror;
 }
 
 std::string OverlayKey(const EditSettings& s, const EditGeometry& g) {
@@ -214,7 +232,7 @@ std::string FpsText(double fps) {
 // interfaz. De cada tipo solo cuenta la última petición: mientras se arrastra
 // un deslizador no se acumulan.
 struct EditorUi::Worker {
-  enum class Kind { Probe, Preview, Overlays };
+  enum class Kind { Probe, Preview, Overlays, CamFrame };
   struct Job {
     Kind kind = Kind::Probe;
     uint64_t serial = 0;
@@ -240,6 +258,7 @@ struct EditorUi::Worker {
     uint64_t frame = 0;
     std::vector<EditOverlay> overlays;
     std::string key;
+    double at = 0;
   };
 
   Worker(HWND notify, UINT msg) : notify_(notify), msg_(msg) {
@@ -275,7 +294,7 @@ private:
       Job job;
       {
         std::unique_lock lock(mutex_);
-        cv_.wait(lock, [&] { return stop_ || pending_[0] || pending_[1] || pending_[2]; });
+        cv_.wait(lock, [&] { return stop_ || pending_[0] || pending_[1] || pending_[2] || pending_[3]; });
         if (stop_) return;
         for (auto& p : pending_) {
           if (!p) continue;
@@ -293,18 +312,40 @@ private:
     }
   }
 
-  static Result Run(const Job& job) {
+  // El fondo de la cámara en el segundo t (BGRA), con el lector abierto de
+  // la última vez si es el mismo archivo: al reproducir se lee seguido.
+  bool CamBackground(const std::string& path, int track, double t, std::vector<uint8_t>* bgra, int* w, int* h) {
+    if (track < 0) return false;
+    if (!camReader_.IsOpen() || camReader_.Path() != path || camTrack_ != track) {
+      camTrack_ = track;
+      if (!camReader_.Open(path, track)) return false;
+    }
+    return camReader_.ReadBgra(t, bgra, w, h);
+  }
+
+  Result Run(const Job& job) {
     Result r;
     r.kind = job.kind;
     r.serial = job.serial;
     try {
       switch (job.kind) {
       case Kind::Probe: r.ok = ProbeEditSource(job.path, &r.source, &r.error); break;
-      case Kind::Preview:
+      case Kind::Preview: {
         r.settings = job.settings;
         r.frame = job.frame;
+        std::vector<uint8_t> camBg;
+        int cw = 0, ch = 0;
+        if (job.settings.camEdit && job.source.Webcam() &&
+            !CamBackground(job.path, job.source.camTrack, job.at, &camBg, &cw, &ch))
+          camBg.clear();
         r.ok = job.bgr && RenderEditPreview(job.settings, job.source, job.bgr->data(), job.width, job.height, job.at,
-                                            RasterizeText, job.maxW, job.maxH, &r.bgra, &r.width, &r.height, &r.error);
+                                            RasterizeText, job.maxW, job.maxH, &r.bgra, &r.width, &r.height, &r.error,
+                                            EditImage{camBg.empty() ? nullptr : camBg.data(), cw, ch});
+        break;
+      }
+      case Kind::CamFrame:
+        r.at = job.at;
+        r.ok = CamBackground(job.path, job.source.camTrack, job.at, &r.bgra, &r.width, &r.height);
         break;
       case Kind::Overlays: {
         const EditGeometry g = ComputeGeometry(job.settings, job.source);
@@ -331,8 +372,11 @@ private:
   std::mutex mutex_;
   std::condition_variable cv_;
   bool stop_ = false;
-  std::optional<Job> pending_[3];
+  std::optional<Job> pending_[4];
   std::vector<Result> results_;
+  // Solo en el hilo del trabajo.
+  CamBackgroundReader camReader_;
+  int camTrack_ = -1;
 };
 
 // ------------------------------------------------------------ ciclo de vida
@@ -401,6 +445,10 @@ void EditorUi::Leave() {
   overlays_.clear();
   overlayKey_.clear();
   overlayAsked_.clear();
+  camBg_.reset();
+  camBusy_ = false;
+  camAsked_ = -1;
+  camGap_ = false;
   // Lo que llegue del hilo para el reproductor de antes ya no vale (el
   // análisis se vuelve a pedir si no había llegado).
   ++serial_;
@@ -432,6 +480,11 @@ void EditorUi::TakeResults(AppWindow& w) {
         exact_.reset();
         if (!r.error.empty()) Log("Editor: vista previa: %s", r.error.c_str());
       }
+      break;
+    case Worker::Kind::CamFrame:
+      camBusy_ = false;
+      camGap_ = !r.ok;
+      camBg_ = r.ok ? w.CreateTexture(r.bgra.data(), r.width, r.height) : nullptr;
       break;
     case Worker::Kind::Overlays:
       overlays_.clear();
@@ -656,7 +709,7 @@ EditorUi::Exit EditorUi::Draw(AppWindow& w, AppModel& m, const AppActions& a, co
   ImGui::SetCursorScreenPos(ImVec2(va.x, vb.y + Px(12)));
   Transport(item, leftW);
   ImGui::SetCursorScreenPos(ImVec2(q.x + leftW + gap, q.y));
-  Tools(item, a, availH);
+  Tools(m, item, a, availH);
   ImGui::EndChild();
   ImGui::PopStyleVar();
   Footer(m, a, item, &exit);
@@ -678,7 +731,7 @@ void EditorUi::Header(const MediaItem& item, Exit* exit) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const ImVec2 q = ImGui::GetCursorScreenPos();
   const float rowH = Px(34), avail = ImGui::GetContentRegionAvail().x;
-  if (IconButton("back", Icon::Back, rowH, "Volver al visor (Esc)")) exit->back = true;
+  if (IconButton("back", Icon::Back, rowH, "Volver (Esc)")) exit->back = true;
   const float tx = q.x + rowH + Px(10);
   const float resetW = Px(140);
   const float actionsW = rowH * 2 + Px(4) + Px(10) + resetW;
@@ -753,6 +806,14 @@ void EditorUi::Preview(AppWindow& w, const MediaItem& item, ImVec2 va, ImVec2 vb
   const ImVec2 da(std::floor(va.x + (aw - dispW) * 0.5f), std::floor(va.y + (ah - dispH) * 0.5f));
   const ImVec2 db(da.x + dispW, da.y + dispH);
 
+  // La cámara del clip, en el lienzo (camBox) y en pantalla (ca, cb).
+  const bool camLive = s_.camEdit && src_.Webcam();
+  const EditCamBox camBox = camLive ? ComputeCamBox(s, src, g) : EditCamBox{};
+  const float bkx = dispW / float(std::max(1, g.canvasW)), bky = dispH / float(std::max(1, g.canvasH));
+  const ImVec2 ca(da.x + float(camBox.x) * bkx, da.y + float(camBox.y) * bky);
+  const ImVec2 cb(ca.x + float(camBox.w) * bkx, ca.y + float(camBox.h) * bky);
+  if (camLive) RequestCamFrame();
+
   const bool still = !player_.Playing() && !scrubbing_ && drag_ == 0;
   const bool touches = EditTouchesPicture(s_);
   const bool exactOk = touches && still && exact_ && exactFrame_ == player_.FrameSerial() && SameShape(exactSettings_, s_);
@@ -789,6 +850,66 @@ void EditorUi::Preview(AppWindow& w, const MediaItem& item, ImVec2 va, ImVec2 vb
     const ImVec2 fa(da.x + float(g.canvasW - g.fgW) * 0.5f * kx, da.y + float(g.canvasH - g.fgH) * 0.5f * ky);
     const ImVec2 fb(fa.x + float(g.fgW) * kx, fa.y + float(g.fgH) * ky);
     quad(fa, fb, g.cropX, g.cropY, g.cropW, g.cropH, IM_COL32_WHITE);
+
+    // Cámara: lo que había debajo en su sitio de antes y la cámara donde va.
+    if (camLive && !camGap_ && src_.width > 0 && src_.height > 0) {
+      const double cx = double(src_.camX) / src_.width, cy = double(src_.camY) / src_.height;
+      const double cw = double(src_.camW) / src_.width, ch = double(src_.camH) / src_.height;
+      if (camBg_) {
+        // Del fotograma (0..1) a la pantalla: lo contrario de uvOf.
+        auto screenOf = [&](double u, double v) {
+          double x = u, y = v;
+          switch (rot) {
+          case 90: x = 1 - v; y = u; break;
+          case 270: x = v; y = 1 - u; break;
+          case 180: x = 1 - u; y = 1 - v; break;
+          default: break;
+          }
+          if (s.flipH) x = 1 - x;
+          if (s.flipV) y = 1 - y;
+          x *= g.rotatedW;
+          y *= g.rotatedH;
+          return ImVec2(fa.x + float((x - g.cropX) / g.cropW) * (fb.x - fa.x),
+                        fa.y + float((y - g.cropY) / g.cropH) * (fb.y - fa.y));
+        };
+        dl->PushClipRect(fa, fb, true);
+        dl->AddImageQuad(ImTextureID(camBg_->Id()), screenOf(cx, cy), screenOf(cx + cw, cy),
+                         screenOf(cx + cw, cy + ch), screenOf(cx, cy + ch));
+        dl->PopClipRect();
+      }
+      if (camBox.w > 0) {
+        // Recorte cuadrado del centro para las formas cuadrada y redonda.
+        double u0 = cx, v0 = cy, u1 = cx + cw, v1 = cy + ch;
+        if (s_.camShape != EditCamShape::Original) {
+          const double side = std::min(src_.camW, src_.camH);
+          u0 = (src_.camX + (src_.camW - side) * 0.5) / src_.width;
+          v0 = (src_.camY + (src_.camH - side) * 0.5) / src_.height;
+          u1 = u0 + side / src_.width;
+          v1 = v0 + side / src_.height;
+        }
+        if (s_.camMirror) std::swap(u0, u1);
+        const ImVec2 ua{float(u0), float(v0)}, ub{float(u1), float(v1)};
+        const float bk = dispW / float(g.canvasW);
+        const float side = std::min(cb.x - ca.x, cb.y - ca.y);
+        const float boxSide = float(std::min(camBox.w, camBox.h));
+        const float thick = s_.camBorder <= 0 ? 0.0f
+                            : s_.camBorder == 1 ? std::max(2.0f, boxSide * 0.025f) * bk
+                                                : std::max(4.0f, boxSide * 0.06f) * bk;
+        const ImU32 border = IM_COL32((s_.camBorderColor >> 16) & 0xFF, (s_.camBorderColor >> 8) & 0xFF,
+                                      s_.camBorderColor & 0xFF, 255);
+        if (s_.camShape == EditCamShape::Circle) {
+          dl->AddImageRounded(ImTextureID(frame->Id()), ca, cb, ua, ub, IM_COL32_WHITE, side * 0.5f);
+          if (thick > 0)
+            dl->AddCircle(ImVec2((ca.x + cb.x) * 0.5f, (ca.y + cb.y) * 0.5f), side * 0.5f - thick * 0.5f, border, 0,
+                          thick);
+        } else {
+          dl->AddImage(ImTextureID(frame->Id()), ca, cb, ua, ub);
+          if (thick > 0)
+            dl->AddRect(ca + ImVec2(thick * 0.5f, thick * 0.5f), cb - ImVec2(thick * 0.5f, thick * 0.5f), border, 0,
+                        0, thick);
+        }
+      }
+    }
 
     // Zona tapada: oscura en movimiento; en pausa se ve el difuminado de verdad.
     if (s_.blur) {
@@ -838,16 +959,29 @@ void EditorUi::Preview(AppWindow& w, const MediaItem& item, ImVec2 va, ImVec2 vb
   const bool overGrip = s_.blur && std::fabs(mouse.x - zb.x) <= grip && std::fabs(mouse.y - zb.y) <= grip;
   const bool overZone = s_.blur && mouse.x >= za.x && mouse.x <= zb.x && mouse.y >= za.y && mouse.y <= zb.y;
   const bool canPan = g.cropW < g.rotatedW - 2 || g.cropH < g.rotatedH - 2;
+  const bool camOn = camBox.w > 0;
+  const bool overCamGrip = camOn && std::fabs(mouse.x - cb.x) <= grip && std::fabs(mouse.y - cb.y) <= grip;
+  const bool overCam = camOn && mouse.x >= ca.x && mouse.x <= cb.x && mouse.y >= ca.y && mouse.y <= cb.y;
+  // Con la pestaña Cámara abierta manda la cámara; si no, la zona tapada.
+  const bool camFirst = tab_ == 5 || !(overGrip || overZone);
   if (ImGui::IsItemActivated()) {
     dragFrom_ = mouse;
-    if (overGrip) areaMode_ = 3;
+    if (camFirst && overCamGrip) areaMode_ = 6;
+    else if (camFirst && overCam) areaMode_ = 5;
+    else if (overGrip) areaMode_ = 3;
     else if (overZone) areaMode_ = 2;
     else if (canPan) areaMode_ = 1;
     else areaMode_ = 4;
-    dragStart_[0] = areaMode_ == 1 ? s_.panX : s_.blurX;
-    dragStart_[1] = areaMode_ == 1 ? s_.panY : s_.blurY;
-    dragStart_[2] = s_.blurW;
-    dragStart_[3] = s_.blurH;
+    if (areaMode_ >= 5) {
+      dragStart_[0] = s_.camX;
+      dragStart_[1] = s_.camY;
+      dragStart_[2] = s_.camW;
+    } else {
+      dragStart_[0] = areaMode_ == 1 ? s_.panX : s_.blurX;
+      dragStart_[1] = areaMode_ == 1 ? s_.panY : s_.blurY;
+      dragStart_[2] = s_.blurW;
+      dragStart_[3] = s_.blurH;
+    }
   }
   const ImVec2 delta(mouse.x - dragFrom_.x, mouse.y - dragFrom_.y);
   const bool moved = std::fabs(delta.x) > Px(4) || std::fabs(delta.y) > Px(4);
@@ -873,6 +1007,24 @@ void EditorUi::Preview(AppWindow& w, const MediaItem& item, ImVec2 va, ImVec2 vb
       s_.blurH = std::clamp(dragStart_[3] + delta.y / dispH, 0.04f, 1.0f - s_.blurY);
       ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
       break;
+    case 5:
+      if (camOn) {
+        const float fw = float(camBox.w) / float(g.canvasW), fh = float(camBox.h) / float(g.canvasH);
+        s_.camX = std::clamp(dragStart_[0] + delta.x / dispW, 0.0f, std::max(0.0f, 1.0f - fw));
+        s_.camY = std::clamp(dragStart_[1] + delta.y / dispH, 0.0f, std::max(0.0f, 1.0f - fh));
+      }
+      ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+      break;
+    case 6:
+      if (camOn) {
+        // Crece desde la esquina de arriba a la izquierda sin salirse.
+        const float ratio = float(camBox.h) / float(camBox.w) * float(g.canvasW) / float(g.canvasH);
+        const float maxW = std::min(1.0f - s_.camX, (1.0f - s_.camY) / std::max(0.01f, ratio));
+        const float grow = std::max(delta.x / dispW, delta.y / dispH / std::max(0.01f, ratio));
+        s_.camW = std::clamp(dragStart_[2] + grow, 0.05f, std::max(0.05f, maxW));
+      }
+      ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+      break;
     default: break;
     }
   }
@@ -881,17 +1033,21 @@ void EditorUi::Preview(AppWindow& w, const MediaItem& item, ImVec2 va, ImVec2 vb
     areaMode_ = 0;
   }
   if (hov && !ImGui::IsItemActive()) {
-    if (overGrip) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
-    else if (overZone || canPan) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
-    if (canPan && !overZone && !overGrip) ImGui::SetTooltip("Arrastra para elegir qué parte se ve");
+    if ((camFirst && overCamGrip) || overGrip) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+    else if ((camFirst && overCam) || overZone || canPan) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+    if (canPan && !overZone && !overGrip && !overCam) ImGui::SetTooltip("Arrastra para elegir qué parte se ve");
   }
 
   // Borde de la imagen final y del recuadro de la zona tapada.
   if (g.outW != src.width || g.outH != src.height || EditTouchesPicture(s_))
     dl->AddRect(da - ImVec2(1, 1), db + ImVec2(1, 1), C(p.line), 0, 0, Px(1));
-  if (s_.blur && (tab_ == 3 || overZone || areaMode_ >= 2)) {
+  if (s_.blur && (tab_ == 3 || overZone || areaMode_ == 2 || areaMode_ == 3)) {
     dl->AddRect(za, zb, C(p.accent), 0, 0, Px(1));
     dl->AddRectFilled(zb - ImVec2(Px(5), Px(5)), zb + ImVec2(Px(5), Px(5)), C(p.accent));
+  }
+  if (camOn && (tab_ == 5 || (hov && overCam) || areaMode_ >= 5)) {
+    dl->AddRect(ca, cb, C(p.accent), 0, 0, Px(1));
+    dl->AddRectFilled(cb - ImVec2(Px(5), Px(5)), cb + ImVec2(Px(5), Px(5)), C(p.accent));
   }
 
   // Un aviso arriba a la izquierda cuando lo que se ve no es lo que saldrá.
@@ -933,6 +1089,7 @@ void EditorUi::RequestPreview(AppWindow& w, ImVec2 area) {
   Worker::Job job;
   job.kind = Worker::Kind::Preview;
   job.serial = serial_;
+  job.path = path_;
   job.settings = s_;
   job.source = src_;
   job.bgr = frameBgr_;
@@ -947,6 +1104,24 @@ void EditorUi::RequestPreview(AppWindow& w, ImVec2 area) {
   askedFrame_ = serial;
   askedSettings_ = s_;
   askedAt_ = now;
+}
+
+// Lo que hay debajo de la cámara en el momento que se ve, para la vista previa
+// en movimiento: una petición cada vez, la siguiente al llegar la anterior.
+void EditorUi::RequestCamFrame() {
+  if (!worker_ || camBusy_ || !player_.Ready()) return;
+  const double t = player_.Position();
+  const double step = src_.fps > 1 ? 1.0 / src_.fps : 1.0 / 30.0;
+  if ((camBg_ || camGap_) && std::fabs(t - camAsked_) < step * 0.5) return;
+  Worker::Job job;
+  job.kind = Worker::Kind::CamFrame;
+  job.serial = serial_;
+  job.path = path_;
+  job.source = src_;
+  job.at = t;
+  worker_->Post(std::move(job));
+  camBusy_ = true;
+  camAsked_ = t;
 }
 
 // ------------------------------------------------------------ reproducción y línea de tiempo
@@ -1143,11 +1318,11 @@ void EditorUi::Timeline(const MediaItem& item, float width) {
 
 // ------------------------------------------------------------ herramientas
 
-void EditorUi::Tools(const MediaItem& item, const AppActions& a, float height) {
+void EditorUi::Tools(const AppModel& m, const MediaItem& item, const AppActions& a, float height) {
   const float w = Px(kToolsWidth);
   ImGui::BeginGroup();
   static const std::vector<std::pair<int, std::string>> kTabs = {
-      {0, "Tiempo"}, {1, "Imagen"}, {2, "Color"}, {3, "Texto"}, {4, "Audio"}};
+      {0, "Tiempo"}, {1, "Imagen"}, {2, "Color"}, {3, "Texto"}, {4, "Audio"}, {5, "Cámara"}};
   const int tab = Segmented("tabs", kTabs, tab_, w);
   if (tab >= 0) tab_ = tab;
   Gap(10);
@@ -1161,7 +1336,8 @@ void EditorUi::Tools(const MediaItem& item, const AppActions& a, float height) {
   case 1: TabPicture(); break;
   case 2: TabColor(); break;
   case 3: TabText(); break;
-  default: TabAudio(); break;
+  case 4: TabAudio(); break;
+  default: TabCamera(m); break;
   }
   Gap(16);
   ImGui::EndDisabled();
@@ -1500,6 +1676,114 @@ void EditorUi::TabAudio() {
   Gap(10);
   Note("Igualar sube lo que se oye bajo y baja los gritos. La vista previa suena hasta el 100 %; subir de ahí, "
        "igualar y quitar ruido se oyen al guardar.");
+}
+
+void EditorUi::TabCamera(const AppModel& m) {
+  if (!probed_) {
+    Note("Leyendo el vídeo...");
+    return;
+  }
+  if (!src_.Webcam()) {
+    ToolHeader("Cámara");
+    Note("Este clip no guardó la cámara aparte: va pegada en la imagen y, si se moviera o se quitara, debajo "
+         "quedaría un hueco.");
+    Gap(8);
+    Note("Lo que sí se puede: taparla con un difuminado o dejarla fuera con el formato o el zoom (pestaña Imagen).");
+    Gap(8);
+    if (GhostButton("cam-cover", "Tapar donde suele ir la cámara", ImGui::GetContentRegionAvail().x, Tone::Normal,
+                    28) &&
+        src_.width > 0 && src_.height > 0) {
+      // Donde la pone la captura con los ajustes de ahora (Pipeline::CameraRect):
+      // su ancho en % del vídeo, 16:9 y a 1/40 del alto del borde.
+      const Config& c = m.config;
+      const float pct = std::clamp(c.cameraSizePercent, 10, 50) / 100.0f;
+      const float camH = pct * float(src_.width) * 9.0f / 16.0f / float(src_.height);
+      const float mx = float(src_.height) / 40.0f / float(src_.width), my = 1.0f / 40.0f;
+      const bool left = c.cameraCorner.find("left") != std::string::npos;
+      const bool top = c.cameraCorner.find("top") != std::string::npos;
+      s_.blur = true;
+      s_.pixelate = false;
+      s_.blurW = std::min(1.0f, pct + 0.02f);
+      s_.blurH = std::min(1.0f, camH + 0.02f);
+      s_.blurX = std::clamp(left ? mx - 0.01f : 1.0f - pct - mx - 0.01f, 0.0f, 1.0f - s_.blurW);
+      s_.blurY = std::clamp(top ? my - 0.01f : 1.0f - camH - my - 0.01f, 0.0f, 1.0f - s_.blurH);
+      tab_ = 3; // allí se ve el recuadro y se ajusta
+    }
+    Gap(14);
+    Note("Los clips nuevos con la cámara se pueden editar aquí si está activado Ajustes > Cámara > «Poder editar la "
+         "cámara después».");
+    return;
+  }
+
+  if (ToolHeader("Cambiar la cámara", &s_.camEdit) && s_.camEdit) DefaultCamPlacement(&s_, src_);
+  Note(s_.camEdit ? "Arrástrala sobre la imagen para moverla; desde la esquina cambia de tamaño."
+                  : "Este clip guardó aparte lo que hay debajo de la cámara: se puede mover, cambiar de tamaño o "
+                    "quitar sin dejar hueco.");
+  if (!s_.camEdit) return;
+  Gap(10);
+  SwitchRow("Quitarla del vídeo", &s_.camHide);
+  if (s_.camHide) return;
+  Gap(14);
+
+  // Dónde: seis sitios con el mismo margen en los cuatro bordes.
+  ToolHeader("Dónde");
+  {
+    const EditGeometry g = ComputeGeometry(s_, src_);
+    const EditCamBox box = ComputeCamBox(s_, src_, g);
+    if (box.w > 0 && g.canvasW > 0 && g.canvasH > 0) {
+      const float bw = float(box.w) / float(g.canvasW), bh = float(box.h) / float(g.canvasH);
+      const float mx = 0.03f, my = 0.03f * float(g.canvasW) / float(g.canvasH);
+      const float xs[3] = {mx, (1.0f - bw) * 0.5f, 1.0f - bw - mx};
+      const float ys[2] = {my, 1.0f - bh - my};
+      int current = -1;
+      for (int i = 0; i < 6; ++i)
+        if (std::fabs(s_.camX - xs[i % 3]) < 0.004f && std::fabs(s_.camY - ys[i / 3]) < 0.004f) current = i;
+      static const std::vector<std::pair<int, std::string>> kPlaces = {
+          {0, "Arriba izq."}, {1, "Arriba"}, {2, "Arriba der."}, {3, "Abajo izq."}, {4, "Abajo"}, {5, "Abajo der."}};
+      const int place = ChoiceGrid("cam-place", kPlaces, current, 3);
+      if (place >= 0) {
+        s_.camX = std::max(0.0f, xs[place % 3]);
+        s_.camY = std::max(0.0f, ys[place / 3]);
+      }
+    }
+  }
+  Gap(14);
+
+  ToolHeader("Tamaño");
+  {
+    int pct = int(std::lround(s_.camW * 100.0f));
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::SliderInt("##cam-size", &pct, 8, 100, "%d %% del ancho", ImGuiSliderFlags_AlwaysClamp))
+      s_.camW = float(pct) / 100.0f;
+  }
+  Gap(14);
+
+  ToolHeader("Forma");
+  static const std::vector<std::pair<int, std::string>> kShapes = {
+      {int(EditCamShape::Original), "Como se grabó"}, {int(EditCamShape::Square), "Cuadrada"},
+      {int(EditCamShape::Circle), "Redonda"}};
+  const int shape = Segmented("cam-shape", kShapes, int(s_.camShape));
+  if (shape >= 0) s_.camShape = EditCamShape(shape);
+  Gap(14);
+
+  ToolHeader("Borde");
+  static const std::vector<std::pair<int, std::string>> kBorders = {{0, "Sin borde"}, {1, "Fino"}, {2, "Grueso"}};
+  const int border = Segmented("cam-border", kBorders, s_.camBorder);
+  if (border >= 0) s_.camBorder = border;
+  if (s_.camBorder > 0) {
+    Gap(8);
+    const uint32_t accent = Rgb(Colors().accent);
+    const int color = s_.camBorderColor == 0xFFFFFF ? 0 : s_.camBorderColor == 0x000000 ? 1 : 2;
+    static const std::vector<std::pair<int, std::string>> kColors = {{0, "Blanco"}, {1, "Negro"}, {2, "Del tema"}};
+    const int picked = Segmented("cam-border-color", kColors, color);
+    if (picked == 0) s_.camBorderColor = 0xFFFFFF;
+    else if (picked == 1) s_.camBorderColor = 0x000000;
+    else if (picked == 2) s_.camBorderColor = accent == 0xFFFFFF || accent == 0 ? 0x808080 : accent;
+  }
+  Gap(14);
+  SwitchRow("Espejo (izquierda y derecha)", &s_.camMirror);
+  Gap(10);
+  Note("En pausa se ve tal cual saldrá, con los colores de la pestaña Color.");
 }
 
 // ------------------------------------------------------------ guardar

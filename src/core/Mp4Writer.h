@@ -14,7 +14,9 @@
 namespace spectre {
 
 // Escribe paquetes ya codificados en un MP4 (remux, sin recodificar). Los
-// tiempos se desplazan para que el primer keyframe de vídeo sea t = 0.
+// tiempos se desplazan para que el primer keyframe de vídeo sea t = 0. La
+// pista 0 es el vídeo; otra de vídeo (el fondo de la webcam) no sale por
+// defecto en los reproductores y empieza en su primer keyframe.
 class Mp4Writer {
 public:
   ~Mp4Writer() { Close(); }
@@ -40,6 +42,7 @@ private:
   std::vector<int64_t> firstPts_;
   std::vector<int64_t> lastPts_;
   std::vector<int> dropped_;
+  std::vector<char> keySeen_; // pistas de vídeo además de la 0: ya empezaron en un keyframe
   bool haveOrigin_ = false;
   bool headerWritten_ = false;
   double writtenSeconds_ = 0;
@@ -48,7 +51,8 @@ private:
 
 // Escribe el clip de una pasada: el índice va en un hueco reservado al
 // principio, calculado con el número de paquetes. Si aun así no cupiera, se
-// reescribe con +faststart.
+// reescribe con +faststart. Las pistas sin ningún paquete en el clip (un
+// fondo de la webcam de antes de moverla) no se escriben.
 bool WriteClip(const std::string& path, const StreamList& streams,
                const std::vector<std::pair<SharedPacket, int>>& packets);
 

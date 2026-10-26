@@ -10,7 +10,9 @@ extern "C" {
 #include <libavfilter/buffersrc.h>
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
 
 #ifdef _WIN32
@@ -214,6 +216,21 @@ std::string TitleOf(const AVStream* st) {
   return {};
 }
 
+bool IsCamTrack(const AVStream* st) {
+  int x, y, w, h;
+  return st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ParseCamTrackTitle(TitleOf(st), &x, &y, &w, &h);
+}
+
+// La pista del vídeo: la que elige FFmpeg (la marcada por defecto), nunca la
+// del fondo de la cámara.
+int MainVideoStream(AVFormatContext* fmt) {
+  int v = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  if (v < 0 || !IsCamTrack(fmt->streams[v])) return v;
+  for (unsigned i = 0; i < fmt->nb_streams; ++i)
+    if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !IsCamTrack(fmt->streams[i])) return int(i);
+  return -1;
+}
+
 // --------------------------------------------------------------- color
 
 struct ColorParams {
@@ -306,7 +323,7 @@ bool ProbeEditSource(const std::string& path, EditSource* s, std::string* error)
     return false;
   }
   avformat_find_stream_info(in.p, nullptr);
-  int v = av_find_best_stream(in.p, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  int v = MainVideoStream(in.p);
   if (v < 0) {
     if (error) *error = "El archivo no tiene vídeo";
     return false;
@@ -342,10 +359,53 @@ bool ProbeEditSource(const std::string& path, EditSource* s, std::string* error)
     else if (title.rfind("Micr", 0) == 0) s->micTrack = int(i);
   }
   s->audio = s->mixTrack >= 0;
+  // Fondo de la cámara: si la cámara cambió de sitio mientras se grababa hay
+  // varias pistas; vale la última (la del final del clip).
+  int64_t camBps = 0;
+  for (unsigned i = 0; i < in.p->nb_streams; ++i) {
+    const AVStream* c = in.p->streams[i];
+    int x, y, w, h;
+    if (int(i) == v || c->codecpar->codec_type != AVMEDIA_TYPE_VIDEO || !avcodec_find_decoder(c->codecpar->codec_id) ||
+        !ParseCamTrackTitle(TitleOf(c), &x, &y, &w, &h))
+      continue;
+    x &= ~1;
+    y &= ~1;
+    w &= ~1;
+    h &= ~1;
+    if (x < 0 || y < 0 || w < 16 || h < 16 || x + w > s->width || y + h > s->height) continue;
+    s->camTrack = int(i);
+    s->camX = x;
+    s->camY = y;
+    s->camW = w;
+    s->camH = h;
+    camBps = std::max<int64_t>(0, c->codecpar->bit_rate);
+  }
   s->videoBps = st->codecpar->bit_rate;
   if (s->videoBps <= 0) {
     int64_t size = avio_size(in.p->pb);
-    if (size > 0) s->videoBps = std::max<int64_t>(0, int64_t(double(size) * 8.0 / s->duration) - audioBps);
+    if (size > 0)
+      s->videoBps = std::max<int64_t>(0, int64_t(double(size) * 8.0 / s->duration) - audioBps - camBps);
+  }
+  return true;
+}
+
+std::string CamTrackTitle(int x, int y, int w, int h) {
+  char buf[96];
+  snprintf(buf, sizeof(buf), "Fondo de la cámara %d,%d,%d,%d", x, y, w, h);
+  return buf;
+}
+
+bool ParseCamTrackTitle(const std::string& title, int* x, int* y, int* w, int* h) {
+  static const std::string kPrefix = "Fondo de la cámara ";
+  if (title.compare(0, kPrefix.size(), kPrefix) != 0) return false;
+  const char* p = title.data() + kPrefix.size();
+  const char* end = title.data() + title.size();
+  int* values[] = {x, y, w, h};
+  for (int i = 0; i < 4; ++i) {
+    if (i > 0 && (p == end || *p++ != ',')) return false;
+    const auto r = std::from_chars(p, end, *values[i]);
+    if (r.ec != std::errc()) return false;
+    p = r.ptr;
   }
   return true;
 }
@@ -539,7 +599,50 @@ EditGeometry ComputeGeometry(const EditSettings& s, const EditSource& src) {
 bool EditTouchesPicture(const EditSettings& s) {
   return s.aspect != EditAspect::Original || s.zoom > 1.001f || s.rotate % 360 != 0 || s.flipH || s.flipV ||
          s.brightness != 0 || s.contrast != 0 || s.saturation != 0 || s.look != EditLook::None || s.sharpen ||
-         s.vignette || s.fadeIn || s.fadeOut || !s.text.empty() || !s.watermark.empty() || s.blur;
+         s.vignette || s.fadeIn || s.fadeOut || !s.text.empty() || !s.watermark.empty() || s.blur || s.camEdit;
+}
+
+EditCamBox ComputeCamBox(const EditSettings& s, const EditSource& src, const EditGeometry& g) {
+  EditCamBox b;
+  if (!src.Webcam() || !s.camEdit || s.camHide || g.canvasW < 32 || g.canvasH < 32) return b;
+  const double aspect = s.camShape == EditCamShape::Original ? double(src.camW) / double(src.camH) : 1.0;
+  double w = std::clamp(double(s.camW), 0.05, 1.0) * g.canvasW;
+  double h = w / aspect;
+  if (h > g.canvasH) {
+    h = g.canvasH;
+    w = h * aspect;
+  }
+  b.w = std::clamp(Even(w), 16, g.canvasW & ~1);
+  b.h = std::clamp(Even(h), 16, g.canvasH & ~1);
+  b.x = std::clamp(int(std::lround(double(s.camX) * g.canvasW)) & ~1, 0, std::max(0, g.canvasW - b.w));
+  b.y = std::clamp(int(std::lround(double(s.camY) * g.canvasH)) & ~1, 0, std::max(0, g.canvasH - b.h));
+  return b;
+}
+
+void DefaultCamPlacement(EditSettings* s, const EditSource& src) {
+  if (!src.Webcam() || src.width <= 0 || src.height <= 0) return;
+  EditSettings probe = *s;
+  probe.camEdit = true;
+  probe.camHide = false;
+  const EditGeometry g = ComputeGeometry(probe, src);
+  const int rot = ((s->rotate % 360) + 360) % 360;
+  if (rot == 0 && !s->flipH && !s->flipV && g.canvasW == g.cropW && g.canvasH == g.cropH && g.cropW > 0 &&
+      g.cropH > 0 && src.camX >= g.cropX && src.camY >= g.cropY && src.camX + src.camW <= g.cropX + g.cropW &&
+      src.camY + src.camH <= g.cropY + g.cropH) {
+    // Se ve entera: donde estaba, con el mismo tamaño.
+    s->camX = float(src.camX - g.cropX) / float(g.cropW);
+    s->camY = float(src.camY - g.cropY) / float(g.cropH);
+    s->camW = float(src.camW) / float(g.cropW);
+    return;
+  }
+  // Si no, abajo a la derecha (en vertical, más grande: el lienzo es estrecho).
+  const bool tall = g.canvasH > g.canvasW;
+  s->camW = tall ? 0.42f : 0.25f;
+  const double aspect = s->camShape == EditCamShape::Original ? double(src.camW) / double(src.camH) : 1.0;
+  const double camH = g.canvasW > 0 ? double(s->camW) * g.canvasW / aspect / std::max(1, g.canvasH) : 0.2;
+  const float margin = 0.03f;
+  s->camX = std::max(0.0f, 1.0f - s->camW - margin);
+  s->camY = float(std::max(0.0, 1.0 - camH - margin * double(g.canvasW) / std::max(1, g.canvasH)));
 }
 
 namespace {
@@ -603,13 +706,420 @@ std::vector<EditOverlay> BuildOverlays(const EditSettings& s, int outW, int outH
   return out;
 }
 
+// --------------------------------------------------------------- fondo de la cámara
+
+namespace {
+
+// Formatos en los que se puede copiar y recortar por planos: 8 bits por
+// componente, sin paleta ni GPU (yuv420p de los decoders, bgr24 y bgra de la
+// vista previa).
+bool PlainFormat(int format) {
+  const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(format));
+  return d && d->nb_components >= 3 && d->comp[0].depth == 8 &&
+         !(d->flags & (AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_BITSTREAM));
+}
+
+// Punteros de cada plano de f en el píxel (x, y) (pares, para el croma).
+void PlanesAt(const AVFrame* f, int x, int y, const uint8_t* out[4]) {
+  const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(f->format));
+  int steps[4] = {};
+  av_image_fill_max_pixsteps(steps, nullptr, d);
+  for (int p = 0; p < 4; ++p) {
+    out[p] = nullptr;
+    if (!f->data[p]) continue;
+    const bool chroma = (p == 1 || p == 2) && !(d->flags & AV_PIX_FMT_FLAG_RGB);
+    const int sx = chroma ? d->log2_chroma_w : 0, sy = chroma ? d->log2_chroma_h : 0;
+    out[p] = f->data[p] + size_t(y >> sy) * size_t(f->linesize[p]) + size_t(x >> sx) * size_t(steps[p]);
+  }
+}
+
+// Copia src entero dentro de dst en (x, y). Mismo formato; x e y pares.
+void Blit(AVFrame* dst, const AVFrame* src, int x, int y) {
+  const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(AVPixelFormat(dst->format));
+  int steps[4] = {};
+  av_image_fill_max_pixsteps(steps, nullptr, d);
+  const int w = std::min(src->width, dst->width - x), h = std::min(src->height, dst->height - y);
+  if (w <= 0 || h <= 0) return;
+  const uint8_t* at[4];
+  PlanesAt(dst, x, y, at);
+  for (int p = 0; p < 4 && dst->data[p] && src->data[p]; ++p) {
+    const bool chroma = (p == 1 || p == 2) && !(d->flags & AV_PIX_FMT_FLAG_RGB);
+    const int sx = chroma ? d->log2_chroma_w : 0, sy = chroma ? d->log2_chroma_h : 0;
+    av_image_copy_plane(const_cast<uint8_t*>(at[p]), dst->linesize[p], src->data[p], src->linesize[p],
+                        AV_CEIL_RSHIFT(w, sx) * steps[p], AV_CEIL_RSHIFT(h, sy));
+  }
+}
+
+// Escala la región (x, y, w, h) de src a out (ya con formato y tamaño).
+bool ScaleRegion(SwsContext** sws, const AVFrame* src, int x, int y, int w, int h, AVFrame* out) {
+  *sws = sws_getCachedContext(*sws, w, h, AVPixelFormat(src->format), out->width, out->height,
+                              AVPixelFormat(out->format), SWS_BICUBIC, nullptr, nullptr, nullptr);
+  if (!*sws) return false;
+  const uint8_t* planes[4];
+  PlanesAt(src, x, y, planes);
+  return sws_scale(*sws, planes, src->linesize, 0, h, out->data, out->linesize) > 0;
+}
+
+} // namespace
+
+struct CamBackgroundReader::Impl {
+  FormatIn fmt;
+  Codec dec;
+  int stream = -1;
+  double start = 0, half = 1.0 / 120;
+  Frame cur, next;
+  bool haveCur = false, haveNext = false, positioned = false, eof = false;
+  double curTime = 0, nextTime = 0;
+  Packet pkt;
+  SwsContext* sws = nullptr;
+  ~Impl() { sws_freeContext(sws); }
+
+  double TimeOf(const AVFrame* f) const {
+    const int64_t ts = f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts;
+    return ts == AV_NOPTS_VALUE ? NAN : double(ts) * av_q2d(fmt.p->streams[stream]->time_base) - start;
+  }
+
+  void Seek(double t) {
+    const AVRational tb = fmt.p->streams[stream]->time_base;
+    const int64_t ts = av_rescale_q(std::llround((std::max(0.0, t) + start) * AV_TIME_BASE), AV_TIME_BASE_Q, tb);
+    av_seek_frame(fmt.p, stream, ts, AVSEEK_FLAG_BACKWARD);
+    avcodec_flush_buffers(dec.p);
+    av_frame_unref(cur.p);
+    av_frame_unref(next.p);
+    haveCur = haveNext = eof = false;
+    positioned = true;
+  }
+
+  // Decodifica hasta tener el último fotograma que empieza antes de t (cur)
+  // y el primero de después (next).
+  void Advance(double t) {
+    for (int guard = 0; guard < 100000; ++guard) {
+      if (haveNext && nextTime > t + half) return;
+      if (haveNext) {
+        std::swap(cur.p, next.p);
+        av_frame_unref(next.p);
+        curTime = nextTime;
+        haveCur = true;
+        haveNext = false;
+        continue;
+      }
+      if (eof) return;
+      const int r = avcodec_receive_frame(dec.p, next.p);
+      if (r == 0) {
+        nextTime = TimeOf(next.p);
+        if (std::isnan(nextTime)) nextTime = haveCur ? curTime + 2 * half : t;
+        haveNext = true;
+        continue;
+      }
+      if (r != AVERROR(EAGAIN)) {
+        eof = true;
+        continue;
+      }
+      for (;;) {
+        if (av_read_frame(fmt.p, pkt.p) < 0) {
+          avcodec_send_packet(dec.p, nullptr);
+          break;
+        }
+        const bool mine = pkt.p->stream_index == stream;
+        if (mine) avcodec_send_packet(dec.p, pkt.p); // uno dañado se salta
+        av_packet_unref(pkt.p);
+        if (mine) break;
+      }
+    }
+  }
+
+  // La pista solo tiene los fotogramas sobre los que se pintó la cámara, con
+  // el mismo tiempo que en el vídeo (ver CamBackground): si no hay uno en t
+  // (con `slack` de margen), la cámara no estaba ahí y no hay fondo.
+  const AVFrame* At(double t, double slack) {
+    if (!dec.p) return nullptr;
+    // Hacia atrás, o muy por delante sin saber aún qué viene (en un hueco de
+    // la pista ya se sabe: next está más allá de t).
+    if (!positioned || (haveCur && t < curTime - half) ||
+        (haveCur && !eof && t > curTime + 3.0 && !(haveNext && nextTime > t + half)))
+      Seek(t);
+    Advance(t);
+    if (haveCur && t - curTime <= slack) return cur.p;
+    // Al principio del clip la pista empieza en su primer keyframe (uno cada
+    // 0,25 s), un poco después que el vídeo: hasta ahí vale su primer fotograma.
+    if (!haveCur && haveNext && nextTime <= 0.5) return next.p;
+    return nullptr;
+  }
+};
+
+CamBackgroundReader::CamBackgroundReader() = default;
+CamBackgroundReader::~CamBackgroundReader() = default;
+
+bool CamBackgroundReader::Open(const std::string& path, int track) {
+  Close();
+  auto impl = std::make_unique<Impl>();
+  if (avformat_open_input(&impl->fmt.p, path.c_str(), nullptr, nullptr) < 0) return false;
+  avformat_find_stream_info(impl->fmt.p, nullptr);
+  if (track < 0 || track >= int(impl->fmt.p->nb_streams)) return false;
+  AVStream* st = impl->fmt.p->streams[track];
+  if (st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) return false;
+  const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+  impl->dec.p = codec ? avcodec_alloc_context3(codec) : nullptr;
+  if (!impl->dec.p || avcodec_parameters_to_context(impl->dec.p, st->codecpar) < 0) return false;
+  impl->dec.p->thread_count = 1; // pequeña: un hilo basta y no hay retraso de fotogramas
+  impl->dec.p->pkt_timebase = st->time_base;
+  if (avcodec_open2(impl->dec.p, codec, nullptr) < 0) {
+    avcodec_free_context(&impl->dec.p);
+    return false;
+  }
+  // Solo se leen los paquetes de esta pista.
+  for (unsigned i = 0; i < impl->fmt.p->nb_streams; ++i)
+    impl->fmt.p->streams[i]->discard = int(i) == track ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+  impl->stream = track;
+  impl->start = impl->fmt.p->start_time != AV_NOPTS_VALUE ? double(impl->fmt.p->start_time) / AV_TIME_BASE : 0.0;
+  const AVRational rate = av_guess_frame_rate(impl->fmt.p, st, nullptr);
+  if (rate.num > 0 && rate.den > 0) impl->half = 0.5 / std::max(1.0, av_q2d(rate));
+  impl_ = std::move(impl);
+  path_ = path;
+  return true;
+}
+
+void CamBackgroundReader::Close() {
+  impl_.reset();
+  path_.clear();
+}
+
+bool CamBackgroundReader::IsOpen() const { return impl_ && impl_->dec.p; }
+
+const AVFrame* CamBackgroundReader::At(double t) { return impl_ ? impl_->At(t, impl_->half) : nullptr; }
+
+bool CamBackgroundReader::ReadBgra(double t, std::vector<uint8_t>* bgra, int* width, int* height) {
+  // La vista previa pide el momento del reproductor, que no cae justo en un
+  // fotograma: vale el que se está viendo.
+  const AVFrame* f = impl_ ? impl_->At(t, impl_->half * 3) : nullptr;
+  if (!f || !PlainFormat(f->format) || f->width < 2 || f->height < 2) return false;
+  impl_->sws = sws_getCachedContext(impl_->sws, f->width, f->height, AVPixelFormat(f->format), f->width, f->height,
+                                    AV_PIX_FMT_BGRA, SWS_POINT, nullptr, nullptr, nullptr);
+  if (!impl_->sws) return false;
+  // Lo graba Spectre: BT.709 de rango limitado, como lo enseña el reproductor.
+  const int* coefs = sws_getCoefficients(SWS_CS_ITU709);
+  sws_setColorspaceDetails(impl_->sws, coefs, f->color_range == AVCOL_RANGE_JPEG ? 1 : 0, coefs, 1, 0, 1 << 16,
+                           1 << 16);
+  bgra->resize(size_t(f->width) * size_t(f->height) * 4);
+  uint8_t* dst[4] = {bgra->data(), nullptr, nullptr, nullptr};
+  int lines[4] = {f->width * 4, 0, 0, 0};
+  if (sws_scale(impl_->sws, f->data, f->linesize, 0, f->height, dst, lines) <= 0) return false;
+  *width = f->width;
+  *height = f->height;
+  return true;
+}
+
+namespace {
+
+// Separa la cámara de cada fotograma: le pone encima lo que había del juego
+// debajo (la pista aparte) y devuelve la cámara recortada, a su tamaño final,
+// con su forma y su borde, en YUVA 4:2:0 (sin pasar por RGB: los colores no
+// cambian). El grafo la pone en su sitio con overlay.
+class CamCompositor {
+public:
+  CamCompositor() = default;
+  CamCompositor(const CamCompositor&) = delete;
+  CamCompositor& operator=(const CamCompositor&) = delete;
+  ~CamCompositor() {
+    sws_freeContext(camSws_);
+    sws_freeContext(bgSws_);
+  }
+
+  // src con el tamaño de los fotogramas que llegarán (y el recuadro de la
+  // cámara en esos píxeles).
+  void Setup(const EditSettings& s, const EditSource& src, const EditGeometry& g) {
+    s_ = s;
+    src_ = src;
+    active_ = src.Webcam() && s.camEdit;
+    box_ = ComputeCamBox(s, src, g);
+    if (box_.w <= 0) return;
+    // Forma (alfa) y borde (cuánto de cada píxel es borde), a tamaño final.
+    const int w = box_.w, h = box_.h;
+    alpha_.assign(size_t(w) * size_t(h), 255);
+    edge_.assign(size_t(w) * size_t(h), 0);
+    const double side = std::min(w, h);
+    const double thick = s.camBorder <= 0 ? 0.0 : s.camBorder == 1 ? std::max(2.0, side * 0.025) : std::max(4.0, side * 0.06);
+    const bool round = s.camShape == EditCamShape::Circle;
+    const double cx = w * 0.5, cy = h * 0.5, r = side * 0.5;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        const size_t i = size_t(y) * size_t(w) + size_t(x);
+        if (round) {
+          const double d = std::hypot(x + 0.5 - cx, y + 0.5 - cy);
+          alpha_[i] = uint8_t(std::lround(std::clamp(r - d + 0.5, 0.0, 1.0) * 255));
+          if (thick > 0) edge_[i] = uint8_t(std::lround(std::clamp(d - (r - thick) + 0.5, 0.0, 1.0) * 255));
+        } else if (thick > 0) {
+          const double d = std::min({x + 0.5, w - x - 0.5, y + 0.5, h - y - 0.5});
+          edge_[i] = uint8_t(std::lround(std::clamp(thick - d + 0.5, 0.0, 1.0) * 255));
+        }
+      }
+    // Color del borde en YUV BT.709 de rango limitado, como el vídeo.
+    const double R = ((s.camBorderColor >> 16) & 255) / 255.0, G = ((s.camBorderColor >> 8) & 255) / 255.0,
+                 B = (s.camBorderColor & 255) / 255.0;
+    const double Y = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+    borderY_ = uint8_t(std::lround(16 + 219 * Y));
+    borderU_ = uint8_t(std::clamp(std::lround(128 + 224 * (B - Y) / 1.8556), 16L, 240L));
+    borderV_ = uint8_t(std::clamp(std::lround(128 + 224 * (R - Y) / 1.5748), 16L, 240L));
+  }
+
+  bool Active() const { return active_; }
+  const EditCamBox& Box() const { return box_; }
+
+  // frame: fotograma del original, ya escribible. background: el de la pista
+  // aparte en ese momento (o nullptr). cam: la cámara para el grafo, si va
+  // encima (si no, se queda vacío).
+  bool Process(AVFrame* frame, const AVFrame* background, AVFrame* cam) {
+    if (!active_ || !PlainFormat(frame->format)) return false;
+    // El recuadro, en píxeles de este fotograma.
+    const double kx = double(frame->width) / std::max(1, src_.width), ky = double(frame->height) / std::max(1, src_.height);
+    int rx = int(std::lround(src_.camX * kx)) & ~1, ry = int(std::lround(src_.camY * ky)) & ~1;
+    int rw = int(std::lround(src_.camW * kx)) & ~1, rh = int(std::lround(src_.camH * ky)) & ~1;
+    rx = std::clamp(rx, 0, std::max(0, frame->width - 2));
+    ry = std::clamp(ry, 0, std::max(0, frame->height - 2));
+    rw = std::min(rw, (frame->width - rx) & ~1);
+    rh = std::min(rh, (frame->height - ry) & ~1);
+    if (rw < 8 || rh < 8) return false;
+    // Sin fondo, en este fotograma no se veía la cámara (ver
+    // CamBackgroundReader::At): se deja como está y encima no va nada (el
+    // grafo repetiría la cámara anterior si no le llegara una transparente).
+    if (!background || !PlainFormat(background->format) || background->width < 2 || background->height < 2)
+      return box_.w <= 0 || Transparent(cam);
+
+    // 1. La cámara, antes de taparla.
+    if (box_.w > 0) {
+      int cx = rx, cy = ry, cw = rw, ch = rh;
+      if (s_.camShape != EditCamShape::Original) {
+        const int sq = std::min(rw, rh) & ~1;
+        cx = (rx + (rw - sq) / 2) & ~1;
+        cy = (ry + (rh - sq) / 2) & ~1;
+        cw = ch = sq;
+      }
+      cam->format = AV_PIX_FMT_YUVA420P;
+      cam->width = box_.w;
+      cam->height = box_.h;
+      if (av_frame_get_buffer(cam, 0) < 0 || !ScaleRegion(&camSws_, frame, cx, cy, cw, ch, cam)) return false;
+      Finish(cam);
+    }
+    // 2. Debajo, el fondo grabado aparte.
+    const AVFrame* patch = background;
+    if (background->format != frame->format || background->width != rw || background->height != rh) {
+      av_frame_unref(bg_.p);
+      bg_.p->format = frame->format;
+      bg_.p->width = rw;
+      bg_.p->height = rh;
+      if (av_frame_get_buffer(bg_.p, 0) < 0 ||
+          !ScaleRegion(&bgSws_, background, 0, 0, background->width & ~1, background->height & ~1, bg_.p))
+        return true;
+      patch = bg_.p;
+    }
+    Blit(frame, patch, rx, ry);
+    return true;
+  }
+
+private:
+  // Una cámara del tamaño final que no tapa nada.
+  bool Transparent(AVFrame* cam) const {
+    cam->format = AV_PIX_FMT_YUVA420P;
+    cam->width = box_.w;
+    cam->height = box_.h;
+    if (av_frame_get_buffer(cam, 0) < 0) return false;
+    const int ch = (box_.h + 1) / 2;
+    memset(cam->data[0], 16, size_t(cam->linesize[0]) * size_t(box_.h));
+    memset(cam->data[1], 128, size_t(cam->linesize[1]) * size_t(ch));
+    memset(cam->data[2], 128, size_t(cam->linesize[2]) * size_t(ch));
+    memset(cam->data[3], 0, size_t(cam->linesize[3]) * size_t(box_.h));
+    return true;
+  }
+
+  // Espejo, borde y forma sobre la cámara ya escalada.
+  void Finish(AVFrame* cam) {
+    const int w = cam->width, h = cam->height;
+    if (s_.camMirror) {
+      for (int p = 0; p < 4; ++p) {
+        const int pw = p == 1 || p == 2 ? (w + 1) / 2 : w, ph = p == 1 || p == 2 ? (h + 1) / 2 : h;
+        for (int y = 0; y < ph; ++y) std::reverse(cam->data[p] + size_t(y) * size_t(cam->linesize[p]),
+                                                  cam->data[p] + size_t(y) * size_t(cam->linesize[p]) + pw);
+      }
+    }
+    for (int y = 0; y < h; ++y) {
+      uint8_t* Y = cam->data[0] + size_t(y) * size_t(cam->linesize[0]);
+      uint8_t* A = cam->data[3] + size_t(y) * size_t(cam->linesize[3]);
+      const uint8_t* e = edge_.data() + size_t(y) * size_t(w);
+      memcpy(A, alpha_.data() + size_t(y) * size_t(w), size_t(w));
+      for (int x = 0; x < w; ++x)
+        if (e[x]) Y[x] = uint8_t((Y[x] * (255 - e[x]) + borderY_ * e[x] + 127) / 255);
+    }
+    for (int y = 0; y < (h + 1) / 2; ++y) {
+      uint8_t* U = cam->data[1] + size_t(y) * size_t(cam->linesize[1]);
+      uint8_t* V = cam->data[2] + size_t(y) * size_t(cam->linesize[2]);
+      for (int x = 0; x < (w + 1) / 2; ++x) {
+        const int x0 = std::min(2 * x, w - 1), x1 = std::min(2 * x + 1, w - 1);
+        const int y0 = std::min(2 * y, h - 1), y1 = std::min(2 * y + 1, h - 1);
+        const int e = (edge_[size_t(y0) * w + x0] + edge_[size_t(y0) * w + x1] + edge_[size_t(y1) * w + x0] +
+                       edge_[size_t(y1) * w + x1] + 2) / 4;
+        if (!e) continue;
+        U[x] = uint8_t((U[x] * (255 - e) + borderU_ * e + 127) / 255);
+        V[x] = uint8_t((V[x] * (255 - e) + borderV_ * e + 127) / 255);
+      }
+    }
+  }
+
+  EditSettings s_;
+  EditSource src_;
+  bool active_ = false;
+  EditCamBox box_;
+  std::vector<uint8_t> alpha_, edge_;
+  uint8_t borderY_ = 235, borderU_ = 128, borderV_ = 128;
+  SwsContext* camSws_ = nullptr;
+  SwsContext* bgSws_ = nullptr;
+  Frame bg_;
+};
+
+void FreeCamFrame(void*, uint8_t* data) {
+  AVFrame* f = reinterpret_cast<AVFrame*>(data);
+  av_frame_free(&f);
+}
+
+// La cámara viaja con su fotograma (en opaque_ref, que FFmpeg copia con cada
+// referencia): el Retimer repite o salta fotogramas y cada uno lleva la suya.
+void AttachCam(AVFrame* frame, AVFrame* cam) {
+  AVBufferRef* buf = av_buffer_create(reinterpret_cast<uint8_t*>(cam), 1, FreeCamFrame, nullptr, 0);
+  if (!buf) {
+    av_frame_free(&cam);
+    return;
+  }
+  av_buffer_unref(&frame->opaque_ref);
+  frame->opaque_ref = buf;
+}
+
+const AVFrame* CamOf(const AVFrame* frame) {
+  return frame->opaque_ref ? reinterpret_cast<const AVFrame*>(frame->opaque_ref->data) : nullptr;
+}
+
+// Pone la cámara del fotograma f en la entrada [cam] con el mismo pts.
+bool FeedCam(AVFilterContext* input, const AVFrame* f, int64_t pts) {
+  const AVFrame* cam = CamOf(f);
+  if (!input || !cam) return true; // sin cámara: overlay repite la anterior
+  Frame c;
+  if (av_frame_ref(c.p, cam) < 0) return false;
+  c.p->pts = pts;
+  c.p->duration = 1;
+  return av_buffersrc_add_frame_flags(input, c.p, 0) >= 0;
+}
+
+GraphInput CamInput(const EditCamBox& box, const EditGeometry& g) {
+  return {"cam", "buffer", VideoBufferArgs(box.w, box.h, AV_PIX_FMT_YUVA420P, {g.fpsDen, g.fpsNum}, {1, 1})};
+}
+
+} // namespace
+
 namespace {
 
 // Descripción del grafo de vídeo: [in] (y [ov0], [ov1]... para el texto) ->
 // [out]. tail se pone antes de la salida (format=..., palettegen...).
 std::string VideoChain(const EditSettings& s, const EditGeometry& g, double length,
-                       const std::vector<EditOverlay>& overlays, const std::string& tail, int previewW = 0,
-                       int previewH = 0) {
+                       const std::vector<EditOverlay>& overlays, const std::string& tail, const EditCamBox& cam,
+                       int previewW = 0, int previewH = 0) {
   std::string f = "[in]format=yuv420p";
   auto add = [&](const std::string& x) { f += "," + x; };
   const int rot = ((s.rotate % 360) + 360) % 360;
@@ -635,6 +1145,9 @@ std::string VideoChain(const EditSettings& s, const EditGeometry& g, double leng
     add("scale=" + Int(g.fgW) + ":" + Int(g.fgH) + ":flags=bicubic,pad=" + Int(g.canvasW) + ":" + Int(g.canvasH) + ":" +
         Int((g.canvasW - g.fgW) / 2) + ":" + Int((g.canvasH - g.fgH) / 2) + ":black");
   }
+  // La cámara en su sitio nuevo ([cam], ya con su forma), antes del color: se
+  // ve con el mismo estilo que el resto.
+  if (cam.w > 0) f += "[cb];[cb][cam]overlay=" + Int(cam.x) + ":" + Int(cam.y);
   if (s.blur) {
     // Zona difuminada o pixelada: se recorta, se reduce y se vuelve a poner encima.
     const int zw = std::clamp(Even(s.blurW * g.canvasW), 16, g.canvasW & ~1);
@@ -768,7 +1281,7 @@ public:
     }
     avformat_find_stream_info(fmt_.p, nullptr);
     start_ = fmt_.p->start_time != AV_NOPTS_VALUE ? double(fmt_.p->start_time) / AV_TIME_BASE : 0.0;
-    vIndex_ = av_find_best_stream(fmt_.p, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    vIndex_ = MainVideoStream(fmt_.p);
     if (video) {
       if (vIndex_ < 0 || !OpenStreamDecoder(fmt_.p->streams[vIndex_], threads, &vdec_.p)) {
         *error = "No se pudo decodificar el vídeo";
@@ -819,6 +1332,12 @@ public:
 
   int64_t VideoFrames() const { return retimer_.Emitted(); }
   const AVCodecContext* VideoDecoder() const { return vdec_.p; }
+  // Cambiar la cámara: cada fotograma sale sin ella (con el fondo de la pista
+  // aparte) y con la cámara pegada para el grafo (ver AttachCam).
+  void SetCam(CamCompositor* cam, CamBackgroundReader* background) {
+    cam_ = cam && cam->Active() ? cam : nullptr;
+    camBg_ = background && background->IsOpen() ? background : nullptr;
+  }
 
 private:
   struct Track {
@@ -1016,6 +1535,12 @@ private:
         vDone = true;
         return true;
       }
+      if (cam_) {
+        if (av_frame_make_writable(f) < 0) return false;
+        AVFrame* cam = av_frame_alloc();
+        if (cam && cam_->Process(f, camBg_ ? camBg_->At(t) : nullptr, cam) && cam->data[0]) AttachCam(f, cam);
+        else av_frame_free(&cam);
+      }
       const int r = onVideoFrame(f, t);
       if (r < 0) vDone = true;
       return r != 0;
@@ -1141,6 +1666,8 @@ private:
   AudioOut onAudio_;
   std::function<void(double)> onTime_;
   std::string* error_ = nullptr;
+  CamCompositor* cam_ = nullptr;
+  CamBackgroundReader* camBg_ = nullptr;
 };
 
 // Pistas de audio que se leen: juego y micro si están aparte; si no, la primera.
@@ -1214,12 +1741,29 @@ struct PassContext {
   int threads;
   const std::atomic<bool>& cancel;
   std::function<void(double)> progress; // 0..1 de esta pasada
+  EditCamBox cam;                       // la cámara en su sitio nuevo (w = 0: no se pone)
+};
+
+// Cambiar la cámara en una pasada: el compositor y el lector de la pista aparte.
+struct PassCam {
+  CamCompositor compositor;
+  CamBackgroundReader background;
+  void Attach(PassContext& c, Reader& reader) {
+    if (!c.src.Webcam() || !c.job.settings.camEdit) return;
+    compositor.Setup(c.job.settings, c.src, c.g);
+    if (!background.Open(c.job.input, c.src.camTrack))
+      Log("Editor: no se pudo leer la pista del fondo de la cámara; se mueve sin quitarla del todo");
+    reader.SetCam(&compositor, &background);
+  }
 };
 
 // Paleta del GIF: una pasada con palettegen; devuelve su único fotograma.
 Outcome GifPalette(PassContext& c, AVFrame* palette, std::string* error) {
   Reader reader(c.src, c.g, c.cancel);
   if (!reader.Open(c.job.input, true, {}, c.threads, error)) return Outcome::Failed;
+  PassCam cam;
+  cam.Attach(c, reader);
+  AVFilterContext* camIn = nullptr;
   Graph graph;
   Frame out;
   bool got = false;
@@ -1242,12 +1786,17 @@ Outcome GifPalette(PassContext& c, AVFrame* palette, std::string* error) {
                                                       {c.g.fpsDen, c.g.fpsNum}, f->sample_aspect_ratio)}};
       auto ov = OverlayInputs(c.overlays);
       ins.insert(ins.end(), ov.begin(), ov.end());
-      if (!BuildGraph(&graph, VideoChain(c.job.settings, c.g, c.length, c.overlays, "palettegen=stats_mode=full"),
-                      ins, false, c.threads, error) ||
+      if (c.cam.w > 0) ins.push_back(CamInput(c.cam, c.g));
+      if (!BuildGraph(&graph,
+                      VideoChain(c.job.settings, c.g, c.length, c.overlays, "palettegen=stats_mode=full", c.cam), ins,
+                      false, c.threads, error) ||
           !FeedOverlays(graph, 1, c.overlays))
         return false;
+      if (c.cam.w > 0) camIn = graph.inputs.back();
     }
+    if (!FeedCam(camIn, f, index)) return false;
     if (av_frame_ref(tmp.p, f) < 0) return false;
+    av_buffer_unref(&tmp.p->opaque_ref);
     tmp.p->pts = index;
     int r = av_buffersrc_add_frame_flags(graph.inputs[0], tmp.p, 0);
     av_frame_unref(tmp.p);
@@ -1256,7 +1805,8 @@ Outcome GifPalette(PassContext& c, AVFrame* palette, std::string* error) {
   Outcome o = reader.Run(c.segments, onVideo, [](AVFrame* const*, int) { return true; },
                          [&](double t) { if (c.progress) c.progress(t / c.length); }, error);
   if (o != Outcome::Done) return o;
-  if (!graph.g || av_buffersrc_add_frame_flags(graph.inputs[0], nullptr, 0) < 0 || !drain() || !got) {
+  if (!graph.g || (camIn && av_buffersrc_add_frame_flags(camIn, nullptr, 0) < 0) ||
+      av_buffersrc_add_frame_flags(graph.inputs[0], nullptr, 0) < 0 || !drain() || !got) {
     if (error->empty()) *error = "No se pudo hacer la paleta del GIF";
     return Outcome::Failed;
   }
@@ -1278,6 +1828,9 @@ Outcome Encode(PassContext& c, const std::string& output, const AVFrame* palette
 
   Reader reader(c.src, c.g, c.cancel);
   if (!reader.Open(c.job.input, video, audioStreams, c.threads, error)) return Outcome::Failed;
+  PassCam cam;
+  if (video) cam.Attach(c, reader);
+  AVFilterContext* camIn = nullptr;
 
   FormatOut out;
   const char* muxer = gif ? "gif" : video ? "mp4" : "ipod";
@@ -1381,24 +1934,29 @@ Outcome Encode(PassContext& c, const std::string& output, const AVFrame* palette
       std::string desc;
       if (gif) {
         ins.push_back({"pal", "buffer", VideoBufferArgs(palette->width, palette->height, palette->format, {1, 1}, {1, 1})});
-        desc = VideoChain(s, c.g, c.length, c.overlays, "");
+        desc = VideoChain(s, c.g, c.length, c.overlays, "", c.cam);
         desc.erase(desc.size() - strlen("[out]"));
         desc += "[x];[x][pal]paletteuse=dither=sierra2_4a[out]";
       } else {
-        desc = VideoChain(s, c.g, c.length, c.overlays, std::string("format=") + pixFmt);
+        desc = VideoChain(s, c.g, c.length, c.overlays, std::string("format=") + pixFmt, c.cam);
       }
+      const size_t palIndex = ins.size() - 1;
+      if (c.cam.w > 0) ins.push_back(CamInput(c.cam, c.g));
       if (!BuildGraph(&vgraph, desc, ins, false, c.threads, error) || !FeedOverlays(vgraph, 1, c.overlays))
         return false;
+      if (c.cam.w > 0) camIn = vgraph.inputs.back();
       if (gif) {
         Frame pal;
         if (av_frame_ref(pal.p, palette) < 0) return false;
         pal.p->pts = 0;
-        AVFilterContext* palIn = vgraph.inputs.back();
+        AVFilterContext* palIn = vgraph.inputs[palIndex];
         if (av_buffersrc_add_frame_flags(palIn, pal.p, 0) < 0 || av_buffersrc_add_frame_flags(palIn, nullptr, 0) < 0)
           return false;
       }
     }
+    if (!FeedCam(camIn, f, index)) return false;
     if (av_frame_ref(tmp.p, f) < 0) return false;
+    av_buffer_unref(&tmp.p->opaque_ref);
     tmp.p->pts = index;
     tmp.p->duration = 1;
     int r = av_buffersrc_add_frame_flags(vgraph.inputs[0], tmp.p, 0);
@@ -1453,7 +2011,8 @@ Outcome Encode(PassContext& c, const std::string& output, const AVFrame* palette
       *error = "No se pudo decodificar ningún fotograma del vídeo";
       return Outcome::Failed;
     }
-    ok = av_buffersrc_add_frame_flags(vgraph.inputs[0], nullptr, 0) >= 0 && drainVideo() &&
+    ok = (!camIn || av_buffersrc_add_frame_flags(camIn, nullptr, 0) >= 0) &&
+         av_buffersrc_add_frame_flags(vgraph.inputs[0], nullptr, 0) >= 0 && drainVideo() &&
          enc.Send(venc.p, vOut, nullptr, pkt.p);
   }
   if (ok && audio) {
@@ -1504,7 +2063,7 @@ EditResult RenderEdit(const EditJob& job, const std::atomic<bool>& cancel, const
   }
   const EditGeometry g = ComputeGeometry(s, src);
   const int threads = job.gentle ? 1 : std::clamp(int(std::thread::hardware_concurrency()) / 2, 1, 4);
-  PassContext c{job, src, segments, g, length, {}, threads, cancel, nullptr};
+  PassContext c{job, src, segments, g, length, {}, threads, cancel, nullptr, ComputeCamBox(s, src, g)};
   if (s.format != EditFormat::Audio) c.overlays = BuildOverlays(s, g.outW, g.outH, job.raster);
 
   const std::string part = job.output + ".part"; // la biblioteca no lo ve hasta que está completo
@@ -1547,11 +2106,21 @@ EditResult RenderEdit(const EditJob& job, const std::atomic<bool>& cancel, const
 
 bool RenderEditPreview(const EditSettings& settings, const EditSource& source, const uint8_t* bgr, int width,
                        int height, double sourceSeconds, const TextRasterizer& raster, int maxW, int maxH,
-                       std::vector<uint8_t>* bgra, int* outW, int* outH, std::string* error) {
+                       std::vector<uint8_t>* bgra, int* outW, int* outH, std::string* error, EditImage camBackground) {
   if (!bgr || width < 16 || height < 16) return false;
   // El fotograma del reproductor manda: si su tamaño no es el que dijo FFmpeg
-  // (alto de 1088 en vez de 1080...), la geometría se calcula con el suyo.
+  // (alto de 1088 en vez de 1080...), la geometría se calcula con el suyo. El
+  // recuadro de la cámara solo se escala si de verdad es otro tamaño (no unas
+  // filas de relleno).
   EditSource src = source;
+  if (src.Webcam() && source.width > 0 && source.height > 0 &&
+      (std::abs(width - source.width) > 16 || std::abs(height - source.height) > 16)) {
+    const double kx = double(width) / source.width, ky = double(height) / source.height;
+    src.camX = int(src.camX * kx) & ~1;
+    src.camY = int(src.camY * ky) & ~1;
+    src.camW = int(src.camW * kx) & ~1;
+    src.camH = int(src.camH * ky) & ~1;
+  }
   src.width = width;
   src.height = height;
   EditSettings s = settings;
@@ -1580,14 +2149,7 @@ bool RenderEditPreview(const EditSettings& settings, const EditSource& source, c
     overlayKey = std::move(key);
   }
   const std::vector<EditOverlay>& overlays = overlayCache;
-  std::vector<GraphInput> ins = {
-      {"in", "buffer", VideoBufferArgs(width, height, AV_PIX_FMT_BGR24, {g.fpsDen, g.fpsNum}, {1, 1})}};
-  auto ov = OverlayInputs(overlays);
-  ins.insert(ins.end(), ov.begin(), ov.end());
-  Graph graph;
-  if (!BuildGraph(&graph, VideoChain(s, g, length, overlays, "format=bgra", pw, ph), ins, false, 1, error) ||
-      !FeedOverlays(graph, 1, overlays))
-    return false;
+
   Frame in;
   in.p->format = AV_PIX_FMT_BGR24;
   in.p->width = width;
@@ -1597,6 +2159,42 @@ bool RenderEditPreview(const EditSettings& settings, const EditSource& source, c
     memcpy(in.p->data[0] + size_t(y) * size_t(in.p->linesize[0]), bgr + size_t(y) * size_t(width) * 3,
            size_t(width) * 3);
   in.p->pts = int64_t(std::floor(t * g.fps + 0.5));
+
+  // La cámara: fuera de su sitio y, si va, en el nuevo.
+  CamCompositor compositor;
+  Frame cam;
+  EditCamBox camBox;
+  if (src.Webcam() && s.camEdit) {
+    compositor.Setup(s, src, g);
+    Frame background;
+    const AVFrame* bg = nullptr;
+    if (camBackground.data && camBackground.width >= 2 && camBackground.height >= 2) {
+      background.p->format = AV_PIX_FMT_BGRA;
+      background.p->width = camBackground.width;
+      background.p->height = camBackground.height;
+      background.p->data[0] = const_cast<uint8_t*>(camBackground.data);
+      background.p->linesize[0] = camBackground.width * 4;
+      bg = background.p;
+    }
+    if (compositor.Process(in.p, bg, cam.p) && cam.p->data[0]) camBox = compositor.Box();
+    background.p->data[0] = nullptr; // no es suyo
+  }
+
+  std::vector<GraphInput> ins = {
+      {"in", "buffer", VideoBufferArgs(width, height, AV_PIX_FMT_BGR24, {g.fpsDen, g.fpsNum}, {1, 1})}};
+  auto ov = OverlayInputs(overlays);
+  ins.insert(ins.end(), ov.begin(), ov.end());
+  if (camBox.w > 0) ins.push_back(CamInput(camBox, g));
+  Graph graph;
+  if (!BuildGraph(&graph, VideoChain(s, g, length, overlays, "format=bgra", camBox, pw, ph), ins, false, 1, error) ||
+      !FeedOverlays(graph, 1, overlays))
+    return false;
+  if (camBox.w > 0) {
+    cam.p->pts = in.p->pts;
+    AVFilterContext* camIn = graph.inputs.back();
+    if (av_buffersrc_add_frame_flags(camIn, cam.p, 0) < 0 || av_buffersrc_add_frame_flags(camIn, nullptr, 0) < 0)
+      return false;
+  }
   if (av_buffersrc_add_frame_flags(graph.inputs[0], in.p, 0) < 0 ||
       av_buffersrc_add_frame_flags(graph.inputs[0], nullptr, 0) < 0)
     return false;

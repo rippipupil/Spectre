@@ -15,6 +15,17 @@ void ReplayBuffer::Configure(const StreamList& streams, double seconds, size_t m
   Publish();
 }
 
+int ReplayBuffer::AddStream(const StreamDesc& stream) {
+  std::lock_guard lock(mutex_);
+  streams_.push_back(stream);
+  return int(streams_.size()) - 1;
+}
+
+StreamList ReplayBuffer::Streams() {
+  std::lock_guard lock(mutex_);
+  return streams_;
+}
+
 void ReplayBuffer::Clear() {
   std::lock_guard lock(mutex_);
   entries_.clear();

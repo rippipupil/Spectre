@@ -87,6 +87,9 @@ std::string KindName(const MediaItem& item) {
 // Se puede abrir en «Editar»: vídeo con imagen.
 bool Editable(const MediaItem& item) { return item.Video() && !item.audioOnly; }
 
+// Se puede abrir en el editor de fotos: una imagen que no sea un GIF animado.
+bool PhotoEditable(const MediaItem& item) { return item.kind == MediaKind::Screenshot && !IsGif(item); }
+
 // «Para Discord» de varios: los vídeos con imagen que no son ya una copia para Discord.
 bool ExportableForDiscord(const MediaItem& item) { return Editable(item) && item.kind != MediaKind::Export; }
 
@@ -195,8 +198,8 @@ struct NavEntry {
 std::vector<NavEntry> MainEntries(const AppModel& m) {
   return {
       {1, "Inicio", Icon::Home, m.page == AppPage::Home, AppPage::Home},
-      {2, "Biblioteca", Icon::Grid, m.page == AppPage::Library || m.page == AppPage::Viewer || m.page == AppPage::Editor,
-       AppPage::Library},
+      {2, "Biblioteca", Icon::Grid, m.page == AppPage::Library || m.page == AppPage::Viewer, AppPage::Library},
+      {3, "Editor", Icon::Scissors, m.page == AppPage::Editor, AppPage::Editor},
   };
 }
 
@@ -237,7 +240,8 @@ int PageNumber(AppPage page, SettingsPage settings) {
   switch (page) {
   case AppPage::Home: return 1;
   case AppPage::Library: return 2;
-  case AppPage::Settings: return 3 + int(settings);
+  case AppPage::Editor: return 3;
+  case AppPage::Settings: return 4 + int(settings);
   default: return 0;
   }
 }
@@ -249,6 +253,7 @@ int PageNumber(AppPage page, SettingsPage settings) {
 void AppUi::OnOpened(HWND notifyWindow, UINT notifyMsg) {
   worker_.Start(notifyWindow, notifyMsg);
   editor_.Start(notifyWindow, notifyMsg);
+  photo_.Start(notifyWindow, notifyMsg);
   frame_ = 0;
   openedAt_ = pageSince_ = GetTickCount64();
 }
@@ -260,6 +265,7 @@ void AppUi::OnClosed() {
   durationFailed_.clear();
   player_.Close();
   editor_.Stop();
+  photo_.Stop();
   playerPath_.clear();
   playerFailed_ = false;
   image_.reset();
@@ -291,8 +297,15 @@ void AppUi::LeaveViewer() {
 
 void AppUi::Navigate(AppModel& m, AppPage page) {
   if (m.page == AppPage::Viewer && page != AppPage::Viewer) LeaveViewer();
-  if (m.page == AppPage::Editor && page != AppPage::Editor) editor_.Leave();
+  if (m.page == AppPage::Editor && page != AppPage::Editor) LeaveEditors();
+  // Desde la pestaña Editor, Volver lleva a elegir otro.
+  if (page == AppPage::Editor && m.page != AppPage::Editor) m.viewBack = AppPage::Editor;
   m.page = page;
+}
+
+void AppUi::LeaveEditors() {
+  editor_.Leave();
+  photo_.Leave();
 }
 
 void AppUi::Edit(AppModel& m, const std::string& path) {
@@ -412,6 +425,7 @@ void AppUi::AskDeleteSelection(AppModel& m) {
 
 void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
   editor_.TakeResults(w);
+  photo_.TakeResults(w);
   for (auto& r : worker_.Take()) {
     switch (r.job) {
     case MediaWorker::Job::Thumbnail: {
@@ -507,6 +521,7 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   // Navegación desde fuera (el panel, la bandeja): el visor no se queda sonando.
   if (m.page != AppPage::Viewer && (!playerPath_.empty() || !imagePath_.empty())) LeaveViewer();
   if (m.page != AppPage::Editor && editor_.Active()) editor_.Leave();
+  if (m.page != AppPage::Editor && photo_.Active()) photo_.Leave();
   // En Ajustes se ve el tema elegido antes de aplicarlo.
   const Config& look = m.page == AppPage::Settings ? m.settings.config : m.config;
   BeginFrame(Fonts{w.Scale(), w.BoldFont(), w.BigFont(), &w.FontSizes()}, look);
@@ -1276,7 +1291,7 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   }
   std::string path = item->path;
   if (ImGui::MenuItem("Abrir")) View(m, path, m.page);
-  if (Editable(*item) && ImGui::MenuItem("Editar...")) Edit(m, path);
+  if ((Editable(*item) || PhotoEditable(*item)) && ImGui::MenuItem("Editar...")) Edit(m, path);
   if (ImGui::MenuItem("Abrir con Windows")) a.openPath(path);
   if (ImGui::MenuItem("Mostrar en la carpeta")) a.showInFolder(path);
   if (ImGui::MenuItem("Copiar para pegar en Discord")) a.copyToClipboard(path);
@@ -1955,6 +1970,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
   const MediaItem item = *found; // copia: la lista puede cambiar en este frame (renombrar, borrar)
   const bool video = item.Video();
   const bool editable = Editable(item); // vídeo con imagen (no el M4A de «Solo audio»)
+  const bool photoEditable = PhotoEditable(item);
 
   // Abre el archivo en el reproductor o pide la imagen.
   if (video && playerPath_ != item.path) {
@@ -2007,7 +2023,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     const bool exporting = m.exportPercent >= 0;
     const bool exportingThis = exporting && m.exportPath == item.path;
     if (exportingThis) sub = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %";
-    const int actions = editable ? 8 : 6;
+    const int actions = editable ? 8 : photoEditable ? 7 : 6;
     float actionsW = rowH * float(actions) + Px(4) * float(actions - 1);
     Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(exportingThis ? p.accent : p.textMuted),
          Ellipsize(ImGui::GetFont(), Px(kSmall), sub, ImGui::GetContentRegionAvail().x - rowH - actionsW - Px(30)).c_str());
@@ -2044,6 +2060,16 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
                                       : "Exportar para Discord: una copia de menos de 20 MB que se ve en el chat. "
                                         "El original no cambia.")) {
         a.exportForDiscord(item.path); // si hay otra en marcha, el aviso lo dice
+      }
+      ImGui::SameLine(0, Px(4));
+    }
+    if (photoEditable) {
+      if (IconButton("edit", Icon::Sliders, rowH,
+                     "Editar (E): recortar, girar, color, flechas, texto, tapar un nombre... El original no cambia.")) {
+        Edit(m, item.path);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        return;
       }
       ImGui::SameLine(0, Px(4));
     }
@@ -2268,6 +2294,12 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
         return;
       }
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_E, false) && photoEditable) {
+      Edit(m, item.path);
+      ImGui::EndChild();
+      ImGui::PopStyleVar();
+      return;
+    }
     if (ImGui::IsKeyPressed(ImGuiKey_F, false)) a.setFavorite(item.path, !item.favorite);
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
       deletePath_ = item.path;
@@ -2284,11 +2316,18 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
 // ------------------------------------------------------------------ editar
 
 void AppUi::PageEditor(AppWindow& w, AppModel& m, const AppActions& a) {
+  if (m.editPath.empty()) {
+    EditorPicker(w, m);
+    return;
+  }
   const MediaItem* found = Find(m, m.editPath);
-  if (!found) {
+  if (!found || (!Editable(*found) && !PhotoEditable(*found))) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(28), Px(20)));
     ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
-    if (GhostButton("back", "Volver", Px(110))) Navigate(m, m.viewBack);
+    if (GhostButton("back", "Volver", Px(110))) {
+      if (m.viewBack == AppPage::Editor) m.editPath.clear();
+      else Navigate(m, m.viewBack);
+    }
     Gap(10);
     Help(m.itemsLoaded ? "Este archivo ya no está en la carpeta." : "Leyendo la carpeta...");
     ImGui::EndChild();
@@ -2296,15 +2335,126 @@ void AppUi::PageEditor(AppWindow& w, AppModel& m, const AppActions& a) {
     return;
   }
   const MediaItem item = *found; // copia: la lista puede cambiar en este frame
-  if (!editor_.Active() || editor_.Path() != item.path) editor_.Open(item.path);
-  const EditorUi::Exit exit = editor_.Draw(w, m, a, item);
-  if (!exit.view.empty()) {
-    editor_.Leave();
-    View(m, exit.view, m.viewBack);
-  } else if (exit.back) {
-    editor_.Leave();
-    m.viewPath = item.path;
-    m.page = AppPage::Viewer;
+  lastEdit_ = item.path;
+  std::string view;
+  bool back = false;
+  if (item.Video()) {
+    if (photo_.Active()) photo_.Leave();
+    if (!editor_.Active() || editor_.Path() != item.path) editor_.Open(item.path);
+    const EditorUi::Exit exit = editor_.Draw(w, m, a, item);
+    view = exit.view;
+    back = exit.back;
+  } else {
+    if (editor_.Active()) editor_.Leave();
+    if (!photo_.Active() || photo_.Path() != item.path) photo_.Open(item.path);
+    const PhotoEditorUi::Exit exit = photo_.Draw(w, m, a, item);
+    view = exit.view;
+    back = exit.back;
+  }
+  // Abierto desde la pestaña Editor: Volver (y Volver desde la copia que se
+  // abre en el visor) lleva a elegir otro.
+  const bool fromTab = m.viewBack == AppPage::Editor;
+  if (!view.empty()) {
+    LeaveEditors();
+    if (fromTab) m.editPath.clear();
+    View(m, view, m.viewBack);
+  } else if (back) {
+    LeaveEditors();
+    if (fromTab) {
+      m.editPath.clear();
+    } else {
+      m.viewPath = item.path;
+      m.page = AppPage::Viewer;
+    }
+  }
+}
+
+void AppUi::EditorPicker(AppWindow& w, AppModel& m) {
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(CurrentStyle().pad), Px(CurrentStyle().pad * 0.8f)));
+  ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  PageTitle("Editor", "Elige un vídeo o una captura para editarla. Se guarda una copia: el original no cambia.",
+            PageNumber(AppPage::Editor, m.settingsPage));
+
+  // Vídeos o capturas, y buscar por nombre o juego.
+  std::vector<const MediaItem*> list;
+  const std::string needle = Lower(pickSearch_);
+  for (const auto& item : m.items) {
+    if (pickFilter_ == 0 ? !Editable(item) : !PhotoEditable(item)) continue;
+    if (!needle.empty() && Lower(item.name).find(needle) == std::string::npos &&
+        Lower(Title(item)).find(needle) == std::string::npos)
+      continue;
+    list.push_back(&item);
+  }
+  {
+    static const std::vector<std::pair<int, std::string>> filters = {{0, "Vídeos"}, {1, "Capturas"}};
+    const float segW = std::min(Px(240), ImGui::GetContentRegionAvail().x * 0.4f);
+    if (int v = Segmented("pick-filter", filters, pickFilter_, segW); v >= 0) pickFilter_ = v;
+    ImGui::SameLine(0, Px(12));
+    // Lo último que se editó, para seguir donde se dejó (los cambios siguen ahí).
+    const MediaItem* last = lastEdit_.empty() ? nullptr : Find(m, lastEdit_);
+    if (last && (Editable(*last) || PhotoEditable(*last))) {
+      const std::string label = Ellipsize(ImGui::GetFont(), Px(kSmall), "Seguir con " + last->name, Px(260));
+      const float bw = TextSize(ImGui::GetFont(), Px(kSmall), label.c_str()).x + Px(28);
+      if (GhostButton("resume", label.c_str(), bw)) {
+        m.viewBack = AppPage::Editor;
+        Edit(m, last->path);
+      }
+      ImGui::SameLine(0, Px(12));
+    }
+    ImGui::SetNextItemWidth(std::max(Px(120), ImGui::GetContentRegionAvail().x - Px(12)));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (Px(32) - ImGui::GetFrameHeight()) * 0.5f);
+    ImGui::InputTextWithHint("##pick-search", "Buscar", &pickSearch_);
+  }
+  Gap(16);
+
+  if (list.empty()) {
+    if (!m.itemsLoaded) Help("Leyendo la carpeta...");
+    else if (!needle.empty()) Help("Nada coincide con la búsqueda.");
+    else if (pickFilter_ == 0) Help("Aún no hay vídeos. Los clips y grabaciones que guardes aparecerán aquí.");
+    else {
+      const std::string key = m.config.hotkeys.screenshot.empty() ? "la tecla de captura" : m.config.hotkeys.screenshot;
+      Help(("Aún no hay capturas. Las de " + key + " y los fotogramas que guardes aparecerán aquí.").c_str());
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    return;
+  }
+
+  // Rejilla como la de la biblioteca: un clic abre el editor.
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGui::BeginChild("pick-grid", ImVec2(0, 0), ImGuiChildFlags_None);
+  DrawHoverTrail(ImGui::GetWindowDrawList());
+  const float gap = Px(CurrentStyle().gap);
+  const float avail = ImGui::GetContentRegionAvail().x - Px(12);
+  const int cols = std::max(1, int((avail + gap) / (Px(250) + gap)));
+  const float cardW = std::floor((avail - gap * float(cols - 1)) / float(cols));
+  const float rowH = MediaCardHeight(cardW) + gap;
+  const int rows = int((list.size() + size_t(cols) - 1) / size_t(cols));
+  std::string open;
+  ImGuiListClipper clipper;
+  clipper.Begin(rows, rowH);
+  while (clipper.Step()) {
+    for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+      for (int c = 0; c < cols; ++c) {
+        const size_t i = size_t(r) * size_t(cols) + size_t(c);
+        if (i >= list.size()) break;
+        if (c > 0) ImGui::SameLine(0, gap);
+        ImGui::PushID(int(i));
+        bool menu = false; // aquí no hay menú: se elige con un clic
+        if (Card(w, *list[i], cardW, &menu, -1, int(i) + 1)) open = list[i]->path;
+        ImGui::PopID();
+      }
+      ImGui::Dummy(ImVec2(0, gap - ImGui::GetStyle().ItemSpacing.y));
+    }
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  if (!open.empty()) {
+    m.viewBack = AppPage::Editor;
+    Edit(m, open);
   }
 }
 

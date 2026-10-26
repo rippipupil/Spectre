@@ -219,6 +219,13 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
         settings_.replaySeconds);
   acceptPackets_ = true;
 
+  // Lo que hay debajo de la webcam, aparte (solo con encoder por GPU; su
+  // encoder se abre la primera vez que se ve la cámara).
+  camEditable_ = settings_.cameraEditable;
+  if (!encoder_.Software())
+    camBackground_.Start(gpu_.Device(), gpu_.Context(), buffer_, encoder_.Name(), plan_, width_, height_,
+                         settings_.fps);
+
   // 5. Cámara (opcional). Se abre en su hilo: aquí no se espera.
   if (settings_.camera) StartCamera(false);
 
@@ -268,6 +275,8 @@ double Pipeline::ReplayBytesPerSecond() const {
   double kbps = plan_.maxKbps;
   for (size_t i = 1; i < streams_.size(); ++i)
     if (streams_[i].params) kbps += double(streams_[i].params->bit_rate) / 1000.0;
+  if (settings_.camera && settings_.cameraEditable && !encoder_.Software())
+    kbps += CamBackground::MaxKbps(plan_, width_, height_, settings_.cameraSizePercent);
   return kbps * 125.0 * 1.1;
 }
 
@@ -292,6 +301,7 @@ void Pipeline::Stop() {
   perf_.Stop();
   running_ = false;
   if (videoThread_.joinable()) videoThread_.join();
+  camBackground_.Stop();
   audio_.Stop();
   ReleaseRecorder();
   {
@@ -348,6 +358,9 @@ void Pipeline::SetCamera(const PipelineSettings& s) {
         !reopen ? "cambia de esquina" : s.camera ? (old ? "se vuelve a abrir" : "se activa") : "se desactiva");
   if (old) old->Stop(); // no espera
   if (reopen && s.camera) StartCamera(true);
+  // El tope de RAM del replay cuenta la pista del fondo de la cámara
+  // (ReplayBytesPerSecond), que depende de si hay cámara y de su tamaño.
+  if (reopen && buffer_) buffer_->SetLimits(settings_.replaySeconds, BufferLimit(settings_.replaySeconds));
 }
 
 std::string Pipeline::TakeCameraStall() { return running_ && camera_ ? camera_->TakeStall() : std::string(); }
@@ -369,7 +382,9 @@ bool Pipeline::Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& fra
     UINT cw = 0, ch = 0;
     if (camera_->Latest(&cam, &cw, &ch)) {
       int64_t t0 = QpcNow();
-      bool ok = converter_.Overlay(cam.Get(), cw, ch, CameraRect(cw, ch), dst, slice);
+      camRect_ = CameraRect(cw, ch);
+      bool ok = converter_.Overlay(cam.Get(), cw, ch, camRect_, dst, slice);
+      camDrawn_ = ok;
       if (!cameraComposited_) {
         // Una vez por cámara: si algo se atasca al componerla, que se vea en el log.
         cameraComposited_ = true;
@@ -440,8 +455,10 @@ void Pipeline::VideoLoop() {
         uint64_t arrived = lastSequence ? frame.sequence - lastSequence : 1;
         lastSequence = frame.sequence;
         double ageMs = QpcToSeconds(t0 - frame.qpc) * 1000.0;
+        camDrawn_ = false;
         bool ok = encoder_.Encode(
             index, [&](ID3D11Texture2D* dst, UINT slice) { return Render(dst, slice, frame); }, sink);
+        if (ok) camBackground_.Frame(index, frame, camDrawn_ && camEditable_ ? &camRect_ : nullptr);
         double ms = QpcToSeconds(QpcNow() - t0) * 1000.0;
 
         uint8_t count = uint8_t(std::min<uint64_t>(arrived, 3));
@@ -509,7 +526,6 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
     return;
   }
   auto buffer = buffer_;
-  auto streams = streams_;
   auto notify = notify_;
   // El clip termina en el instante de la tecla, el mismo para vídeo y audio.
   double end = QpcToSeconds(QpcNow() - startQpc_);
@@ -521,10 +537,10 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   Log("Clip: %.0f s pedidos, el frame de vídeo llega al encoder con %.1f ms de media", seconds, age);
   // El audio se codifica con un margen (100 ms, hasta 1 s si una fuente llega
   // tarde): se espera ese margen y un poco más para que haya audio hasta `end`.
-  double latency = streams.size() > 1 ? audio_.LatencySeconds() : 0.0;
+  double latency = streams_.size() > 1 ? audio_.LatencySeconds() : 0.0;
   DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, streams, notify, path, seconds, end, pending, waitMs] {
+  std::thread([buffer, notify, path, seconds, end, pending, waitMs] {
     InstallThreadCrashHandler();
     Sleep(waitMs);
     bool ok = false;
@@ -535,6 +551,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
       // turno con el lock cogido. Son referencias, ~1 ms con 5 min de replay.
       int64_t t0 = QpcNow();
       auto packets = buffer->Snapshot(seconds, end);
+      auto streams = buffer->Streams(); // con las del fondo de la cámara añadidas por el camino
       double copyMs = QpcToSeconds(QpcNow() - t0) * 1000.0;
       // Escribir sí puede esperar: prioridad baja y, dentro de WriteClip, E/S
       // y memoria de fondo.
@@ -582,12 +599,26 @@ bool Pipeline::StartRecording(const std::string& path) {
              "calidad",
              true);
   };
-  if (!recorder_->Start(path, streams_)) {
+  // Vídeo, audio y, si se ve la cámara, su fondo de ahora (ver CamBackground).
+  // Las pistas del fondo de antes no: una pista que no recibe nada haría que
+  // el muxer retuviera lo demás. Una que empiece a mitad no entra.
+  const StreamList all = buffer_->Streams();
+  StreamList streams(all.begin(), all.begin() + std::ptrdiff_t(std::min(all.size(), streams_.size())));
+  std::vector<int> map(all.size(), -1);
+  for (size_t i = 0; i < streams.size(); ++i) map[i] = int(i);
+  const int cam = camBackground_.ActiveStream();
+  if (cam >= int(streams.size()) && cam < int(all.size())) {
+    map[size_t(cam)] = int(streams.size());
+    streams.push_back(all[size_t(cam)]);
+  }
+  if (!recorder_->Start(path, streams)) {
     recorder_.reset();
     return false;
   }
   Recorder* rec = recorder_.get();
-  buffer_->AttachLive([rec](const AVPacket* pkt, int stream) { rec->Push(pkt, stream); });
+  buffer_->AttachLive([rec, map](const AVPacket* pkt, int stream) {
+    if (stream >= 0 && size_t(stream) < map.size() && map[size_t(stream)] >= 0) rec->Push(pkt, map[size_t(stream)]);
+  });
   return true;
 }
 
@@ -614,6 +645,14 @@ void Pipeline::ReleaseRecorder() {
   }
   recorder_->Stop();
   recorder_.reset();
+}
+
+void Pipeline::SetCameraEditable(bool editable) {
+  if (settings_.cameraEditable == editable) return;
+  settings_.cameraEditable = editable;
+  camEditable_ = editable;
+  // El tope de RAM del replay cuenta la pista del fondo (ReplayBytesPerSecond).
+  if (buffer_) buffer_->SetLimits(settings_.replaySeconds, BufferLimit(settings_.replaySeconds));
 }
 
 void Pipeline::SetReplaySeconds(double seconds) {

@@ -529,8 +529,12 @@ void PageCamera(SettingsModel& m) {
                                        {"bottom-right", "Abajo a la derecha"}});
   FieldLabel("Tamaño");
   m.dirty |= ImGui::SliderInt("##camsize", &c.cameraSizePercent, 10, 50, "%d %% del ancho");
+  m.dirty |= SwitchField("Poder editar la cámara después", &c.cameraEditable);
   ImGui::EndDisabled();
   Help("La cámara se compone en la GPU. Viene apagada porque es lo que más CPU añade.");
+  Help("«Poder editar la cámara después»: cada clip guarda aparte lo que hay debajo de la cámara y en el editor se "
+       "puede mover, cambiar de tamaño o quitar. El replay ocupa algo más de memoria (un 10 % con la cámara al 25 %) "
+       "y hace falta el encoder de la gráfica.");
 }
 
 // ------------------------------------------------------------------ atajos

@@ -51,6 +51,9 @@ struct Input {
       AVStream* st = fmt->streams[i];
       if (st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO && st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) return;
       if (videoOnly && int(i) != video) return;
+      // Otra pista de vídeo (lo que hay debajo de la webcam, ver CamBackground)
+      // cambia de un clip a otro y no se podría unir: se queda fuera.
+      if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && int(i) != video) return;
       StreamDesc d;
       AVCodecParameters* par = avcodec_parameters_alloc();
       avcodec_parameters_copy(par, st->codecpar);

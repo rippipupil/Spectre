@@ -20,6 +20,7 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
     return false;
   }
   bool firstAudio = true;
+  bool firstVideo = true;
   for (const auto& s : streams_) {
     AVStream* st = avformat_new_stream(fmt_, nullptr);
     avcodec_parameters_copy(st->codecpar, s.params.get());
@@ -30,8 +31,9 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
       av_dict_set(&st->metadata, "title", s.title.c_str(), 0);
       av_dict_set(&st->metadata, "handler_name", s.title.c_str(), 0);
     }
-    if (s.video || firstAudio) st->disposition |= AV_DISPOSITION_DEFAULT;
-    if (!s.video) firstAudio = false;
+    bool& first = s.video ? firstVideo : firstAudio;
+    if (first) st->disposition |= AV_DISPOSITION_DEFAULT;
+    first = false;
   }
   av_dict_set(&fmt_->metadata, "encoder", "Spectre", 0);
 
@@ -43,6 +45,10 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
     return false;
   }
   AVDictionary* opts = nullptr;
+  // El muxer retiene los paquetes hasta tener de todas las pistas: si una deja
+  // de recibir (el fondo de la webcam cuando se apaga o se mueve), sin esto
+  // todo iría 10 s por detrás, en RAM y sin llegar al disco.
+  av_dict_set(&opts, "max_interleave_delta", "2000000", 0);
   if (fragmented)
     av_dict_set(&opts, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
   else if (reserveMoov > 0)
@@ -64,6 +70,7 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
   firstPts_.assign(streams_.size(), AV_NOPTS_VALUE);
   lastPts_.assign(streams_.size(), AV_NOPTS_VALUE);
   dropped_.assign(streams_.size(), 0);
+  keySeen_.assign(streams_.size(), 0);
   haveOrigin_ = false;
   writtenSeconds_ = 0;
   tmp_ = av_packet_alloc();
@@ -82,6 +89,13 @@ bool Mp4Writer::Write(const AVPacket* packet, int stream) {
     haveOrigin_ = true;
   }
 
+  // Otra pista de vídeo (el fondo de la webcam) tiene sus propios keyframes:
+  // lo de antes del primero no se podría decodificar.
+  if (desc.video && stream != 0 && !keySeen_[size_t(stream)] && !(packet->flags & AV_PKT_FLAG_KEY)) {
+    dropped_[size_t(stream)]++;
+    return true;
+  }
+
   av_packet_ref(tmp_, packet);
   int64_t off = offsets_[size_t(stream)];
   if (tmp_->pts != AV_NOPTS_VALUE) tmp_->pts -= off;
@@ -94,6 +108,7 @@ bool Mp4Writer::Write(const AVPacket* packet, int stream) {
     return true; // anterior al inicio o desordenado: se descarta
   }
   lastDts_[size_t(stream)] = tmp_->dts;
+  keySeen_[size_t(stream)] = 1;
   if (firstPts_[size_t(stream)] == AV_NOPTS_VALUE) firstPts_[size_t(stream)] = tmp_->pts;
   lastPts_[size_t(stream)] = std::max(lastPts_[size_t(stream)], tmp_->pts);
   if (tmp_->duration == 0) tmp_->duration = desc.video ? 1 : 1024;
@@ -143,9 +158,23 @@ bool Mp4Writer::Close() {
   return ok;
 }
 
-bool WriteClip(const std::string& path, const StreamList& streams,
+bool WriteClip(const std::string& path, const StreamList& allStreams,
                const std::vector<std::pair<SharedPacket, int>>& packets) {
   if (packets.empty()) return false;
+  // Solo las pistas con algún paquete (la 0 siempre; otra de vídeo, con algún
+  // keyframe, que es donde empieza), con índices seguidos.
+  std::vector<int> map(allStreams.size(), -1);
+  for (const auto& [pkt, stream] : packets)
+    if (stream >= 0 && size_t(stream) < map.size() &&
+        (!allStreams[size_t(stream)].video || (pkt->flags & AV_PKT_FLAG_KEY)))
+      map[size_t(stream)] = 0;
+  if (!map.empty()) map[0] = 0;
+  StreamList streams;
+  for (size_t i = 0; i < map.size(); ++i)
+    if (map[i] == 0) {
+      map[i] = int(streams.size());
+      streams.push_back(allStreams[i]);
+    }
   // Por cada paquete el índice guarda como mucho ~45 bytes (tamaño, duración,
   // desfase de composición, posición y entrada stsc de su bloque, marca de
   // keyframe), más las cabeceras de cada pista. Lo que sobra queda como una
@@ -167,7 +196,10 @@ bool WriteClip(const std::string& path, const StreamList& streams,
         background.Leave();
         Log("Clip: la escritura va lenta; sigue con prioridad normal");
       }
-      if (!writer.Write(pkt.get(), stream)) return false;
+      // Una pista del fondo sin keyframe en el clip no se escribe: sus
+      // paquetes se saltan, como los de antes de su primer keyframe.
+      if (stream < 0 || size_t(stream) >= map.size() || map[size_t(stream)] < 0) continue;
+      if (!writer.Write(pkt.get(), map[size_t(stream)])) return false;
     }
     if (attempt == 0) Log("Clip: pistas %s", writer.Summary().c_str());
     if (writer.Close()) return true;

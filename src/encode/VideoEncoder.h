@@ -26,6 +26,10 @@ struct VideoEncoderSettings {
   // prueba antes una resolución menor que codificar en la CPU (ver
   // Pipeline::Start).
   bool hardwareOnly = false;
+  // Fotogramas entre keyframes; 0 = 2 s.
+  int gopFrames = 0;
+  // Para el log: «Encoder de <role>: ...».
+  std::string role = "vídeo";
 };
 
 struct EncoderInfo {

@@ -67,5 +67,6 @@ constexpr UINT WM_SPECTRE_EXPORT = WM_APP + 19;         // wParam = % de la expo
 constexpr WPARAM kExportDone = 1000;
 constexpr UINT WM_SPECTRE_EDIT = WM_APP + 20;           // wParam = % de la edición que se guarda, o kEditDone
 constexpr WPARAM kEditDone = 1000;
+constexpr UINT WM_SPECTRE_PHOTO = WM_APP + 21;          // lParam = new PhotoSaved* (copia editada de una captura)
 
 } // namespace spectre

@@ -71,6 +71,9 @@ private:
   // (<nombre>_editado_<fecha>.mp4, .gif o .m4a junto al original).
   void SaveEdit(const std::string& path, const EditSettings& settings);
   void FinishEdit();
+  // Editor de fotos: copia editada de una captura (<nombre>_editado_<fecha>.png
+  // o .jpg) en otro hilo; target 2 = para Discord, que al acabar se copia.
+  void SavePhoto(const std::string& path, const PhotoSettings& settings, int target);
   // Dos copias sin recodificar: hasta ese segundo y desde él.
   void SplitClip(const std::string& path, double at);
   void ToggleMenu();
