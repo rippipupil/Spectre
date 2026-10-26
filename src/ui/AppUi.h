@@ -201,8 +201,9 @@ private:
   std::string starToggle_; // estrella pulsada en una tarjeta este frame
   // Elegidos en la biblioteca (casilla, Ctrl+clic, Mayús+clic, «Seleccionar» o
   // «Unir con otros...»): se unen, se marcan como favoritos, se exportan para
-  // Discord, se copian o van a la papelera a la vez.
-  std::vector<std::string> selected_;
+  // Discord, se copian o van a la papelera a la vez. Un conjunto: con miles
+  // elegidos (Ctrl+A) cada frame pregunta por cada tarjeta.
+  std::unordered_set<std::string> selected_;
   std::string selectToggle_; // casilla pulsada en una tarjeta este frame
   std::string selectAnchor_; // el último pulsado: Mayús+clic elige desde ahí hasta el nuevo
   bool selectMode_ = false;  // «Seleccionar»: el clic elige en vez de abrir

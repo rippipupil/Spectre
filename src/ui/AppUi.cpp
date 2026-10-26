@@ -292,13 +292,11 @@ void AppUi::SaveCurrentFrame(const MediaItem& item, const AppActions& a) {
 }
 
 bool AppUi::Selected(const std::string& path) const {
-  return std::find(selected_.begin(), selected_.end(), path) != selected_.end();
+  return selected_.count(path) > 0;
 }
 
 void AppUi::ToggleSelected(const std::string& path) {
-  auto it = std::find(selected_.begin(), selected_.end(), path);
-  if (it != selected_.end()) selected_.erase(it);
-  else selected_.push_back(path);
+  if (!selected_.erase(path)) selected_.insert(path);
 }
 
 void AppUi::ClickSelect(const std::vector<const MediaItem*>& list, size_t index, bool range) {
@@ -310,7 +308,7 @@ void AppUi::ClickSelect(const std::vector<const MediaItem*>& list, size_t index,
   if (anchor < list.size()) {
     // Mayús+clic: todo el tramo entre el último pulsado y este queda elegido.
     for (size_t i = std::min(anchor, index); i <= std::max(anchor, index); ++i)
-      if (!Selected(list[i]->path)) selected_.push_back(list[i]->path);
+      selected_.insert(list[i]->path);
   } else {
     ToggleSelected(path);
   }
@@ -324,10 +322,10 @@ void AppUi::EndSelection() {
 }
 
 std::vector<const MediaItem*> AppUi::SelectedItems(const AppModel& m) const {
-  std::unordered_set<std::string> chosen(selected_.begin(), selected_.end());
   std::vector<const MediaItem*> out;
+  if (selected_.empty()) return out;
   for (const auto& item : m.items)
-    if (chosen.count(item.path)) out.push_back(&item);
+    if (selected_.count(item.path)) out.push_back(&item);
   return out;
 }
 
@@ -1098,7 +1096,7 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
       a.exportForDiscord(path);
     }
     if (ImGui::MenuItem("Unir con otros clips...")) {
-      if (!Selected(path)) selected_.push_back(path);
+      selected_.insert(path);
       Navigate(m, AppPage::Library);
     }
     if (ImGui::BeginMenu("Cámara lenta")) {
@@ -1140,7 +1138,9 @@ void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
   }
   const std::string count = std::to_string(n);
   if (ImGui::MenuItem(favorites == n ? "Quitar de favoritos" : "Añadir a favoritos")) FavoriteSelection(m, a);
-  if (ImGui::MenuItem(("Copiar " + count + " para pegar en Discord").c_str())) CopySelection(m, a);
+  // Discord acepta 10 archivos por mensaje: con más, solo se ofrece copiarlos.
+  if (ImGui::MenuItem(("Copiar " + count + (n > 10 ? " al portapapeles" : " para pegar en Discord")).c_str()))
+    CopySelection(m, a);
   if (exportable > 0) {
     std::string label = "Exportar " + Count(exportable, "vídeo", "vídeos") + " para Discord (menos de 20 MB)";
     if (ImGui::MenuItem(label.c_str())) ExportSelection(m, a);
@@ -1439,12 +1439,10 @@ void AppUi::SelectionBar(AppModel& m, const AppActions& a, const std::vector<con
   switch (pressed) {
   case 0:
     if (allShown) {
-      for (const auto* item : list)
-        selected_.erase(std::remove(selected_.begin(), selected_.end(), item->path), selected_.end());
+      for (const auto* item : list) selected_.erase(item->path);
       selectMode_ = true; // la barra se queda para elegir otros
     } else {
-      for (const auto* item : list)
-        if (!Selected(item->path)) selected_.push_back(item->path);
+      for (const auto* item : list) selected_.insert(item->path);
     }
     break;
   case 1: FavoriteSelection(m, a); break;
@@ -1538,16 +1536,21 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   }
   Gap(16);
 
-  // Los elegidos que ya no están (borrados, renombrados) salen de la selección.
-  selected_.erase(std::remove_if(selected_.begin(), selected_.end(),
-                                 [&](const std::string& path) { return !Find(m, path); }),
-                  selected_.end());
+  // Los elegidos que ya no están (borrados, renombrados) salen de la selección:
+  // una pasada por la biblioteca, sin buscar cada uno en toda la lista.
+  if (!selected_.empty()) {
+    const auto chosen = SelectedItems(m);
+    if (chosen.size() < selected_.size()) {
+      std::unordered_set<std::string> still;
+      for (const auto* item : chosen) still.insert(item->path);
+      selected_ = std::move(still);
+    }
+  }
   ImGuiIO& io = ImGui::GetIO();
   if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !TypingText()) {
     // Ctrl+A elige todo lo que se ve; Supr lo elegido va a la papelera; Esc deja de elegir.
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false))
-      for (const auto* item : list)
-        if (!Selected(item->path)) selected_.push_back(item->path);
+      for (const auto* item : list) selected_.insert(item->path);
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !selected_.empty()) AskDeleteSelection(m);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && Selecting()) EndSelection();
   }

@@ -298,7 +298,8 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     Defer([this, paths] {
       if (CopyFilesToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, paths))
         Toast(CountText(paths.size(), "archivo copiado", "archivos copiados") +
-                  ": pégalos con Ctrl+V en Discord, WhatsApp o una carpeta",
+                  (paths.size() > 10 ? ": pégalos con Ctrl+V en una carpeta (Discord acepta 10 por mensaje)"
+                                     : ": pégalos con Ctrl+V en Discord, WhatsApp o una carpeta"),
               false, NoticeKind::Copied);
       else
         Toast("No se pudieron copiar los archivos al portapapeles", true);
@@ -952,8 +953,11 @@ void App::EndExportBatch() {
                     : "Exportación cancelada: " + CountText(done, "vídeo listo", "vídeos listos") + copiedText +
                           (copied ? " para pegar con Ctrl+V" : ""));
   } else if (failed == 0 && done > 0) {
+    // Discord acepta 10 archivos por mensaje.
     Toast("Listos para Discord: " + CountText(done, "vídeo", "vídeos") +
-              (copied ? ", copiados para pegar con Ctrl+V" : " junto a los originales"),
+              (!copied     ? " junto a los originales"
+               : done > 10 ? ", copiados (Discord acepta 10 por mensaje: pégalos en tandas)"
+                           : ", copiados para pegar con Ctrl+V"),
           false, NoticeKind::Export);
   } else if (done > 0) {
     Toast("Listos para Discord " + std::to_string(done) + " de " + std::to_string(done + size_t(failed)) +
