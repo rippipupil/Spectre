@@ -82,6 +82,8 @@ public:
   std::vector<MediaItem> Scan(const std::string& folder, size_t max = 0, bool videosOnly = false);
 
   void SetFavorite(const std::string& path, bool favorite);
+  // Varios de una vez (selección de la biblioteca): library.json se escribe una sola vez.
+  void SetFavorite(const std::vector<std::string>& paths, bool favorite);
   // Marcas de un clip o una grabación: segundos antes del final. Se cuentan
   // desde ahí porque el clip acaba justo al pulsar el atajo y la grabación al
   // detenerla, mientras que los dos empiezan en el keyframe anterior (hasta
@@ -100,6 +102,13 @@ public:
   // Windows pregunta antes de borrarlo para siempre; si se le dice que no,
   // *cancelled = true.
   bool Recycle(HWND owner, const std::string& path, std::string* error, bool* cancelled);
+  // Varios en una sola operación del Explorador (selección de la biblioteca):
+  // Windows pregunta una vez por los que no caben en la papelera («Sí a
+  // todo») y por los que estén abiertos en otro programa. Devuelve los que ya
+  // no están; si alguno sigue, *error lo explica y *cancelled = true si fue
+  // porque se dijo que no.
+  std::vector<std::string> Recycle(HWND owner, const std::vector<std::string>& paths, std::string* error,
+                                   bool* cancelled);
 
   // Límite de espacio: borra del todo los clips, grabaciones y capturas más
   // antiguos con nombre de Spectre hasta caber en limitBytes. Solo cuenta lo
@@ -142,6 +151,8 @@ const char* MediaKindName(MediaKind kind); // "Clip", "Grabación"...
 StorageInfo SummarizeStorage(const std::vector<MediaItem>& items, const std::string& folder);
 // Copia el archivo al portapapeles como archivo (pegar en Discord, WhatsApp, el Explorador).
 bool CopyFileToClipboard(HWND owner, const std::string& path);
+// Varios archivos de una vez (Discord deja pegar hasta 10).
+bool CopyFilesToClipboard(HWND owner, const std::vector<std::string>& paths);
 // Espacio libre en el disco de una carpeta (0 si no se sabe).
 uint64_t FreeDiskBytes(const std::string& folder);
 // La unidad del archivo tiene papelera de reciclaje (las memorias USB y las

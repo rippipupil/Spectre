@@ -273,6 +273,14 @@ void Library::SetFavorite(const std::string& path, bool favorite) {
   Save();
 }
 
+void Library::SetFavorite(const std::vector<std::string>& paths, bool favorite) {
+  if (paths.empty()) return;
+  std::lock_guard lock(mutex_);
+  Load();
+  for (const auto& path : paths) meta_[Key(path)].favorite = favorite;
+  Save();
+}
+
 void Library::SetTailMarkers(const std::string& path, std::vector<double> secondsBeforeEnd) {
   if (secondsBeforeEnd.empty()) return;
   std::lock_guard lock(mutex_);
@@ -346,10 +354,20 @@ bool Library::Rename(const std::string& path, const std::string& newStem, std::s
 }
 
 bool Library::Recycle(HWND owner, const std::string& path, std::string* error, bool* cancelled) {
+  return !Recycle(owner, std::vector<std::string>{path}, error, cancelled).empty();
+}
+
+std::vector<std::string> Library::Recycle(HWND owner, const std::vector<std::string>& paths, std::string* error,
+                                          bool* cancelled) {
   *cancelled = false;
-  std::wstring file = Widen(path);
-  std::wstring from = file;
-  from.push_back(L'\0'); // doble terminador
+  error->clear();
+  std::vector<std::string> gone;
+  if (paths.empty()) return gone;
+  std::wstring from;
+  for (const auto& path : paths) {
+    from += Widen(path);
+    from.push_back(L'\0'); // cada ruta termina en \0 y c_str() pone el último
+  }
   SHFILEOPSTRUCTW op{};
   op.hwnd = owner;
   op.wFunc = FO_DELETE;
@@ -357,25 +375,35 @@ bool Library::Recycle(HWND owner, const std::string& path, std::string* error, b
   // Cuando el archivo no puede ir a la papelera, NOCONFIRMATION solo lo
   // borraría para siempre sin preguntar; WANTNUKEWARNING hace que Windows
   // pregunte antes. Sin NOERRORUI: si el archivo está abierto, Windows dice
-  // en qué programa.
-  op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT;
+  // en qué programa. Con muchos archivos puede tardar unos segundos: entonces
+  // se ve la barra de progreso de Windows.
+  op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING;
+  if (paths.size() <= 10) op.fFlags |= FOF_SILENT;
   int r = SHFileOperationW(&op);
-  bool exists = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES ||
-                (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND);
-  if (exists) {
-    // Sigue ahí: se dijo que no (aquí o en el aviso de archivo abierto) o falló.
+  for (const auto& path : paths) {
+    std::wstring file = Widen(path);
+    bool exists = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES ||
+                  (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND);
+    if (!exists) gone.push_back(path);
+  }
+  if (gone.size() < paths.size()) {
+    // Alguno sigue ahí: se dijo que no (aquí o en el aviso de archivo abierto) o falló.
     if (op.fAnyOperationsAborted || r == ERROR_CANCELLED || r == 0x75 /* DE_OPCANCELLED */) {
       *cancelled = true;
       *error = "No se ha borrado.";
     } else {
-      *error = "No se pudo mover a la papelera (¿está abierto en otro programa?).";
+      *error = paths.size() == 1 ? "No se pudo mover a la papelera (¿está abierto en otro programa?)."
+                                 : "Algunos no se pudieron mover a la papelera (¿están abiertos en otro programa?).";
     }
-    return false;
   }
-  std::lock_guard lock(mutex_);
-  Load();
-  if (meta_.erase(Key(path))) Save();
-  return true;
+  if (!gone.empty()) {
+    std::lock_guard lock(mutex_);
+    Load();
+    bool changed = false;
+    for (const auto& path : gone) changed = meta_.erase(Key(path)) > 0 || changed;
+    if (changed) Save();
+  }
+  return gone;
 }
 
 LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath,
@@ -454,14 +482,23 @@ LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes
 // ------------------------------------------------------------------ utilidades
 
 bool CopyFileToClipboard(HWND owner, const std::string& path) {
-  std::wstring w = Widen(path);
-  size_t bytes = sizeof(DROPFILES) + (w.size() + 2) * sizeof(wchar_t);
+  return CopyFilesToClipboard(owner, std::vector<std::string>{path});
+}
+
+bool CopyFilesToClipboard(HWND owner, const std::vector<std::string>& paths) {
+  if (paths.empty()) return false;
+  std::wstring list; // rutas separadas por \0; el cero final lo pone GMEM_ZEROINIT
+  for (const auto& path : paths) {
+    list += Widen(path);
+    list.push_back(L'\0');
+  }
+  size_t bytes = sizeof(DROPFILES) + (list.size() + 1) * sizeof(wchar_t);
   HGLOBAL drop = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
   if (!drop) return false;
   auto* df = static_cast<DROPFILES*>(GlobalLock(drop));
   df->pFiles = sizeof(DROPFILES);
   df->fWide = TRUE;
-  memcpy(reinterpret_cast<char*>(df) + sizeof(DROPFILES), w.c_str(), w.size() * sizeof(wchar_t));
+  memcpy(reinterpret_cast<char*>(df) + sizeof(DROPFILES), list.data(), list.size() * sizeof(wchar_t));
   GlobalUnlock(drop);
   // "Copiar" (no "cortar"): el Explorador lo pega como copia.
   HGLOBAL effect = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
