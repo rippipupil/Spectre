@@ -76,7 +76,9 @@ target_compile_definitions(spectre PRIVATE
   SPECTRE_VERSION="${SPECTRE_BUILD_VERSION}"
   SPECTRE_UPDATE_REPO="${SPECTRE_UPDATE_REPO}")
 target_compile_options(spectre PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /EHsc)
-target_link_libraries(spectre PRIVATE imgui nlohmann_json::nlohmann_json ffmpeg
+# FreeType también directamente: ui/Fonts.cpp busca las instancias (Bold,
+# SemiCondensed...) de Bahnschrift, que es una fuente variable.
+target_link_libraries(spectre PRIVATE imgui freetype nlohmann_json::nlohmann_json ffmpeg
   d3d11 dxgi dcomp windowsapp mfplat mfreadwrite mf mfuuid ole32 uuid
   avrt shell32 shcore user32 gdi32 dwmapi advapi32 mmdevapi winhttp bcrypt delayimp
   windowscodecs oleaut32 winmm)

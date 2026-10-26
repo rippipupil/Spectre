@@ -103,7 +103,8 @@ private:
   bool lost_ = false;
   bool cloaked_ = false;  // oculta hasta el primer frame (sin destello blanco)
   bool sizing_ = false;   // arrastrando el borde
-  bool rebuildFonts_ = false; // cambió el DPI
+  bool rebuildFonts_ = false; // cambió el DPI o el diseño trae otras letras
+  Face fontBody_ = Face::Segoe, fontDisplay_ = Face::Segoe; // letras del diseño
   UINT width_ = 0, height_ = 0;
   bool resizePending_ = false;
   bool videoSupport_ = false;

@@ -8,6 +8,7 @@
 #include "common/Util.h"
 #include "core/Mp4Writer.h"
 #include "core/ThreadPolicy.h"
+#include "ui/Theme.h"
 #include "ui/Widgets.h"
 
 #include <shellscalingapi.h>
@@ -907,6 +908,9 @@ RECT App::MenuRect() const {
 }
 
 void App::PlaceMenu(bool activate) {
+  // Las letras del diseño del tema, para que el primer frame ya las tenga.
+  const Style& style = StyleFor(FindTheme(config_.theme), config_.themeStyle);
+  menu_.SetFonts(style.body, style.display);
   if (!menu_.Show(MenuRect(), activate)) {
     Toast("No se pudo abrir el panel", true);
     return;
@@ -1344,6 +1348,8 @@ void App::PlaceToast(float heightPx) {
     x = panelOnLeft ? menuHitScreen_.right + margin : menuHitScreen_.left - margin - w;
     r = {x, y, x + w, y + h};
   }
+  const Style& style = StyleFor(FindTheme(config_.theme), config_.themeStyle);
+  toast_.SetFonts(style.body, style.display);
   if (!toast_.Show(r, false)) return;
   // "Clip guardado" tiene que verse también encima de un juego topmost.
   FullscreenInfo under = menu_.Visible() ? menuScreen_ : QueryFullscreen(GetForegroundWindow(), false);
@@ -1800,10 +1806,11 @@ void App::RenderApp() {
   // panel (Alt+Z) y los avisos, no solo esta ventana. Tampoco cuenta como
   // cambio sin aplicar.
   if (s.config.theme != config_.theme || s.config.themeMotion != config_.themeMotion ||
-      s.config.themeStyle != config_.themeStyle) {
+      s.config.themeStyle != config_.themeStyle || s.config.themeBackdrop != config_.themeBackdrop) {
     config_.theme = s.base.theme = s.config.theme;
     config_.themeMotion = s.base.themeMotion = s.config.themeMotion;
     config_.themeStyle = s.base.themeStyle = s.config.themeStyle;
+    config_.themeBackdrop = s.base.themeBackdrop = s.config.themeBackdrop;
     SaveConfig(config_);
     SyncModels();
   }

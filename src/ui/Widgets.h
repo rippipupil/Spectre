@@ -30,6 +30,8 @@ constexpr float kSmall = 13.0f; // filas de clips, estado, keycaps
 constexpr float kHint = 12.0f;  // ayudas y enlaces
 constexpr float kLabel = 11.0f; // títulos de sección en mayúsculas
 constexpr float kTitle = 22.0f; // título de página
+constexpr float kHeadline = 28.0f; // títulos grandes de algunos diseños
+constexpr float kHero = 36.0f;     // los más grandes (Plano, Psíquico, Suave, Papel)
 
 constexpr float kPi = 3.14159265358979f;
 
@@ -48,6 +50,8 @@ void BeginFrame(const Fonts& fonts, const Config& config);
 float Px(float logical);
 ImFont* Bold();
 ImFont* Big();
+// La letra de los títulos del diseño (Style::display) al tamaño más cercano.
+ImFont* Display(float size);
 // La fuente de la familia de `font` hecha para `size` píxeles. Para dibujar
 // texto directamente con dl->AddText a un tamaño que no es el de la fuente:
 // con la fuente escalada el texto sale borroso.
@@ -73,7 +77,7 @@ std::string FormatClipLength(int seconds);  // 30 s, 2 min
 enum class Icon {
   Replay, Mic, Camera, Close, Back, Play, Pause, Folder, Trash, Star, StarFilled, Scissors, Copy, Pencil,
   Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share, Sliders, Undo, Redo,
-  Check, Alert, Download, Info, Gamepad, Record
+  Check, Alert, Download, Info, Gamepad, Record, Home, Grid, Gear
 };
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float radius, ImU32 color);
 // Una raya en diagonal encima de un icono: apagado (micrófono, cámara, replay).
@@ -140,6 +144,30 @@ void ShapeStroke(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color, float thicknes
 void DrawBrackets(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 color, float arm, float thickness = 0);
 // Caja plana (tarjeta de estado, aviso de Fuente) con una barra de color a la izquierda.
 void CardFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 edge);
+// Doble contorno de Neón: el de dentro entero y otro 3 px por fuera, tenue.
+void DoubleStroke(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 inner, ImU32 outer);
+// Fondo de una casilla (números de Inicio) con la forma de tarjeta del diseño.
+void TileFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, float hover = 0.0f);
+
+// Tarjeta de un archivo de la biblioteca con la forma del diseño (Style::card):
+// dónde van la miniatura y el texto, y el marco por debajo y por encima.
+struct MediaCard {
+  ImVec2 a, b;           // toda la tarjeta
+  ImVec2 thumbA, thumbB; // miniatura
+  ImVec2 text;           // primera línea del pie
+  float textWidth = 0;
+};
+float MediaCardHeight(float width);
+MediaCard MediaCardRects(ImVec2 a, float width);
+// Fondo y marco antes de dibujar la miniatura.
+void MediaCardBack(ImDrawList* dl, const MediaCard& card, float hover, bool selected);
+// Lo que va encima de la miniatura: esquinas cortadas, corchetes, bordes.
+void MediaCardFront(ImDrawList* dl, const MediaCard& card, float hover, bool selected);
+// Pie: título, datos y, en Táctico, el número de la tarjeta.
+void MediaCardCaption(ImDrawList* dl, const MediaCard& card, const std::string& title, const std::string& detail,
+                      float hover, int number);
+// Etiqueta pequeña sobre la miniatura (tipo de archivo, duración).
+void Tag(ImDrawList* dl, ImVec2 pos, const std::string& text, bool alignRight);
 // Alto de los botones grandes y de las filas según la densidad del diseño.
 float ActionHeight();
 float RowHeight(float logical);
@@ -149,6 +177,7 @@ float RowHeight(float logical);
 float LabelWidth(const char* upper, float size);
 float DrawLabel(ImDrawList* dl, ImVec2 pos, const char* upper, float size, ImU32 color);
 std::string Upper(const std::string& text);         // respeta las vocales con tilde y la ñ
+std::string Lowercase(const std::string& text);     // "Biblioteca" -> "biblioteca" (también tildes y ñ)
 std::string SentenceCase(const std::string& upper); // "DURACIÓN DEL CLIP" -> "Duración del clip"
 
 // Animaciones de Psíquico y Terminal (solo con AmbientMotion()).
@@ -174,6 +203,15 @@ struct Entrance {
   bool done = true;
 };
 Entrance EnterMotion(unsigned long long since, bool fromRight);
+
+// Título de página con el estilo del diseño (Style::title). section: la
+// página de la que cuelga (Ajustes), para "~/ajustes/replay" o "03 // AJUSTES".
+// index: el número de la página en Táctico (0 = sin número).
+void PageTitle(const char* title, const std::string& subtitle, int index = 0, const char* section = nullptr);
+// Una frase destacada (estado de Inicio) con la letra de títulos del diseño.
+// Devuelve el alto.
+float Headline(ImDrawList* dl, ImVec2 pos, const std::string& text, ImU32 color, float maxWidth);
+float HeadlineHeight();
 
 void Gap(float px);
 void Divider(float above = 10, float below = 10);
@@ -244,10 +282,21 @@ bool ChoiceCombo(const char* id, T& value, const std::vector<std::pair<T, const 
   return changed;
 }
 
-// Entrada de la columna de navegación (Ajustes de la app).
-bool NavItem(int index, const char* name, bool selected, float height = 34);
+// Entrada de la columna de navegación (Ajustes de la app). depth 1: un
+// apartado dentro de otro (en Terminal se dibuja como una rama del árbol).
+bool NavItem(int index, const char* name, bool selected, float height = 34, int depth = 0, bool last = false);
 // Rótulo de grupo en la columna de navegación.
 void NavLabel(const char* text);
+// Raíl de iconos (NavLayout::Rail): icono con el nombre debajo.
+bool RailItem(int index, Icon icon, const char* name, bool selected, float height);
+// Pestaña de la barra de arriba (NavLayout::Topbar); el ancho sale del texto.
+bool TabItem(int index, const char* name, bool selected, float height);
+float TabWidth(const char* name);
+// Fondo de la zona de navegación (columna, raíl o barra de arriba) con los
+// detalles del diseño: borde, franjas de peligro, doble línea...
+void NavChrome(ImDrawList* dl, ImVec2 a, ImVec2 b, bool horizontal);
+// La marca del raíl: una "S" en un cuadro con la forma del diseño.
+void Monogram(ImDrawList* dl, ImVec2 center, float size);
 
 } // namespace ui
 } // namespace spectre

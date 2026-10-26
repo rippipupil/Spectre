@@ -85,6 +85,8 @@ struct Config {
   std::string theme = "negro";         // id de ui/Theme.h: "negro", "psiquico" o uno de RoCer0
   std::string themeStyle;              // diseño (ui/Theme.h Style::id); vacío = el que trae el tema
   bool themeMotion = true;             // animaciones de la interfaz (ratón encima, pulsar, avisos)
+  // Fondo ilustrado del tema (ui/Backdrop.h): "animado", "quieto" o "no".
+  std::string themeBackdrop = "animado";
 
   // Panel Alt+Z (ver ui/Menu.h). Se arrastra y se vuelve a abrir donde se
   // dejó: la posición se guarda como fracción del hueco libre del monitor

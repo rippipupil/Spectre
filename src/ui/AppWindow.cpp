@@ -368,7 +368,7 @@ void AppWindow::SetupImGui() {
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-  ui::LoadFonts(scale_, &fonts_);
+  ui::LoadFonts(scale_, &fonts_, true, fontBody_, fontDisplay_);
   fontMemoryFreed_ = false;
   ApplyBaseStyle(scale_);
   ImGui_ImplWin32_Init(hwnd_);
@@ -386,7 +386,7 @@ void AppWindow::Render(const std::function<void()>& draw) {
   if (rebuildFonts_) {
     rebuildFonts_ = false;
     ImGui_ImplDX11_InvalidateDeviceObjects();
-    ui::LoadFonts(scale_, &fonts_);
+    ui::LoadFonts(scale_, &fonts_, true, fontBody_, fontDisplay_);
     fontMemoryFreed_ = false;
     ImGui::GetStyle() = ImGuiStyle();
     ApplyBaseStyle(scale_);
@@ -399,6 +399,11 @@ void AppWindow::Render(const std::function<void()>& draw) {
   draw();
   ImGui::Render();
   animateAt_ = nextAnimate_;
+  // El tema elegido trae otras letras: se cargan antes del siguiente frame.
+  if (ui::TakeFontRequest(&fontBody_, &fontDisplay_)) {
+    rebuildFonts_ = true;
+    Invalidate();
+  }
   context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
   const float clear[4] = {0, 0, 0, 1};
   context_->ClearRenderTargetView(rtv_.Get(), clear);

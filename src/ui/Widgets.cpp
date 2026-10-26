@@ -63,6 +63,10 @@ void BeginFrame(const Fonts& fonts, const Config& config) {
   sizes_ = fonts.sizes;
   frameRequested_ = false;
   BeginThemeFrame(config);
+  // Las letras de la ventana son de otro diseño: que las cambie antes del
+  // siguiente frame (este se dibuja con las que hay).
+  const Style& st = CurrentStyle();
+  if (sizes_ && (sizes_->body != st.body || sizes_->display != st.display)) RequestFonts(st.body, st.display);
 }
 
 float EaseOut(float t) {
@@ -82,6 +86,7 @@ bool FrameRequested() { return frameRequested_; }
 float Px(float logical) { return logical * s_; }
 ImFont* Bold() { return bold_; }
 ImFont* Big() { return big_; }
+ImFont* Display(float size) { return Sized(big_, size); }
 ImFont* Sized(ImFont* font, float size) { return sizes_ ? sizes_->ForSize(font, size) : font; }
 
 ImU32 C(ImU32 color, float alpha) { return ImGui::GetColorU32(color, alpha); }
@@ -349,6 +354,30 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
   case Icon::Record:
     DrawMark(dl, c, r * 0.55f, color, true);
     break;
+  case Icon::Home:
+    poly({{-0.78f, -0.02f}, {0.0f, -0.78f}, {0.78f, -0.02f}}, false);
+    poly({{-0.56f, -0.22f}, {-0.56f, 0.78f}, {0.56f, 0.78f}, {0.56f, -0.22f}}, false);
+    dl->AddRect(P(-0.16f, 0.26f), P(0.16f, 0.78f), color, 0, 0, t);
+    break;
+  case Icon::Grid:
+    // Cuatro miniaturas: la biblioteca.
+    for (int i = 0; i < 4; ++i) {
+      const float x = i % 2 ? 0.12f : -0.80f, y = i / 2 ? 0.12f : -0.80f;
+      dl->AddRect(P(x, y), P(x + 0.68f, y + 0.68f), color, 0, 0, t);
+    }
+    break;
+  case Icon::Gear: {
+    // Rueda dentada de ocho dientes cuadrados.
+    ImVec2 pts[32];
+    for (int i = 0; i < 32; ++i) {
+      const float a = float(i) / 32.0f * kPi * 2.0f - kPi / 16.0f;
+      const float rr = (i / 2) % 2 == 0 ? 0.86f : 0.62f;
+      pts[i] = ImVec2(c.x + std::cos(a) * rr * r, c.y + std::sin(a) * rr * r);
+    }
+    dl->AddPolyline(pts, 32, color, ImDrawFlags_Closed, t);
+    dl->AddRect(P(-0.22f, -0.22f), P(0.22f, 0.22f), color, 0, 0, t);
+    break;
+  }
   }
 }
 
@@ -503,6 +532,8 @@ void CardFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 edge) {
     dl->AddRect(a, b, C(st.hover == HoverEffect::Invert ? p.text : p.lineStrong), 0, 0, LineW());
     break;
   case ButtonShape::Bracket:
+    // Opaca: el fondo ilustrado del tema no se ve a través.
+    dl->AddRectFilled(a, b, C(p.bg));
     dl->AddRectFilled(a, b, C(p.surface, 0.55f));
     DrawBrackets(dl, a, b, C(p.lineStrong), Px(12));
     break;
@@ -513,11 +544,77 @@ void CardFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 edge) {
     if (st.cutCorners & 8) bottom -= k;
     break;
   }
+  case ButtonShape::Double:
+    dl->AddRectFilled(a, b, C(p.bg));
+    DoubleStroke(dl, a, b, C(p.lineStrong), C(edge, 0.35f));
+    break;
   default:
     dl->AddRectFilled(a, b, C(p.surface));
     break;
   }
   dl->AddRectFilled(ImVec2(a.x, top), ImVec2(a.x + Px(3), bottom), C(edge));
+}
+
+void DoubleStroke(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 inner, ImU32 outer) {
+  const float t = LineW(), o = std::round(Px(3));
+  dl->AddRect(a, b, inner, 0, 0, t);
+  dl->AddRect(a - ImVec2(o, o), b + ImVec2(o, o), outer, 0, 0, t);
+}
+
+void TileFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, float hover) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  switch (st.card) {
+  case CardLook::Hud: {
+    ShapeFill(dl, a, b, C(p.surface));
+    DrawBrackets(dl, a, b, C(Mix(p.lineStrong, p.accent, hover)), Px(8));
+    break;
+  }
+  case CardLook::Ascii: {
+    // Bordes de guiones y una cruz en cada esquina, como "+----+".
+    dl->AddRectFilled(a, b, C(p.bg));
+    const ImU32 col = C(Mix(p.lineStrong, p.accent, hover));
+    const float t = std::max(1.0f, std::round(Px(1)));
+    for (float x = a.x + Px(8); x < b.x - Px(8); x += Px(7)) {
+      dl->AddRectFilled(ImVec2(x, a.y), ImVec2(std::min(x + Px(4), b.x - Px(8)), a.y + t), col);
+      dl->AddRectFilled(ImVec2(x, b.y - t), ImVec2(std::min(x + Px(4), b.x - Px(8)), b.y), col);
+    }
+    for (float y = a.y + Px(8); y < b.y - Px(8); y += Px(7)) {
+      dl->AddRectFilled(ImVec2(a.x, y), ImVec2(a.x + t, std::min(y + Px(4), b.y - Px(8))), col);
+      dl->AddRectFilled(ImVec2(b.x - t, y), ImVec2(b.x, std::min(y + Px(4), b.y - Px(8))), col);
+    }
+    const float r = Px(3);
+    for (int i = 0; i < 4; ++i) {
+      const ImVec2 c(i & 1 ? b.x - Px(2) : a.x + Px(2), i & 2 ? b.y - Px(2) : a.y + Px(2));
+      dl->AddRectFilled(ImVec2(c.x - r, c.y - t * 0.5f), ImVec2(c.x + r, c.y + t * 0.5f), C(p.accent));
+      dl->AddRectFilled(ImVec2(c.x - t * 0.5f, c.y - r), ImVec2(c.x + t * 0.5f, c.y + r), C(p.accent));
+    }
+    break;
+  }
+  case CardLook::Framed:
+    ShapeFill(dl, a, b, C(p.bg));
+    ShapeStroke(dl, a, b, C(Mix(p.lineStrong, p.accent, hover)));
+    break;
+  case CardLook::Neon:
+    dl->AddRectFilled(a, b, C(p.bg));
+    DoubleStroke(dl, a, b, C(Mix(p.lineStrong, p.accent, hover)), C(p.accent, 0.18f + 0.4f * hover));
+    break;
+  case CardLook::Polaroid:
+    dl->AddRectFilled(a, b, C(p.surface));
+    dl->AddRect(a, b, C(p.line), 0, 0, LineW());
+    break;
+  case CardLook::Heavy:
+    dl->AddRectFilled(a, b, C(p.bg));
+    dl->AddRect(a, b, C(p.text), 0, 0, LineW());
+    break;
+  case CardLook::Tile:
+    dl->AddRectFilled(a, b, C(Mix(p.surface, p.surfaceHover, hover)));
+    break;
+  case CardLook::Plain:
+    dl->AddRectFilled(a, b, C(p.surface));
+    if (hover > 0) dl->AddRect(a, b, C(p.lineStrong, hover), 0, 0, LineW());
+    break;
+  }
 }
 
 // ------------------------------------------------------- movimiento
@@ -526,6 +623,18 @@ Motion Animate(bool enabled) {
   const ImGuiID id = ImGui::GetItemID();
   ImGuiStorage* st = ImGui::GetStateStorage();
   const float now = float(ImGui::GetTime());
+  // GetFloatRef añade la clave si no está y eso puede mover todo el almacén:
+  // con un control nuevo, las referencias tomadas antes apuntarían a memoria
+  // liberada y escribir en ellas corrompía el montón. Primero se crean las
+  // seis claves; después ninguna búsqueda inserta y las referencias valen.
+  if (st->GetInt(id ^ 0x4D41u, -1) == -1) { // wasHeld: 0 o 1 una vez creada
+    st->SetFloat(id ^ 0x4D48u, 0.0f);
+    st->SetFloat(id ^ 0x4D50u, -100.0f);
+    st->SetFloat(id ^ 0x4D52u, -100.0f);
+    st->SetFloat(id ^ 0x4D58u, 0.0f);
+    st->SetFloat(id ^ 0x4D59u, 0.0f);
+    st->SetInt(id ^ 0x4D41u, 0);
+  }
   float& hover = *st->GetFloatRef(id ^ 0x4D48u, 0.0f);
   float& pressedAt = *st->GetFloatRef(id ^ 0x4D50u, -100.0f);
   float& releasedAt = *st->GetFloatRef(id ^ 0x4D52u, -100.0f);
@@ -614,6 +723,11 @@ ButtonPaint PaintButton(ImDrawList* dl, ImVec2 a, ImVec2 b, Role role, const Mot
       // Terminal: el bloque lleno con las esquinas recortadas en L del color del fondo.
       dl->AddRectFilled(a, b, C(fill));
       DrawBrackets(dl, a + ImVec2(Px(3), Px(3)), b - ImVec2(Px(3), Px(3)), C(p.bg, 0.55f), Px(6 + 4 * h));
+    } else if (st.button == ButtonShape::Double) {
+      // Neón: el tubo de fuera se enciende con el ratón.
+      dl->AddRectFilled(a, b, C(fill));
+      const float o = std::round(Px(3));
+      dl->AddRect(a - ImVec2(o, o), b + ImVec2(o, o), C(enabled ? base : p.line, 0.30f + 0.55f * h), 0, 0, LineW());
     } else if (st.button == ButtonShape::Rail) {
       dl->AddRectFilled(a, b, C(fill));
       // El raíl, más oscuro, crece con el ratón.
@@ -685,6 +799,20 @@ ButtonPaint PaintButton(ImDrawList* dl, ImVec2 a, ImVec2 b, Role role, const Mot
     if (role != Role::Quiet || h > 0) {
       ImU32 col = role == Role::GhostDanger ? p.danger : Mix(p.lineStrong, p.text, h);
       DrawBrackets(dl, a, b, C(col, role == Role::Quiet ? h : 1.0f), Px(7) + Px(5) * h);
+    }
+    break;
+  }
+  case ButtonShape::Double: {
+    if (role == Role::Normal) dl->AddRectFilled(a, b, C(held ? p.surfaceActive : Mix(p.surface, p.surfaceHover, h)));
+    else if (held) dl->AddRectFilled(a, b, C(p.surfaceActive));
+    else if (h > 0) dl->AddRectFilled(a, b, C(p.surface, 0.6f * h));
+    if (role != Role::Quiet || h > 0) {
+      const ImU32 inner = Mix(role == Role::Normal ? p.lineStrong : p.line, accentish, h);
+      dl->AddRect(a, b, C(inner, role == Role::Quiet ? h : 1.0f), 0, 0, LineW());
+    }
+    if (h > 0 && enabled && role != Role::Quiet) {
+      const float o = std::round(Px(3));
+      dl->AddRect(a - ImVec2(o, o), b + ImVec2(o, o), C(accentish, 0.35f * h), 0, 0, LineW());
     }
     break;
   }
@@ -794,6 +922,9 @@ void HoverOutline(ImDrawList* dl, ImVec2 a, ImVec2 b, float h) {
       dl->AddRectFilled(ImVec2(a.x, b.y - Px(2)), ImVec2(a.x + (b.x - a.x) * EaseOut(h), b.y), C(p.accent));
     else dl->AddRect(a, b, C(Mix(p.lineStrong, p.accent, h), h), 0, 0, LineW());
     break;
+  case ButtonShape::Double:
+    DoubleStroke(dl, a, b, C(Mix(p.lineStrong, p.accent, h), h), C(p.accent, 0.35f * h));
+    break;
   case ButtonShape::Flat:
     dl->AddRect(a, b, C(p.lineStrong, h), 0, 0, LineW());
     break;
@@ -812,6 +943,21 @@ std::string Upper(const std::string& text) {
       // á é í ó ú ñ ü...: U+00E0-U+00FE (salvo ÷) -> U+00C0-U+00DE
       unsigned char d = static_cast<unsigned char>(out[i + 1]);
       if (d >= 0xA0 && d <= 0xBE && d != 0xB7) out[i + 1] = char(d - 0x20);
+      ++i;
+    }
+  }
+  return out;
+}
+
+std::string Lowercase(const std::string& text) {
+  std::string out = text;
+  for (size_t i = 0; i < out.size(); ++i) {
+    unsigned char c = static_cast<unsigned char>(out[i]);
+    if (c >= 'A' && c <= 'Z') {
+      out[i] = char(c + 32);
+    } else if (c == 0xC3 && i + 1 < out.size()) {
+      unsigned char d = static_cast<unsigned char>(out[i + 1]);
+      if (d >= 0x80 && d <= 0x9E && d != 0x97) out[i + 1] = char(d + 0x20);
       ++i;
     }
   }
@@ -1266,6 +1412,14 @@ void DrawSelection(ImDrawList* dl, ImVec2 a, ImVec2 b) {
     dl->AddRectFilled(a, b, C(p.surfaceActive));
     dl->AddRectFilled(ImVec2(a.x, b.y - Px(3)), b, C(p.accent));
     return;
+  case ButtonShape::Double: {
+    // Dos contornos hacia dentro: el resalte no pisa las celdas vecinas.
+    const float o = std::round(Px(3));
+    dl->AddRectFilled(a, b, C(p.accent, 0.12f));
+    dl->AddRect(a, b, C(p.accent), 0, 0, LineW());
+    dl->AddRect(a + ImVec2(o, o), b - ImVec2(o, o), C(p.accent, 0.4f), 0, 0, LineW());
+    return;
+  }
   case ButtonShape::Flat:
   case ButtonShape::Chamfer:
     break;
@@ -1273,12 +1427,15 @@ void DrawSelection(ImDrawList* dl, ImVec2 a, ImVec2 b) {
   ShapeFill(dl, a, b, C(p.accent));
 }
 
+// Controles con borde en vez de relleno (segmentados, rejilla de duraciones).
+bool Outlined() { return CurrentStyle().button == ButtonShape::Outline || CurrentStyle().button == ButtonShape::Double; }
+
 // Color del texto encima del elemento elegido.
 ImU32 SelectedText() {
   const Style& st = CurrentStyle();
   const Palette& p = Colors();
   if (st.button == ButtonShape::Outline) return st.hover == HoverEffect::Invert ? p.bg : p.text;
-  if (st.button == ButtonShape::Bracket || st.button == ButtonShape::Rail) return p.text;
+  if (st.button == ButtonShape::Bracket || st.button == ButtonShape::Rail || st.button == ButtonShape::Double) return p.text;
   return p.onAccent;
 }
 
@@ -1306,7 +1463,7 @@ int Segmented(const char* id, const std::vector<std::pair<int, std::string>>& op
   ImVec2 a = ImGui::GetCursorScreenPos();
   float w = width > 0 ? width : ImGui::GetContentRegionAvail().x;
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  if (CurrentStyle().button == ButtonShape::Outline)
+  if (Outlined())
     dl->AddRect(a, ImVec2(a.x + w, a.y + h), C(CurrentStyle().hover == HoverEffect::Invert ? p.text : p.line), 0, 0,
                 LineW());
   else dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), C(p.surface));
@@ -1354,7 +1511,7 @@ int ClipLengthPicker(const char* id, int current, double fitSeconds, float width
   float w = width > 0 ? width : ImGui::GetContentRegionAvail().x;
   ImDrawList* dl = ImGui::GetWindowDrawList();
   // Celdas planas separadas por una línea de 1 px del color del fondo.
-  const bool outline = CurrentStyle().button == ButtonShape::Outline;
+  const bool outline = Outlined();
   if (outline) dl->AddRect(a, ImVec2(a.x + w, a.y + h * float(rows)), C(p.line), 0, 0, LineW());
   else dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h * float(rows)), C(p.surface));
   float cellW = w / float(kCols);
@@ -1552,11 +1709,13 @@ void ValueRow(const char* label, const std::string& value) {
   ImGui::TextUnformatted(value.c_str());
 }
 
-bool NavItem(int index, const char* name, bool selected, float height) {
+bool NavItem(int index, const char* name, bool selected, float height, int depth, bool last) {
   const Palette& p = Colors();
   const Style& st = CurrentStyle();
   ImGui::PushID(index);
   const float h = Px(height);
+  // Terminal: menú en árbol, en minúsculas y con "> " delante del elegido.
+  const bool tree = st.title == TitleLook::Prompt;
   bool pressed = ImGui::InvisibleButton("nav", ImVec2(ImGui::GetContentRegionAvail().x, h));
   Motion m = Animate();
   bool hov = ImGui::IsItemHovered();
@@ -1564,8 +1723,30 @@ bool NavItem(int index, const char* name, bool selected, float height) {
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
+  TrackHover(ImGui::GetItemID(), a, b, hov);
   ImU32 fg = selected ? p.text : Mix(p.textMuted, p.text, m.hover);
   const float sel = selected ? 1.0f : 0.0f;
+  if (tree) {
+    float mid = (a.y + b.y) * 0.5f, fs = Px(kBody), x = a.x + Px(16);
+    const float t = std::max(1.0f, std::round(Px(1)));
+    if (depth > 0) {
+      // Rama: una línea que baja y otra hasta el nombre ("├─" o "└─").
+      const float bx = a.x + Px(22);
+      dl->AddRectFilled(ImVec2(bx, a.y), ImVec2(bx + t, last ? mid : b.y), C(p.lineStrong));
+      dl->AddRectFilled(ImVec2(bx, mid), ImVec2(bx + Px(10), mid + t), C(p.lineStrong));
+      x = bx + Px(16);
+    }
+    if (selected) dl->AddRectFilled(ImVec2(x - Px(6), a.y + Px(3)), ImVec2(b.x - Px(8), b.y - Px(3)), C(p.accent, 0.14f));
+    else if (m.hover > 0) dl->AddRectFilled(ImVec2(x - Px(6), a.y + Px(3)), ImVec2(b.x - Px(8), b.y - Px(3)), C(p.surface, m.hover));
+    std::string label = Lowercase(name);
+    if (selected) {
+      Text(dl, bold_, fs, ImVec2(x, mid - fs * 0.5f), C(p.accent), ">");
+      x += TextSize(bold_, fs, "> ").x;
+    }
+    Text(dl, selected ? bold_ : ImGui::GetFont(), fs, ImVec2(x, mid - fs * 0.5f), C(selected ? p.text : fg), label.c_str());
+    PaintPress(dl, a, b, Role::Quiet, m);
+    return pressed;
+  }
   // La entrada elegida con la forma del diseño; las demás, un resalte suave.
   switch (st.button) {
   case ButtonShape::Bracket:
@@ -1600,6 +1781,16 @@ bool NavItem(int index, const char* name, bool selected, float height) {
       dl->AddRectFilled(ImVec2(a.x + Px(16), y), ImVec2(a.x + Px(16) + tw * EaseOut(m.hover), y + Px(1)), C(p.accent));
     }
     break;
+  case ButtonShape::Double: {
+    const ImVec2 ia = a + ImVec2(Px(6), Px(2)), ib = b - ImVec2(Px(6), Px(2));
+    if (selected) {
+      dl->AddRect(ia, ib, C(p.accent), 0, 0, LineW());
+      dl->AddRect(ia + ImVec2(Px(3), Px(3)), ib - ImVec2(Px(3), Px(3)), C(p.accent, 0.35f), 0, 0, LineW());
+    } else if (m.hover > 0) {
+      dl->AddRect(ia, ib, C(p.lineStrong, m.hover), 0, 0, LineW());
+    }
+    break;
+  }
   case ButtonShape::Chamfer:
     if (selected) ShapeFill(dl, a, b, C(p.surface));
     else if (m.hover > 0) ShapeFill(dl, a, b, C(p.surface, 0.6f * m.hover));
@@ -1628,6 +1819,597 @@ void NavLabel(const char* text) {
   float size = Px(kLabel);
   DrawLabel(ImGui::GetWindowDrawList(), ImVec2(q.x + Px(16), q.y), text, size, C(Colors().textFaint));
   ImGui::Dummy(ImVec2(0, size + Px(6)));
+}
+
+// ------------------------------------------------------- estructura del diseño
+
+namespace {
+
+// Margen de la tarjeta alrededor de la miniatura y alto del pie (px lógicos).
+float CardPad() {
+  switch (CurrentStyle().card) {
+  case CardLook::Framed:
+  case CardLook::Ascii: return 8;
+  case CardLook::Neon: return 6;
+  case CardLook::Tile:
+  case CardLook::Polaroid: return 10;
+  default: return 0;
+  }
+}
+float CaptionHeight() { return CurrentStyle().card == CardLook::Polaroid ? 56.0f : 50.0f; }
+
+// Tapa una esquina de la miniatura con el color de debajo: la imagen queda con
+// la esquina cortada del diseño.
+void CutCorners(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 under) {
+  const Style& st = CurrentStyle();
+  if (st.button != ButtonShape::Chamfer || !st.cutCorners) return;
+  const float k = std::min(Px(st.cut) * 1.4f, std::min(b.x - a.x, b.y - a.y) * 0.3f);
+  if (st.cutCorners & 1) dl->AddTriangleFilled(a, ImVec2(a.x + k, a.y), ImVec2(a.x, a.y + k), under);
+  if (st.cutCorners & 2) dl->AddTriangleFilled(ImVec2(b.x, a.y), ImVec2(b.x, a.y + k), ImVec2(b.x - k, a.y), under);
+  if (st.cutCorners & 4) dl->AddTriangleFilled(b, ImVec2(b.x - k, b.y), ImVec2(b.x, b.y - k), under);
+  if (st.cutCorners & 8) dl->AddTriangleFilled(ImVec2(a.x, b.y), ImVec2(a.x, b.y - k), ImVec2(a.x + k, b.y), under);
+}
+
+// Primera letra de un texto UTF-8 (la que Suave pinta del acento).
+const char* AfterFirst(const char* text) {
+  if (!*text) return text;
+  const char* next = text + 1;
+  while (*next && (static_cast<unsigned char>(*next) & 0xC0) == 0x80) ++next;
+  return next;
+}
+
+// Texto de una pestaña según el diseño.
+std::string TabText(const char* name) {
+  switch (CurrentStyle().title) {
+  case TitleLook::Index:
+  case TitleLook::Chroma: return Upper(name);
+  case TitleLook::Prompt: return Lowercase(name);
+  default: return name;
+  }
+}
+bool TabUpper() { return CurrentStyle().title == TitleLook::Index || CurrentStyle().title == TitleLook::Chroma; }
+float TabFontSize() { return TabUpper() ? Px(kSmall) : Px(kBody); }
+
+} // namespace
+
+float MediaCardHeight(float width) {
+  const float pad = Px(CardPad());
+  const float thumbH = std::floor((width - pad * 2) * 9.0f / 16.0f);
+  return pad + thumbH + Px(CaptionHeight()) + (pad > 0 ? Px(4) : 0.0f);
+}
+
+MediaCard MediaCardRects(ImVec2 a, float width) {
+  MediaCard c;
+  const float pad = Px(CardPad());
+  const float thumbW = width - pad * 2, thumbH = std::floor(thumbW * 9.0f / 16.0f);
+  c.a = a;
+  c.b = ImVec2(a.x + width, a.y + MediaCardHeight(width));
+  c.thumbA = ImVec2(a.x + pad, a.y + pad);
+  c.thumbB = ImVec2(c.thumbA.x + thumbW, c.thumbA.y + thumbH);
+  const float inset = CurrentStyle().card == CardLook::Heavy ? Px(10) : 0.0f;
+  c.text = ImVec2(c.thumbA.x + inset, c.thumbB.y + Px(10));
+  c.textWidth = thumbW - inset * 2 - Px(4);
+  return c;
+}
+
+void MediaCardBack(ImDrawList* dl, const MediaCard& c, float hover, bool selected) {
+  const Palette& p = Colors();
+  (void)selected;
+  switch (CurrentStyle().card) {
+  case CardLook::Ascii:
+  case CardLook::Framed:
+  case CardLook::Neon:
+  case CardLook::Tile:
+  case CardLook::Polaroid:
+    TileFrame(dl, c.a, c.b, hover);
+    break;
+  case CardLook::Heavy:
+    // El pie es una franja invertida debajo de la miniatura.
+    dl->AddRectFilled(ImVec2(c.a.x, c.thumbB.y), c.b, C(Mix(p.text, p.accent, hover)));
+    break;
+  case CardLook::Plain:
+  case CardLook::Hud:
+    break;
+  }
+  ShapeFill(dl, c.thumbA, c.thumbB, C(CurrentStyle().card == CardLook::Tile ? p.bgAlt : p.surface));
+}
+
+void MediaCardFront(ImDrawList* dl, const MediaCard& c, float hover, bool selected) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  (void)selected;
+  switch (st.card) {
+  case CardLook::Plain:
+    HoverOutline(dl, c.a, c.b, hover);
+    break;
+  case CardLook::Hud: {
+    CutCorners(dl, c.thumbA, c.thumbB, C(p.bg));
+    // Corchetes de visor alrededor de la miniatura; se abren con el ratón.
+    const float o = Px(3) + Px(2) * hover;
+    DrawBrackets(dl, c.thumbA - ImVec2(o, o), c.thumbB + ImVec2(o, o), C(Mix(p.lineStrong, p.accent, hover)),
+                 Px(10) + Px(8) * hover, std::max(1.0f, std::round(Px(2))));
+    break;
+  }
+  case CardLook::Framed:
+    CutCorners(dl, c.thumbA, c.thumbB, C(p.bg));
+    break;
+  case CardLook::Tile: {
+    // Raíl del acento que crece desde el centro con el ratón.
+    if (hover > 0) {
+      const float mid = (c.a.y + c.b.y) * 0.5f, half = (c.b.y - c.a.y) * 0.5f * EaseOut(hover);
+      dl->AddRectFilled(ImVec2(c.a.x, mid - half), ImVec2(c.a.x + Px(3), mid + half), C(p.accent));
+    }
+    break;
+  }
+  case CardLook::Heavy:
+    dl->AddRect(c.thumbA, ImVec2(c.thumbB.x, c.b.y), C(p.text), 0, 0, LineW());
+    break;
+  case CardLook::Polaroid:
+    dl->AddRect(c.thumbA, c.thumbB, C(p.line), 0, 0, 1.0f);
+    break;
+  case CardLook::Ascii:
+  case CardLook::Neon:
+    break;
+  }
+}
+
+void MediaCardCaption(ImDrawList* dl, const MediaCard& c, const std::string& title, const std::string& detail, float hover,
+                      int number) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  ImFont* font = ImGui::GetFont();
+  const float fs = Px(kBody), ss = Px(kSmall);
+  float w = c.textWidth;
+  switch (st.card) {
+  case CardLook::Hud: {
+    char num[16];
+    snprintf(num, sizeof(num), "#%02d", number);
+    const float nw = number > 0 ? TextSize(bold_, ss, num).x + Px(8) : 0.0f;
+    if (number > 0) Text(dl, bold_, ss, ImVec2(c.thumbB.x - nw + Px(8), c.text.y + Px(1)), C(p.accent), num);
+    std::string up = Upper(title);
+    const float tracking = Px(1.0f);
+    up = Ellipsize(bold_, ss, up, w - nw - tracking * 12);
+    TrackedText(dl, bold_, ss, c.text + ImVec2(0, Px(1)), C(Mix(p.text, p.accent, hover)), up.c_str(), tracking);
+    Text(dl, font, ss, ImVec2(c.text.x, c.text.y + Px(20)), C(p.textFaint), Ellipsize(font, ss, detail, w).c_str());
+    return;
+  }
+  case CardLook::Ascii: {
+    Text(dl, bold_, fs, c.text, C(p.accent), ">");
+    const float x = c.text.x + TextSize(bold_, fs, "> ").x;
+    Text(dl, bold_, fs, ImVec2(x, c.text.y), C(p.text), Ellipsize(bold_, fs, title, w - (x - c.text.x)).c_str());
+    Text(dl, font, ss, ImVec2(c.text.x, c.text.y + Px(20)), C(p.textFaint), Ellipsize(font, ss, detail, w).c_str());
+    return;
+  }
+  case CardLook::Polaroid: {
+    // Pie centrado con la letra de títulos (con serifa en Papel).
+    const float ds = Px(kBody) + Px(2);
+    ImFont* df = Display(ds);
+    std::string t = Ellipsize(df, ds, title, w);
+    const float tw = TextSize(df, ds, t.c_str()).x;
+    Text(dl, df, ds, ImVec2(c.text.x + (w - tw) * 0.5f, c.text.y + Px(2)), C(p.text), t.c_str());
+    std::string d = Ellipsize(font, ss, detail, w);
+    const float dw = TextSize(font, ss, d.c_str()).x;
+    Text(dl, font, ss, ImVec2(c.text.x + (w - dw) * 0.5f, c.text.y + Px(26)), C(p.textMuted), d.c_str());
+    return;
+  }
+  case CardLook::Heavy:
+    Text(dl, bold_, fs, c.text, C(p.bg), Ellipsize(bold_, fs, title, w).c_str());
+    Text(dl, font, ss, ImVec2(c.text.x, c.text.y + Px(20)), C(p.bg), Ellipsize(font, ss, detail, w).c_str());
+    return;
+  case CardLook::Neon: {
+    std::string up = Upper(title);
+    const float tracking = Px(1.2f);
+    up = Ellipsize(bold_, ss, up, w - tracking * 12);
+    TrackedText(dl, bold_, ss, c.text + ImVec2(0, Px(1)), C(Mix(p.text, p.accent, hover)), up.c_str(), tracking);
+    Text(dl, font, ss, ImVec2(c.text.x, c.text.y + Px(20)), C(p.textFaint), Ellipsize(font, ss, detail, w).c_str());
+    return;
+  }
+  case CardLook::Plain:
+  case CardLook::Framed:
+  case CardLook::Tile:
+    break;
+  }
+  Text(dl, bold_, fs, c.text, C(p.text), Ellipsize(bold_, fs, title, w).c_str());
+  Text(dl, font, ss, ImVec2(c.text.x, c.text.y + Px(20)), C(p.textFaint), Ellipsize(font, ss, detail, w).c_str());
+}
+
+void Tag(ImDrawList* dl, ImVec2 pos, const std::string& text, bool alignRight) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  float fs = Px(kLabel);
+  std::string shown = st.card == CardLook::Ascii ? "[" + text + "]" : text;
+  ImVec2 ts = TextSize(bold_, fs, shown.c_str());
+  ImVec2 pad(Px(6), Px(3));
+  ImVec2 a = alignRight ? ImVec2(pos.x - ts.x - pad.x * 2, pos.y) : pos;
+  ImVec2 b(a.x + ts.x + pad.x * 2, a.y + ts.y + pad.y * 2);
+  ImU32 fill = C(p.bg, 0.86f), fg = C(p.text);
+  switch (st.card) {
+  case CardLook::Hud:
+    // Táctico: el tipo en el acento.
+    if (!alignRight) {
+      fill = C(p.accent);
+      fg = C(p.onAccent);
+    }
+    break;
+  case CardLook::Heavy:
+    fill = C(p.text);
+    fg = C(p.bg);
+    break;
+  case CardLook::Ascii:
+    fg = C(p.accent);
+    break;
+  default:
+    break;
+  }
+  dl->AddRectFilled(a, b, fill);
+  if (st.card == CardLook::Neon) dl->AddRect(a, b, C(p.accent, 0.7f), 0, 0, 1.0f);
+  Text(dl, bold_, fs, a + pad, fg, shown.c_str());
+}
+
+float HeadlineHeight() {
+  const TitleLook t = CurrentStyle().title;
+  return t == TitleLook::Prompt ? Px(kBody + 2) : t == TitleLook::Index || t == TitleLook::Chroma ? Px(kBody + 2) : Px(kTitle);
+}
+
+float Headline(ImDrawList* dl, ImVec2 pos, const std::string& text, ImU32 color, float maxWidth) {
+  const Palette& p = Colors();
+  const TitleLook look = CurrentStyle().title;
+  const float size = HeadlineHeight();
+  switch (look) {
+  case TitleLook::Prompt: {
+    Text(dl, bold_, size, pos, C(p.accent), ">");
+    const float x = pos.x + TextSize(bold_, size, "> ").x;
+    Text(dl, bold_, size, ImVec2(x, pos.y), color, Ellipsize(bold_, size, text, maxWidth - (x - pos.x)).c_str());
+    return size;
+  }
+  case TitleLook::Index:
+  case TitleLook::Chroma: {
+    ImFont* df = Display(size);
+    const float tracking = Px(1.2f);
+    std::string up = Upper(text);
+    if (TrackedWidth(df, size, up.c_str(), tracking) > maxWidth) up = Ellipsize(df, size, up, maxWidth - tracking * 30);
+    if (look == TitleLook::Chroma) {
+      TrackedText(dl, df, size, pos + ImVec2(-Px(1.5f), 0), C(p.danger, 0.5f), up.c_str(), tracking);
+      TrackedText(dl, df, size, pos + ImVec2(Px(1.5f), 0), C(p.accent, 0.7f), up.c_str(), tracking);
+    }
+    TrackedText(dl, df, size, pos, color, up.c_str(), tracking);
+    return size;
+  }
+  default: {
+    ImFont* df = Display(size);
+    Text(dl, df, size, pos, color, Ellipsize(df, size, text, maxWidth).c_str());
+    return size;
+  }
+  }
+}
+
+void PageTitle(const char* title, const std::string& subtitle, int index, const char* section) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 q = ImGui::GetCursorScreenPos();
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const float ts = Px(st.titleSize);
+  ImFont* df = Display(ts);
+  const float line = std::max(1.0f, std::round(Px(1)));
+  float h = ts;
+  float subX = q.x;
+  bool centered = false;
+  switch (st.title) {
+  case TitleLook::Block: {
+    // Un bloque del acento a la altura de las mayúsculas.
+    const float bar = Px(7);
+    dl->AddRectFilled(ImVec2(q.x, q.y + ts * 0.22f), ImVec2(q.x + bar, q.y + ts * 0.90f), C(p.accent));
+    Text(dl, df, ts, ImVec2(q.x + bar + Px(14), q.y), C(p.text), title);
+    subX = q.x + bar + Px(14);
+    break;
+  }
+  case TitleLook::Echo:
+    // El eco del acento, desplazado, detrás del título.
+    Text(dl, df, ts, q + ImVec2(Px(4), Px(3)), C(p.accent, 0.30f), title);
+    Text(dl, df, ts, q, C(p.text), title);
+    break;
+  case TitleLook::Chroma: {
+    std::string up = Upper(title);
+    const float tr = Px(4);
+    TrackedText(dl, df, ts, q + ImVec2(-Px(2.5f), 0), C(p.danger, 0.55f), up.c_str(), tr);
+    TrackedText(dl, df, ts, q + ImVec2(Px(2.5f), Px(1)), C(p.accent, 0.80f), up.c_str(), tr);
+    TrackedText(dl, df, ts, q, C(p.text), up.c_str(), tr);
+    break;
+  }
+  case TitleLook::Index: {
+    float x = q.x;
+    if (index > 0) {
+      char num[8];
+      snprintf(num, sizeof(num), "%02d", index);
+      Text(dl, df, ts, ImVec2(x, q.y), C(p.accent), num);
+      x += TextSize(df, ts, num).x + Px(12);
+    }
+    Text(dl, df, ts, ImVec2(x, q.y), C(p.textFaint), "//");
+    x += TextSize(df, ts, "//").x + Px(12);
+    std::string up = section ? Upper(section) + "  /  " + Upper(title) : Upper(title);
+    TrackedText(dl, df, ts, ImVec2(x, q.y), C(p.text), up.c_str(), Px(1.5f));
+    // Una regla con marcas debajo, como en un HUD.
+    const float y = q.y + ts + Px(8);
+    dl->AddRectFilled(ImVec2(q.x, y), ImVec2(q.x + avail, y + line), C(p.line));
+    dl->AddRectFilled(ImVec2(q.x, y - line), ImVec2(q.x + Px(40), y + line * 2), C(p.accent));
+    for (float tx = q.x + Px(60); tx < q.x + avail; tx += Px(24))
+      dl->AddRectFilled(ImVec2(tx, y - Px(3)), ImVec2(tx + line, y), C(p.lineStrong));
+    h = ts + Px(9);
+    break;
+  }
+  case TitleLook::Prompt: {
+    std::string path = "~/" + (section ? Lowercase(section) + "/" : std::string()) + Lowercase(title);
+    float x = q.x;
+    Text(dl, df, ts, ImVec2(x, q.y), C(p.accent), path.c_str());
+    x += TextSize(df, ts, path.c_str()).x + Px(10);
+    Text(dl, df, ts, ImVec2(x, q.y), C(p.textMuted), "$");
+    x += TextSize(df, ts, "$").x + Px(8);
+    dl->AddRectFilled(ImVec2(x, q.y + Px(3)), ImVec2(x + ts * 0.5f, q.y + ts), C(p.accent, Blink()));
+    break;
+  }
+  case TitleLook::Rule: {
+    Text(dl, df, ts, q, C(p.text), title);
+    const float tw = TextSize(df, ts, title).x, y = q.y + ts + Px(8);
+    dl->AddRectFilled(ImVec2(q.x, y), ImVec2(q.x + tw, y + Px(2)), C(p.accent));
+    dl->AddRectFilled(ImVec2(q.x + tw, y + Px(1)), ImVec2(q.x + avail, y + Px(1) + line), C(p.line));
+    h = ts + Px(10);
+    break;
+  }
+  case TitleLook::Soft: {
+    const char* rest = AfterFirst(title);
+    std::string first(title, rest);
+    Text(dl, df, ts, q, C(p.accent), first.c_str());
+    Text(dl, df, ts, ImVec2(q.x + TextSize(df, ts, first.c_str()).x, q.y), C(p.text), rest);
+    break;
+  }
+  case TitleLook::Masthead: {
+    // Cabecera de revista: filete doble arriba, el título centrado y un filete debajo.
+    dl->AddRectFilled(q, ImVec2(q.x + avail, q.y + line * 2), C(p.text));
+    dl->AddRectFilled(ImVec2(q.x, q.y + line * 2 + Px(3)), ImVec2(q.x + avail, q.y + line * 3 + Px(3)), C(p.text));
+    const float top = q.y + Px(14);
+    const float tw = TextSize(df, ts, title).x;
+    Text(dl, df, ts, ImVec2(q.x + (avail - tw) * 0.5f, top), C(p.text), title);
+    const float y = top + ts + Px(10);
+    dl->AddRectFilled(ImVec2(q.x, y), ImVec2(q.x + avail, y + line), C(p.lineStrong));
+    h = y + line - q.y;
+    centered = true;
+    break;
+  }
+  case TitleLook::Heavy: {
+    const float tw = TextSize(df, ts, title).x;
+    dl->AddRectFilled(q, ImVec2(q.x + tw + Px(24), q.y + ts + Px(12)), C(p.text));
+    Text(dl, df, ts, ImVec2(q.x + Px(12), q.y + Px(6)), C(p.bg), title);
+    h = ts + Px(12);
+    break;
+  }
+  }
+  if (!subtitle.empty()) {
+    ImFont* font = ImGui::GetFont();
+    float ss = st.title == TitleLook::Soft ? Px(kBody) : Px(kSmall);
+    std::string text = subtitle;
+    ImU32 color = C(p.textMuted);
+    if (st.title == TitleLook::Prompt) {
+      text = "# " + subtitle;
+      color = C(p.textFaint);
+    }
+    const float y = q.y + h + Px(st.title == TitleLook::Masthead ? 10.0f : 8.0f);
+    if (st.title == TitleLook::Index || st.title == TitleLook::Chroma) {
+      std::string up = Upper(text);
+      ss = Px(kLabel);
+      const float tracking = Px(1.4f);
+      if (TrackedWidth(bold_, ss, up.c_str(), tracking) > avail - (subX - q.x))
+        up = Ellipsize(bold_, ss, up, avail - (subX - q.x) - tracking * 40);
+      TrackedText(dl, bold_, ss, ImVec2(subX, y), color, up.c_str(), tracking);
+    } else {
+      text = Ellipsize(font, ss, text, avail - (subX - q.x));
+      const float x = centered ? q.x + (avail - TextSize(font, ss, text.c_str()).x) * 0.5f : subX;
+      Text(dl, font, ss, ImVec2(x, y), color, text.c_str());
+    }
+    h = y + ss - q.y;
+  }
+  ImGui::Dummy(ImVec2(0, h + Px(4)));
+  Gap(st.pad * 0.5f);
+}
+
+bool RailItem(int index, Icon icon, const char* name, bool selected, float height) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  ImGui::PushID(index);
+  const float w = ImGui::GetContentRegionAvail().x;
+  bool pressed = ImGui::InvisibleButton("rail", ImVec2(w, height));
+  Motion m = Animate();
+  bool hov = ImGui::IsItemHovered();
+  ImGui::PopID();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 ca = a + ImVec2(Px(10), Px(3)), cb = b - ImVec2(Px(10), Px(3));
+  TrackHover(ImGui::GetItemID(), ca, cb, hov);
+  // La celda elegida con la forma del diseño y un raíl del acento en el borde.
+  if (st.button == ButtonShape::Outline || st.button == ButtonShape::Double) {
+    if (selected) dl->AddRect(ca, cb, C(p.accent), 0, 0, LineW());
+    else if (m.hover > 0) dl->AddRect(ca, cb, C(p.lineStrong, m.hover), 0, 0, LineW());
+  } else {
+    if (selected) ShapeFill(dl, ca, cb, C(p.accent, 0.16f));
+    else if (m.hover > 0) ShapeFill(dl, ca, cb, C(p.surface, m.hover));
+    if (selected) ShapeStroke(dl, ca, cb, C(p.accent, 0.8f));
+  }
+  const float frac = std::max(selected ? 1.0f : 0.0f, 0.5f * m.hover), mid = (a.y + b.y) * 0.5f;
+  if (frac > 0) {
+    const float half = (b.y - a.y) * 0.32f * frac;
+    dl->AddRectFilled(ImVec2(a.x, mid - half), ImVec2(a.x + Px(3), mid + half), C(p.accent));
+  }
+  const ImU32 fg = selected ? p.text : Mix(p.textMuted, p.text, m.hover);
+  const ImVec2 ic((a.x + b.x) * 0.5f, a.y + height * 0.38f);
+  DrawIcon(dl, icon, ic, Px(9), C(selected ? p.accent : fg));
+  const float ls = Px(kLabel);
+  std::string label = Ellipsize(ImGui::GetFont(), ls, name, cb.x - ca.x - Px(4));
+  const float lw = TextSize(selected ? bold_ : ImGui::GetFont(), ls, label.c_str()).x;
+  Text(dl, selected ? bold_ : ImGui::GetFont(), ls, ImVec2((a.x + b.x - lw) * 0.5f, a.y + height * 0.64f), C(fg),
+       label.c_str());
+  PaintPress(dl, ca, cb, Role::Quiet, m);
+  return pressed;
+}
+
+float TabWidth(const char* name) {
+  const std::string text = TabText(name);
+  const float fs = TabFontSize();
+  float w = TabUpper() ? TrackedWidth(bold_, fs, text.c_str(), Px(1.4f)) : TextSize(bold_, fs, text.c_str()).x;
+  if (CurrentStyle().title == TitleLook::Prompt) w += TextSize(bold_, fs, "[]").x;
+  return w + Px(30);
+}
+
+bool TabItem(int index, const char* name, bool selected, float height) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  ImGui::PushID(index);
+  bool pressed = ImGui::InvisibleButton("tab", ImVec2(TabWidth(name), height));
+  Motion m = Animate();
+  bool hov = ImGui::IsItemHovered();
+  ImGui::PopID();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const std::string text = TabText(name);
+  const float fs = TabFontSize();
+  ImFont* font = selected || TabUpper() ? bold_ : ImGui::GetFont();
+  ImU32 fg = selected ? p.text : Mix(p.textMuted, p.text, m.hover);
+  const float mid = (a.y + b.y) * 0.5f;
+  const ImVec2 ca = a + ImVec2(0, Px(8)), cb = b - ImVec2(0, Px(8));
+  switch (st.title) {
+  case TitleLook::Index:
+    // Táctico: la elegida es un bloque del acento con la esquina cortada.
+    if (selected) {
+      ShapeFill(dl, ca, cb, C(p.accent));
+      fg = p.onAccent;
+    } else if (m.hover > 0) {
+      ShapeStroke(dl, ca, cb, C(p.accent, m.hover));
+    }
+    break;
+  case TitleLook::Chroma:
+    // Neón: doble raya debajo de la elegida.
+    if (selected) {
+      dl->AddRectFilled(ImVec2(a.x + Px(6), b.y - Px(3)), ImVec2(b.x - Px(6), b.y - Px(1)), C(p.accent));
+      dl->AddRectFilled(ImVec2(a.x + Px(6), b.y - Px(7)), ImVec2(b.x - Px(6), b.y - Px(6)), C(p.accent, 0.4f));
+    } else if (m.hover > 0) {
+      dl->AddRectFilled(ImVec2(a.x + Px(6), b.y - Px(3)), ImVec2(b.x - Px(6), b.y - Px(2)), C(p.lineStrong, m.hover));
+    }
+    break;
+  case TitleLook::Masthead: {
+    // Papel: subrayado de tinta bajo el texto; con el ratón, del acento y creciendo.
+    const float tw = TextSize(font, fs, text.c_str()).x, x0 = (a.x + b.x - tw) * 0.5f, y = mid + fs * 0.5f + Px(3);
+    if (selected) dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + tw, y + Px(2)), C(p.text));
+    else if (m.hover > 0) dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + tw * EaseOut(m.hover), y + Px(1)), C(p.accent));
+    break;
+  }
+  case TitleLook::Prompt:
+    if (selected) dl->AddRectFilled(ca, cb, C(p.accent, 0.14f));
+    else if (m.hover > 0) dl->AddRectFilled(ca, cb, C(p.surface, m.hover));
+    break;
+  default:
+    if (selected) dl->AddRectFilled(ImVec2(a.x + Px(8), b.y - Px(2)), ImVec2(b.x - Px(8), b.y), C(p.accent));
+    else if (m.hover > 0) dl->AddRectFilled(ImVec2(a.x + Px(8), b.y - Px(2)), ImVec2(b.x - Px(8), b.y), C(p.lineStrong, m.hover));
+    break;
+  }
+  if (st.title == TitleLook::Prompt) {
+    // Terminal: [inicio] con los corchetes del acento en la elegida.
+    const float lw = TextSize(font, fs, "[").x, tw = TextSize(font, fs, text.c_str()).x;
+    float x = (a.x + b.x - tw - lw * 2) * 0.5f;
+    Text(dl, font, fs, ImVec2(x, mid - fs * 0.5f), C(selected ? p.accent : p.textFaint), "[");
+    Text(dl, font, fs, ImVec2(x + lw, mid - fs * 0.5f), C(fg), text.c_str());
+    Text(dl, font, fs, ImVec2(x + lw + tw, mid - fs * 0.5f), C(selected ? p.accent : p.textFaint), "]");
+  } else if (TabUpper()) {
+    const float tr = Px(1.4f), tw = TrackedWidth(font, fs, text.c_str(), tr);
+    TrackedText(dl, font, fs, ImVec2((a.x + b.x - tw) * 0.5f, mid - fs * 0.5f), C(fg), text.c_str(), tr);
+  } else {
+    const float tw = TextSize(font, fs, text.c_str()).x;
+    Text(dl, font, fs, ImVec2((a.x + b.x - tw) * 0.5f, mid - fs * 0.5f), C(fg), text.c_str());
+  }
+  PaintPress(dl, ca, cb, Role::Quiet, m);
+  return pressed;
+}
+
+void NavChrome(ImDrawList* dl, ImVec2 a, ImVec2 b, bool horizontal) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  const float t = std::max(1.0f, std::round(LineW()));
+  if (st.floatingNav) {
+    // Suave: la navegación es una tarjeta, sin bordes.
+    dl->AddRectFilled(a, b, C(p.bgAlt));
+    return;
+  }
+  dl->AddRectFilled(a, b, C(p.bgAlt));
+  // El borde que da a la página.
+  const ImVec2 ea = horizontal ? ImVec2(a.x, b.y - t) : ImVec2(b.x - t, a.y), eb = b;
+  switch (st.title) {
+  case TitleLook::Index: {
+    dl->AddRectFilled(ea, eb, C(p.line));
+    // Marcas de HUD a lo largo del borde y un tramo del acento.
+    if (horizontal) {
+      dl->AddRectFilled(ImVec2(a.x, b.y - t * 2), ImVec2(a.x + Px(120), b.y), C(p.accent));
+      for (float x = a.x + Px(140); x < b.x; x += Px(16))
+        dl->AddRectFilled(ImVec2(x, b.y - Px(4)), ImVec2(x + t, b.y), C(p.lineStrong));
+    } else {
+      dl->AddRectFilled(ImVec2(b.x - t * 2, a.y), ImVec2(b.x, a.y + Px(120)), C(p.accent));
+    }
+    break;
+  }
+  case TitleLook::Chroma: {
+    // Doble línea: la del borde y otra del acento 3 px más allá, tenue.
+    dl->AddRectFilled(ea, eb, C(p.lineStrong));
+    const float o = std::round(Px(3));
+    if (horizontal) dl->AddRectFilled(ImVec2(a.x, b.y - t - o), ImVec2(b.x, b.y - o), C(p.accent, 0.45f));
+    else dl->AddRectFilled(ImVec2(b.x - t - o, a.y), ImVec2(b.x - o, b.y), C(p.accent, 0.45f));
+    break;
+  }
+  case TitleLook::Prompt:
+    // Terminal: borde de guiones.
+    if (horizontal)
+      for (float x = a.x; x < b.x; x += Px(8)) dl->AddRectFilled(ImVec2(x, b.y - t), ImVec2(std::min(x + Px(4), b.x), b.y), C(p.lineStrong));
+    else
+      for (float y = a.y; y < b.y; y += Px(8)) dl->AddRectFilled(ImVec2(b.x - t, y), ImVec2(b.x, std::min(y + Px(4), b.y)), C(p.lineStrong));
+    break;
+  case TitleLook::Masthead:
+    // Papel: doble filete.
+    dl->AddRectFilled(ea, eb, C(p.text));
+    if (horizontal) dl->AddRectFilled(ImVec2(a.x, b.y - t * 2 - Px(3)), ImVec2(b.x, b.y - t - Px(3)), C(p.text));
+    break;
+  case TitleLook::Heavy:
+    dl->AddRectFilled(ea, eb, C(p.text));
+    break;
+  default:
+    dl->AddRectFilled(ea, eb, C(p.line));
+    break;
+  }
+}
+
+void Monogram(ImDrawList* dl, ImVec2 c, float size) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  const ImVec2 a = c - ImVec2(size * 0.5f, size * 0.5f), b = c + ImVec2(size * 0.5f, size * 0.5f);
+  ImU32 fg = p.onAccent;
+  switch (st.button) {
+  case ButtonShape::Outline:
+    dl->AddRect(a, b, C(p.accent), 0, 0, LineW());
+    fg = p.accent;
+    break;
+  case ButtonShape::Double:
+    DoubleStroke(dl, a, b, C(p.accent), C(p.accent, 0.4f));
+    fg = p.accent;
+    break;
+  case ButtonShape::Bracket:
+    DrawBrackets(dl, a, b, C(p.accent), size * 0.3f);
+    fg = p.accent;
+    break;
+  default:
+    ShapeFill(dl, a, b, C(p.accent));
+    break;
+  }
+  ImFont* df = Display(size * 0.62f);
+  const float fs = size * 0.62f;
+  const ImVec2 ts = TextSize(df, fs, "S");
+  Text(dl, df, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), C(fg), "S");
 }
 
 } // namespace spectre::ui
