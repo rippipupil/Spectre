@@ -1,8 +1,8 @@
 #pragma once
 
 // «Editar» de la biblioteca: una página con el vídeo, una línea de tiempo con
-// asas y las herramientas en cinco pestañas (Tiempo, Imagen, Color, Texto,
-// Audio). Nada se escribe hasta pulsar «Guardar copia»: entonces App lo pasa
+// asas y las herramientas en seis pestañas (Tiempo, Imagen, Color, Texto,
+// Audio, Cámara). Nada se escribe hasta pulsar «Guardar copia»: entonces App lo pasa
 // a EditWorker (app/VideoEdit.h) y el original no cambia.
 //
 // La vista previa no recodifica nada: el reproductor del visor enseña el
@@ -77,14 +77,16 @@ private:
   void Header(const MediaItem& item, Exit* exit);
   void Preview(AppWindow& w, const MediaItem& item, ImVec2 a, ImVec2 b);
   void RequestPreview(AppWindow& w, ImVec2 area);
+  void RequestCamFrame();
   void Transport(const MediaItem& item, float width);
   void Timeline(const MediaItem& item, float width);
-  void Tools(const MediaItem& item, const AppActions& a, float height);
+  void Tools(const AppModel& m, const MediaItem& item, const AppActions& a, float height);
   void TabTime(const MediaItem& item, const AppActions& a);
   void TabPicture();
   void TabColor();
   void TabText();
   void TabAudio();
+  void TabCamera(const AppModel& m);
   void Footer(AppModel& m, const AppActions& a, const MediaItem& item, Exit* exit);
   void Keyboard(const AppActions& a, const MediaItem& item, Exit* exit);
   void Commit();
@@ -149,6 +151,12 @@ private:
   // Texto y marca de agua en movimiento.
   std::vector<LiveOverlay> overlays_;
   std::string overlayKey_, overlayAsked_;
+
+  // Cámara cambiada en movimiento: el fondo de la pista aparte en el último
+  // momento pedido (el hilo lo lee mientras se reproduce).
+  std::shared_ptr<UiTexture> camBg_;
+  bool camBusy_ = false;
+  double camAsked_ = -1;
 };
 
 } // namespace spectre

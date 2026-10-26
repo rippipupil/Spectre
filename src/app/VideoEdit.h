@@ -19,6 +19,8 @@
 #include <thread>
 #include <vector>
 
+struct AVFrame;
+
 namespace spectre {
 
 enum class EditAspect { Original, Wide, Vertical, Square, Portrait }; // 16:9, 9:16, 1:1, 4:5
@@ -29,6 +31,7 @@ enum class EditFormat { Video, Gif, Audio };    // MP4, GIF o solo el sonido (M4
 enum class EditSize { Same, Light, Discord };  // Discord: después se exporta a menos de 20 MB
 enum class EditPlace { Top, Middle, Bottom };
 enum class EditCorner { TopLeft, TopRight, BottomLeft, BottomRight };
+enum class EditCamShape { Original, Square, Circle }; // como se grabó, cuadrada o redonda
 
 // Lo que se puede cambiar. Los tiempos son segundos del original.
 struct EditSettings {
@@ -74,6 +77,17 @@ struct EditSettings {
   bool pixelate = false;     // en cuadraditos en vez de difuminado
   float blurX = 0.4f, blurY = 0.4f, blurW = 0.2f, blurH = 0.2f; // fracción de la imagen final
 
+  // Cámara (solo si el clip la guardó aparte, ver EditSource::Webcam):
+  // posición y ancho en fracciones de la imagen final.
+  bool camEdit = false;      // cambiarla; si no, se queda como se grabó
+  bool camHide = false;      // quitarla
+  float camX = 0.72f, camY = 0.68f; // esquina de arriba a la izquierda
+  float camW = 0.25f;
+  EditCamShape camShape = EditCamShape::Original;
+  int camBorder = 0;         // 0 sin borde, 1 fino, 2 grueso
+  uint32_t camBorderColor = 0xFFFFFF; // 0xRRGGBB
+  bool camMirror = false;
+
   // Audio
   float volume = 1.0f;       // juego (o todo, si no hay pista del micro aparte): 0 a 2
   float micVolume = 1.0f;    // micrófono, si el clip lo tiene en su propia pista
@@ -101,8 +115,19 @@ struct EditSource {
   // clip se grabó con pistas separadas, las del juego y el micrófono.
   int mixTrack = -1, gameTrack = -1, micTrack = -1;
   bool SeparateMic() const { return gameTrack >= 0 && micTrack >= 0; }
+  // Cámara guardada aparte (Ajustes > Cámara > «Poder editar la cámara
+  // después»): la pista camTrack tiene lo que había del juego debajo de la
+  // cámara, que el vídeo lleva pegada en este recuadro (píxeles del original).
+  int camTrack = -1;
+  int camX = 0, camY = 0, camW = 0, camH = 0;
+  bool Webcam() const { return camTrack >= 0 && camW >= 16 && camH >= 16; }
 };
 bool ProbeEditSource(const std::string& path, EditSource* source, std::string* error);
+
+// Título de la pista con el fondo de la cámara: lo escribe la captura (con el
+// recuadro de la cámara en píxeles del vídeo) y lo lee ProbeEditSource.
+std::string CamTrackTitle(int x, int y, int w, int h);
+bool ParseCamTrackTitle(const std::string& title, int* x, int* y, int* w, int* h);
 
 // Un tramo del resultado: un trozo del original a una velocidad, al revés o
 // una imagen congelada (from = to, hold segundos).
@@ -139,6 +164,41 @@ struct EditGeometry {
   int fpsNum = 60, fpsDen = 1;
 };
 EditGeometry ComputeGeometry(const EditSettings& settings, const EditSource& source);
+
+// Recuadro de la cámara en el lienzo (píxeles de canvasW x canvasH); w = 0
+// si no se pone encima (sin cambiar, quitada o el clip no la tiene aparte).
+struct EditCamBox {
+  int x = 0, y = 0, w = 0, h = 0;
+};
+EditCamBox ComputeCamBox(const EditSettings& settings, const EditSource& source, const EditGeometry& g);
+// Para empezar a cambiar la cámara desde donde se ve ahora: su sitio y su
+// ancho en la imagen final (o una esquina si el formato ya la ha movido).
+void DefaultCamPlacement(EditSettings* settings, const EditSource& source);
+
+// Lee la pista con el fondo de la cámara de un clip, en orden o saltando (la
+// vista previa y el guardado). Solo un hilo a la vez.
+class CamBackgroundReader {
+public:
+  CamBackgroundReader();
+  ~CamBackgroundReader();
+  CamBackgroundReader(const CamBackgroundReader&) = delete;
+  CamBackgroundReader& operator=(const CamBackgroundReader&) = delete;
+  bool Open(const std::string& path, int track);
+  void Close();
+  bool IsOpen() const;
+  const std::string& Path() const { return path_; }
+  // El fotograma de la pista que se ve en el segundo t del original (el
+  // último que empieza antes; si t es anterior al primero, el primero).
+  // nullptr si no hay ninguno. Vale hasta la siguiente llamada.
+  const AVFrame* At(double t);
+  // Lo mismo en BGRA (para la vista previa en movimiento).
+  bool ReadBgra(double t, std::vector<uint8_t>* bgra, int* width, int* height);
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  std::string path_;
+};
 
 // Imagen RGBA (de arriba abajo) que se pone encima del vídeo: el texto y la
 // marca de agua. La dibuja quien llama (en Windows, con GDI): así el motor no
@@ -185,10 +245,16 @@ EditResult RenderEdit(const EditJob& job, const std::atomic<bool>& cancel, const
 // Vista previa: aplica la imagen y el color a un fotograma del original
 // (BGR de 24 bits, de arriba abajo, el que enseña el reproductor) visto en el
 // segundo sourceSeconds. Devuelve BGRA del tamaño final, reducido para que
-// quepa en maxW x maxH.
+// quepa en maxW x maxH. camBackground: el fotograma de la pista del fondo de
+// la cámara en ese momento (BGRA), si se cambia la cámara.
+struct EditImage {
+  const uint8_t* data = nullptr;
+  int width = 0, height = 0;
+};
 bool RenderEditPreview(const EditSettings& settings, const EditSource& source, const uint8_t* bgr, int width,
                        int height, double sourceSeconds, const TextRasterizer& raster, int maxW, int maxH,
-                       std::vector<uint8_t>* bgra, int* outW, int* outH, std::string* error);
+                       std::vector<uint8_t>* bgra, int* outW, int* outH, std::string* error,
+                       EditImage camBackground = {});
 
 // Hay algo que cambiar en la imagen (si no, la vista previa es el vídeo tal cual).
 bool EditTouchesPicture(const EditSettings& settings);
