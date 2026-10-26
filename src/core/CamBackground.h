@@ -47,6 +47,8 @@ public:
   // Hilo de vídeo, después de codificar el fotograma `index` de `frame`:
   // dónde se pintó la cámara (píxeles de la salida) o nullptr si no se pintó.
   void Frame(int64_t index, const CapturedFrame& frame, const RECT* rect);
+  // Pista del anillo que recibe ahora el fondo; -1 si ninguna.
+  int ActiveStream() const { return activeStream_; }
 
   // kbps de la pista en el peor caso con la cámara al sizePercent % del ancho
   // (para el tope de RAM del replay).
@@ -92,6 +94,7 @@ private:
   std::unique_ptr<Aux> ready_;
   std::vector<std::unique_ptr<Aux>> closing_;
   std::atomic<bool> openFailed_{false};
+  std::atomic<int> activeStream_{-1};
 };
 
 } // namespace spectre

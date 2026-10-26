@@ -57,18 +57,27 @@ QualityPlan AuxPlan(const QualityPlan& main, int outW, int outH, int w, int h) {
 }
 
 // Lo contrario del letterbox de VideoConverter::Convert: el recuadro r de la
-// salida en píxeles de la textura capturada.
-bool SourceRect(UINT srcW, UINT srcH, int outW, int outH, const RECT& r, RECT* out) {
-  if (srcW == 0 || srcH == 0) return false;
+// salida en píxeles de la textura capturada (src). Si parte de r cae sobre
+// las bandas negras (el juego no tiene la proporción del vídeo), dst es la
+// parte del fotograma de auxW x auxH que sí es juego; el resto queda negro,
+// como en el vídeo.
+bool SourceRect(UINT srcW, UINT srcH, int outW, int outH, const RECT& r, int auxW, int auxH, RECT* src, RECT* dst) {
+  if (srcW == 0 || srcH == 0 || r.right <= r.left || r.bottom <= r.top) return false;
   const double scale = std::min(double(outW) / srcW, double(outH) / srcH);
   const LONG w = LONG(srcW * scale) & ~1L;
   const LONG h = LONG(srcH * scale) & ~1L;
   const LONG x = (LONG(outW) - w) / 2 & ~1L;
   const LONG y = (LONG(outH) - h) / 2 & ~1L;
-  auto sx = [&](LONG v) { return std::clamp<LONG>(LONG(std::lround(double(v - x) / scale)), 0, LONG(srcW)); };
-  auto sy = [&](LONG v) { return std::clamp<LONG>(LONG(std::lround(double(v - y) / scale)), 0, LONG(srcH)); };
-  *out = {sx(r.left), sy(r.top), sx(r.right), sy(r.bottom)};
-  return out->right - out->left >= 2 && out->bottom - out->top >= 2;
+  const double ux0 = double(r.left - x) / scale, ux1 = double(r.right - x) / scale;
+  const double uy0 = double(r.top - y) / scale, uy1 = double(r.bottom - y) / scale;
+  const double cx0 = std::clamp(ux0, 0.0, double(srcW)), cx1 = std::clamp(ux1, 0.0, double(srcW));
+  const double cy0 = std::clamp(uy0, 0.0, double(srcH)), cy1 = std::clamp(uy1, 0.0, double(srcH));
+  if (cx1 - cx0 < 2 || cy1 - cy0 < 2) return false;
+  *src = {LONG(std::lround(cx0)), LONG(std::lround(cy0)), LONG(std::lround(cx1)), LONG(std::lround(cy1))};
+  auto dx = [&](double v) { return LONG(std::lround((v - ux0) / (ux1 - ux0) * auxW)) & ~1L; };
+  auto dy = [&](double v) { return LONG(std::lround((v - uy0) / (uy1 - uy0) * auxH)) & ~1L; };
+  *dst = {dx(cx0), dy(cy0), dx(cx1), dy(cy1)};
+  return dst->right > dst->left && dst->bottom > dst->top;
 }
 
 // El título que lee ParseCamTrackTitle (VideoEdit): el recuadro en píxeles
@@ -116,6 +125,7 @@ void CamBackground::Start(ID3D11Device* device, ID3D11DeviceContext* context, st
 void CamBackground::Stop() {
   if (!worker_.joinable()) return;
   if (active_) Retire(std::move(active_));
+  activeStream_ = -1;
   {
     std::lock_guard lock(mutex_);
     stop_ = true;
@@ -148,6 +158,7 @@ void CamBackground::Frame(int64_t index, const CapturedFrame& frame, const RECT*
   if (!rect || disabled_) {
     if ((active_ || asked_) && (disabled_ || now - lastSeen_ > kIdleMs)) {
       if (active_) Retire(std::move(active_));
+      activeStream_ = -1;
       std::unique_ptr<Aux> ready;
       {
         std::lock_guard lock(mutex_);
@@ -159,7 +170,10 @@ void CamBackground::Frame(int64_t index, const CapturedFrame& frame, const RECT*
     return;
   }
   lastSeen_ = now;
-  if (active_ && !SameRect(active_->rect, *rect)) Retire(std::move(active_));
+  if (active_ && !SameRect(active_->rect, *rect)) {
+    Retire(std::move(active_));
+    activeStream_ = -1;
+  }
   if (!active_) {
     std::unique_ptr<Aux> ready;
     {
@@ -170,6 +184,7 @@ void CamBackground::Frame(int64_t index, const CapturedFrame& frame, const RECT*
       active_ = std::move(ready);
       asked_ = false;
       active_->stream = buffer_->AddStream(MakeStreamDesc(active_->encoder.Context(), true, TrackTitle(*rect)));
+      activeStream_ = active_->stream;
       ++tracks_;
       Log("Fondo de la cámara: pista %d para el recuadro %s", active_->stream, TrackTitle(*rect).c_str());
     } else {
@@ -190,12 +205,14 @@ void CamBackground::Frame(int64_t index, const CapturedFrame& frame, const RECT*
   }
 
   Aux& a = *active_;
-  RECT src;
-  if (!SourceRect(frame.width, frame.height, outWidth_, outHeight_, *rect, &src)) return;
+  RECT src, dst;
+  if (!SourceRect(frame.width, frame.height, outWidth_, outHeight_, *rect, int(a.converter.OutWidth()),
+                  int(a.converter.OutHeight()), &src, &dst))
+    return;
   const int stream = a.stream;
   auto sink = [this, stream](const AVPacket* pkt, int) { buffer_->Push(pkt, stream); };
-  auto render = [&](ID3D11Texture2D* dst, UINT slice) {
-    return a.converter.ConvertRegion(frame.texture.Get(), src, dst, slice);
+  auto render = [&](ID3D11Texture2D* target, UINT slice) {
+    return a.converter.ConvertRegion(frame.texture.Get(), src, target, slice, dst);
   };
   const bool ok = a.encoder.Encode(index, render, sink);
   a.errors = ok ? 0 : a.errors + 1;

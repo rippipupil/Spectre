@@ -26,9 +26,11 @@ public:
   bool Overlay(ID3D11Texture2D* overlay, UINT overlayWidth, UINT overlayHeight, const RECT& rect,
                ID3D11Texture2D* dst, UINT dstSlice);
 
-  // La región srcRect de src (BGRA) a todo dst (NV12 de OutWidth x OutHeight),
-  // escalada si hace falta: lo que hay debajo de la webcam (ver CamBackground).
-  bool ConvertRegion(ID3D11Texture2D* src, const RECT& srcRect, ID3D11Texture2D* dst, UINT dstSlice);
+  // La región srcRect de src (BGRA) a dstRect de dst (NV12 de OutWidth x
+  // OutHeight), escalada si hace falta; el resto de dst, negro. Es lo que hay
+  // debajo de la webcam (ver CamBackground).
+  bool ConvertRegion(ID3D11Texture2D* src, const RECT& srcRect, ID3D11Texture2D* dst, UINT dstSlice,
+                     const RECT& dstRect);
 
   UINT OutWidth() const { return outWidth_; }
   UINT OutHeight() const { return outHeight_; }

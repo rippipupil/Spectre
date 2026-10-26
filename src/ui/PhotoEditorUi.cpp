@@ -76,8 +76,8 @@ int64_t Swatches(const char* id, uint32_t current) {
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     const bool sel = colors[i] == current;
     dl->AddRectFilled(a, b, C(sel || hov ? p.text : p.line));
-    dl->AddRectFilled(a + ImVec2(Px(sel ? 3 : 1), Px(sel ? 3 : 1)), b - ImVec2(Px(sel ? 3 : 1), Px(sel ? 3 : 1)),
-                      Opaque(colors[i]));
+    const float inset = Px(sel ? 3.0f : 1.0f);
+    dl->AddRectFilled(a + ImVec2(inset, inset), b - ImVec2(inset, inset), Opaque(colors[i]));
   }
   ImGui::PopID();
   return picked;
@@ -314,6 +314,7 @@ void PhotoEditorUi::Undo() {
   redo_.push_back(s_);
   s_ = committed_ = undo_.back();
   undo_.pop_back();
+  selected_ = -1; // la marca elegida puede no existir ya
 }
 
 void PhotoEditorUi::Redo() {
@@ -321,6 +322,7 @@ void PhotoEditorUi::Redo() {
   undo_.push_back(s_);
   s_ = committed_ = redo_.back();
   redo_.pop_back();
+  selected_ = -1;
 }
 
 std::string PhotoEditorUi::Summary() const {

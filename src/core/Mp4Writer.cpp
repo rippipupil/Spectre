@@ -45,6 +45,10 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
     return false;
   }
   AVDictionary* opts = nullptr;
+  // El muxer retiene los paquetes hasta tener de todas las pistas: si una deja
+  // de recibir (el fondo de la webcam cuando se apaga o se mueve), sin esto
+  // todo iría 10 s por detrás, en RAM y sin llegar al disco.
+  av_dict_set(&opts, "max_interleave_delta", "2000000", 0);
   if (fragmented)
     av_dict_set(&opts, "movflags", "frag_keyframe+empty_moov+default_base_moof", 0);
   else if (reserveMoov > 0)
@@ -192,7 +196,9 @@ bool WriteClip(const std::string& path, const StreamList& allStreams,
         background.Leave();
         Log("Clip: la escritura va lenta; sigue con prioridad normal");
       }
-      if (stream < 0 || size_t(stream) >= map.size()) continue;
+      // Una pista del fondo sin keyframe en el clip no se escribe: sus
+      // paquetes se saltan, como los de antes de su primer keyframe.
+      if (stream < 0 || size_t(stream) >= map.size() || map[size_t(stream)] < 0) continue;
       if (!writer.Write(pkt.get(), map[size_t(stream)])) return false;
     }
     if (attempt == 0) Log("Clip: pistas %s", writer.Summary().c_str());

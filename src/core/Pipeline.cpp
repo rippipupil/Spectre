@@ -552,12 +552,26 @@ bool Pipeline::StartRecording(const std::string& path) {
              "calidad",
              true);
   };
-  if (!recorder_->Start(path, buffer_->Streams())) {
+  // Vídeo, audio y, si se ve la cámara, su fondo de ahora (ver CamBackground).
+  // Las pistas del fondo de antes no: una pista que no recibe nada haría que
+  // el muxer retuviera lo demás. Una que empiece a mitad no entra.
+  const StreamList all = buffer_->Streams();
+  StreamList streams(all.begin(), all.begin() + std::ptrdiff_t(std::min(all.size(), streams_.size())));
+  std::vector<int> map(all.size(), -1);
+  for (size_t i = 0; i < streams.size(); ++i) map[i] = int(i);
+  const int cam = camBackground_.ActiveStream();
+  if (cam >= int(streams.size()) && cam < int(all.size())) {
+    map[size_t(cam)] = int(streams.size());
+    streams.push_back(all[size_t(cam)]);
+  }
+  if (!recorder_->Start(path, streams)) {
     recorder_.reset();
     return false;
   }
   Recorder* rec = recorder_.get();
-  buffer_->AttachLive([rec](const AVPacket* pkt, int stream) { rec->Push(pkt, stream); });
+  buffer_->AttachLive([rec, map](const AVPacket* pkt, int stream) {
+    if (stream >= 0 && size_t(stream) < map.size() && map[size_t(stream)] >= 0) rec->Push(pkt, map[size_t(stream)]);
+  });
   return true;
 }
 
@@ -584,6 +598,14 @@ void Pipeline::ReleaseRecorder() {
   }
   recorder_->Stop();
   recorder_.reset();
+}
+
+void Pipeline::SetCameraEditable(bool editable) {
+  if (settings_.cameraEditable == editable) return;
+  settings_.cameraEditable = editable;
+  camEditable_ = editable;
+  // El tope de RAM del replay cuenta la pista del fondo (ReplayBytesPerSecond).
+  if (buffer_) buffer_->SetLimits(settings_.replaySeconds, BufferLimit(settings_.replaySeconds));
 }
 
 void Pipeline::SetReplaySeconds(double seconds) {

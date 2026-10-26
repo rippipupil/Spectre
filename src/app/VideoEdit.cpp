@@ -398,7 +398,16 @@ std::string CamTrackTitle(int x, int y, int w, int h) {
 bool ParseCamTrackTitle(const std::string& title, int* x, int* y, int* w, int* h) {
   static const std::string kPrefix = "Fondo de la cámara ";
   if (title.compare(0, kPrefix.size(), kPrefix) != 0) return false;
-  return sscanf(title.c_str() + kPrefix.size(), "%d,%d,%d,%d", x, y, w, h) == 4;
+  const char* p = title.data() + kPrefix.size();
+  const char* end = title.data() + title.size();
+  int* values[] = {x, y, w, h};
+  for (int i = 0; i < 4; ++i) {
+    if (i > 0 && (p == end || *p++ != ',')) return false;
+    const auto r = std::from_chars(p, end, *values[i]);
+    if (r.ec != std::errc()) return false;
+    p = r.ptr;
+  }
+  return true;
 }
 
 // --------------------------------------------------------------- tramos

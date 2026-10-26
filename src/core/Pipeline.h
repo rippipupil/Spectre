@@ -99,10 +99,7 @@ public:
   bool Recording() const { return recorder_ && recorder_->Active(); }
   void SetReplaySeconds(double seconds);
   // «Poder editar la cámara después», con la captura en marcha.
-  void SetCameraEditable(bool editable) {
-    settings_.cameraEditable = editable;
-    camEditable_ = editable;
-  }
+  void SetCameraEditable(bool editable);
   bool MicCaptured() const { return running_ && audio_.HasMic(); }
   void SetMicMuted(bool muted) { audio_.SetMicMuted(muted); }
   // Nivel de pico reciente (0..1) de cada fuente de audio, barato de leer en cada frame.

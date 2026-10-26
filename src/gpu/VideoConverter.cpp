@@ -177,12 +177,12 @@ bool VideoConverter::Overlay(ID3D11Texture2D* overlay, UINT overlayWidth, UINT o
   return Blit(overlay_, overlay, srcRect, dst, dstSlice, rect, true);
 }
 
-bool VideoConverter::ConvertRegion(ID3D11Texture2D* src, const RECT& srcRect, ID3D11Texture2D* dst, UINT dstSlice) {
+bool VideoConverter::ConvertRegion(ID3D11Texture2D* src, const RECT& srcRect, ID3D11Texture2D* dst, UINT dstSlice,
+                                   const RECT& dstRect) {
   if (!videoDevice_ || srcRect.right <= srcRect.left || srcRect.bottom <= srcRect.top) return false;
   D3D11_TEXTURE2D_DESC sd;
   src->GetDesc(&sd);
   if (!EnsureProcessor(main_, sd.Width, sd.Height)) return false;
-  RECT dstRect{0, 0, LONG(outWidth_), LONG(outHeight_)};
   return Blit(main_, src, srcRect, dst, dstSlice, dstRect, false);
 }
 
