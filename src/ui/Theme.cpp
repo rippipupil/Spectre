@@ -37,7 +37,8 @@ constexpr Theme kNegro{"negro",
                         IM_COL32(255, 255, 255, 255)}, // onDanger
                        false,
                        "Spectre",
-                       "plano"};
+                       "plano",
+                       Motif::Viewfinder};
 
 // Tema 2: paleta del personaje de Valorant que eligió Pablo. Negro violáceo
 // de la ropa, superficies con la luz azul-violeta, texto blanco lavanda del
@@ -65,7 +66,8 @@ constexpr Theme kPsiquico{"psiquico",
                            IM_COL32(255, 255, 255, 255)}, // onDanger
                           false,
                           "Spectre",
-                          "psiquico"};
+                          "psiquico",
+                          Motif::Psychic};
 
 // Temas de RoCer0, la extensión de Roblox de Pablo: sus colores tal cual
 // (extension/common/themes.js, versión 1.2.0) en este orden: fondo, tarjeta,
@@ -83,77 +85,98 @@ struct RoCer0Theme {
   const char* name;
   bool light;
   const char* style; // diseño que trae (Style::id)
+  Motif motif;       // fondo ilustrado
   RoCer0Colors c;
 };
 constexpr RoCer0Theme kRoCer0[] = {
-    {"medianoche", "Medianoche", false, "contorno", {0x0a0d16, 0x10141f, 0x181e2d, 0x222a3c, 0xeaf0fa, 0x8c95a8, 0x3b82f6, 0xef4444}},
-    {"daniel", "Daniel", false, "tactico", {0x0f0f0f, 0x0f0f0f, 0x1c1c1c, 0x7a7a7a, 0xfdfdfd, 0xc8c8c8, 0xe5191c, 0xff3d3d}},
-    {"pablo", "Pablo", false, "psiquico", {0x130f2e, 0x1d1846, 0x272060, 0x4a4390, 0xf1f0ff, 0xb4aee0, 0x2be4ff, 0xff4d6a}},
-    {"amoled", "AMOLED", false, "plano", {0x000000, 0x0a0a0a, 0x141414, 0x232323, 0xf5f5f5, 0x9a9a9a, 0x00a2ff, 0xff4d4d}},
-    {"vidrio", "Vidrio esmerilado", false, "contorno", {0x0b1020, 0x1a2238, 0x24304d, 0x33406a, 0xf1f5ff, 0xa5b1cf, 0x38bdf8, 0xfb7185}},
-    {"nebulosa", "Nebulosa", false, "psiquico", {0x0c0716, 0x150e24, 0x1f1533, 0x2c2045, 0xf1ebff, 0xa497c4, 0xa855f7, 0xf43f5e}},
-    {"galaxia", "Galaxia", false, "contorno", {0x05060f, 0x0d1022, 0x151a33, 0x222947, 0xe8ecff, 0x8f97c0, 0x60a5fa, 0xf87171}},
-    {"synthwave", "Synthwave '84", false, "psiquico", {0x1b1029, 0x241734, 0x2e1d44, 0x43296a, 0xfdf0ff, 0xb79ad6, 0xff7edb, 0xfe4450}},
-    {"cyberpunk", "Cyberpunk", false, "tactico", {0x0a0a0c, 0x121216, 0x1b1b21, 0x2d2d36, 0xf2f2f2, 0x9a9aa5, 0xfcee0a, 0xff003c}},
-    {"matrix", "Matrix", false, "terminal", {0x000500, 0x031003, 0x062006, 0x0d3d0d, 0xc8ffc8, 0x5fbf5f, 0x00ff41, 0xff3b3b}},
-    {"catppuccin", "Catppuccin Mocha", false, "suave", {0x11111b, 0x1e1e2e, 0x313244, 0x45475a, 0xcdd6f4, 0xa6adc8, 0xcba6f7, 0xf38ba8}},
-    {"dracula", "Drácula", false, "suave", {0x1e1f29, 0x282a36, 0x343746, 0x44475a, 0xf8f8f2, 0x8f9bc9, 0xbd93f9, 0xff5555}},
-    {"nord", "Nord", false, "contorno", {0x2a303c, 0x2e3440, 0x3b4252, 0x4c566a, 0xeceff4, 0xa9b4c7, 0x88c0d0, 0xbf616a}},
-    {"tokyo", "Tokyo Night", false, "contorno", {0x16161e, 0x1a1b26, 0x24283b, 0x3b4261, 0xc0caf5, 0x7a83ad, 0x7aa2f7, 0xf7768e}},
-    {"rosepine", "Rosé Pine", false, "suave", {0x191724, 0x1f1d2e, 0x26233a, 0x403d52, 0xe0def4, 0x908caa, 0xebbcba, 0xeb6f92}},
-    {"gruvbox", "Gruvbox", false, "terminal", {0x1d2021, 0x282828, 0x32302f, 0x504945, 0xebdbb2, 0xa89984, 0xfe8019, 0xfb4934}},
-    {"oceano", "Océano", false, "contorno", {0x04141f, 0x082232, 0x0c2e43, 0x12405c, 0xe0f7ff, 0x7fb2c8, 0x22d3ee, 0xf87171}},
-    {"bosque", "Bosque", false, "terminal", {0x0c140f, 0x121d16, 0x1a281f, 0x25392c, 0xe6f4ea, 0x8fb39b, 0x4ade80, 0xf87171}},
-    {"atardecer", "Atardecer", false, "suave", {0x170d14, 0x21121c, 0x2c1825, 0x432438, 0xffeef2, 0xc79aa9, 0xfb923c, 0xf43f5e}},
-    {"lunasangre", "Luna de sangre", false, "tactico", {0x0f0507, 0x1a090c, 0x250d12, 0x3d141c, 0xffe9ea, 0xc58b91, 0xef4444, 0xff6b6b}},
-    {"oro", "Oro negro", false, "plano", {0x0b0a07, 0x15130d, 0x1f1c13, 0x3a3320, 0xf7f1de, 0xb3a77f, 0xf5c542, 0xff6b5b}},
-    {"menta", "Menta", false, "contorno", {0x0d1514, 0x13201e, 0x1b2c29, 0x294440, 0xe3fbf6, 0x86b5ab, 0x2dd4bf, 0xfb7185}},
-    {"claro", "Clásico claro", true, "papel", {0xf2f4f7, 0xffffff, 0xeef1f5, 0xdde2ea, 0x1d2433, 0x5f6b7d, 0x0b6cff, 0xdc2626}},
-    {"latte", "Catppuccin Latte", true, "papel", {0xe6e9ef, 0xeff1f5, 0xdce0e8, 0xccd0da, 0x4c4f69, 0x6c6f85, 0x8839ef, 0xd20f39}},
-    {"sakura", "Sakura", true, "papel", {0xfff4f7, 0xffffff, 0xffe8ef, 0xf5cbd8, 0x4a2b36, 0x9a6b7b, 0xe75480, 0xd64545}},
-    {"papel", "Papel", true, "papel", {0xf6efdc, 0xfdf6e3, 0xeee8d5, 0xdfd6bd, 0x36454a, 0x6f7f84, 0x268bd2, 0xdc322f}},
-    {"contraste", "Alto contraste", false, "contraste", {0x000000, 0x000000, 0x101010, 0xffffff, 0xffffff, 0xe6e6e6, 0xffff00, 0xff4040}},
-    {"halloween", "Halloween", false, "tactico", {0x0f0a14, 0x1a1222, 0x241a30, 0x3a2a4a, 0xfff3e6, 0xbfa3c9, 0xff7a1a, 0xff4d6d}},
-    {"navidad", "Navidad", false, "suave", {0x0b1410, 0x12201a, 0x1a2c23, 0x2c4436, 0xf4fff8, 0x9cc3ad, 0xe63946, 0xff6b6b}},
+    {"medianoche", "Medianoche", false, "contorno", Motif::Stars, {0x0a0d16, 0x10141f, 0x181e2d, 0x222a3c, 0xeaf0fa, 0x8c95a8, 0x3b82f6, 0xef4444}},
+    {"daniel", "Daniel", false, "tactico", Motif::Circuit, {0x0f0f0f, 0x0f0f0f, 0x1c1c1c, 0x7a7a7a, 0xfdfdfd, 0xc8c8c8, 0xe5191c, 0xff3d3d}},
+    {"pablo", "Pablo", false, "psiquico", Motif::Hex, {0x130f2e, 0x1d1846, 0x272060, 0x4a4390, 0xf1f0ff, 0xb4aee0, 0x2be4ff, 0xff4d6a}},
+    {"amoled", "AMOLED", false, "plano", Motif::Dots, {0x000000, 0x0a0a0a, 0x141414, 0x232323, 0xf5f5f5, 0x9a9a9a, 0x00a2ff, 0xff4d4d}},
+    {"vidrio", "Vidrio esmerilado", false, "contorno", Motif::Hatch, {0x0b1020, 0x1a2238, 0x24304d, 0x33406a, 0xf1f5ff, 0xa5b1cf, 0x38bdf8, 0xfb7185}},
+    {"nebulosa", "Nebulosa", false, "psiquico", Motif::Constellation, {0x0c0716, 0x150e24, 0x1f1533, 0x2c2045, 0xf1ebff, 0xa497c4, 0xa855f7, 0xf43f5e}},
+    {"galaxia", "Galaxia", false, "neon", Motif::Orbits, {0x05060f, 0x0d1022, 0x151a33, 0x222947, 0xe8ecff, 0x8f97c0, 0x60a5fa, 0xf87171}},
+    {"synthwave", "Synthwave '84", false, "neon", Motif::Horizon, {0x1b1029, 0x241734, 0x2e1d44, 0x43296a, 0xfdf0ff, 0xb79ad6, 0xff7edb, 0xfe4450}},
+    {"cyberpunk", "Cyberpunk", false, "tactico", Motif::Hazard, {0x0a0a0c, 0x121216, 0x1b1b21, 0x2d2d36, 0xf2f2f2, 0x9a9aa5, 0xfcee0a, 0xff003c}},
+    {"matrix", "Matrix", false, "terminal", Motif::Rain, {0x000500, 0x031003, 0x062006, 0x0d3d0d, 0xc8ffc8, 0x5fbf5f, 0x00ff41, 0xff3b3b}},
+    {"catppuccin", "Catppuccin Mocha", false, "suave", Motif::Confetti, {0x11111b, 0x1e1e2e, 0x313244, 0x45475a, 0xcdd6f4, 0xa6adc8, 0xcba6f7, 0xf38ba8}},
+    {"dracula", "Drácula", false, "suave", Motif::Diamonds, {0x1e1f29, 0x282a36, 0x343746, 0x44475a, 0xf8f8f2, 0x8f9bc9, 0xbd93f9, 0xff5555}},
+    {"nord", "Nord", false, "contorno", Motif::Mountains, {0x2a303c, 0x2e3440, 0x3b4252, 0x4c566a, 0xeceff4, 0xa9b4c7, 0x88c0d0, 0xbf616a}},
+    {"tokyo", "Tokyo Night", false, "neon", Motif::Skyline, {0x16161e, 0x1a1b26, 0x24283b, 0x3b4261, 0xc0caf5, 0x7a83ad, 0x7aa2f7, 0xf7768e}},
+    {"rosepine", "Rosé Pine", false, "suave", Motif::Topo, {0x191724, 0x1f1d2e, 0x26233a, 0x403d52, 0xe0def4, 0x908caa, 0xebbcba, 0xeb6f92}},
+    {"gruvbox", "Gruvbox", false, "terminal", Motif::Scanlines, {0x1d2021, 0x282828, 0x32302f, 0x504945, 0xebdbb2, 0xa89984, 0xfe8019, 0xfb4934}},
+    {"oceano", "Océano", false, "contorno", Motif::Waves, {0x04141f, 0x082232, 0x0c2e43, 0x12405c, 0xe0f7ff, 0x7fb2c8, 0x22d3ee, 0xf87171}},
+    {"bosque", "Bosque", false, "terminal", Motif::Pines, {0x0c140f, 0x121d16, 0x1a281f, 0x25392c, 0xe6f4ea, 0x8fb39b, 0x4ade80, 0xf87171}},
+    {"atardecer", "Atardecer", false, "suave", Motif::Sunset, {0x170d14, 0x21121c, 0x2c1825, 0x432438, 0xffeef2, 0xc79aa9, 0xfb923c, 0xf43f5e}},
+    {"lunasangre", "Luna de sangre", false, "tactico", Motif::Moon, {0x0f0507, 0x1a090c, 0x250d12, 0x3d141c, 0xffe9ea, 0xc58b91, 0xef4444, 0xff6b6b}},
+    {"oro", "Oro negro", false, "plano", Motif::Deco, {0x0b0a07, 0x15130d, 0x1f1c13, 0x3a3320, 0xf7f1de, 0xb3a77f, 0xf5c542, 0xff6b5b}},
+    {"menta", "Menta", false, "contorno", Motif::Bubbles, {0x0d1514, 0x13201e, 0x1b2c29, 0x294440, 0xe3fbf6, 0x86b5ab, 0x2dd4bf, 0xfb7185}},
+    {"claro", "Clásico claro", true, "papel", Motif::Grid, {0xf2f4f7, 0xffffff, 0xeef1f5, 0xdde2ea, 0x1d2433, 0x5f6b7d, 0x0b6cff, 0xdc2626}},
+    {"latte", "Catppuccin Latte", true, "papel", Motif::Plaid, {0xe6e9ef, 0xeff1f5, 0xdce0e8, 0xccd0da, 0x4c4f69, 0x6c6f85, 0x8839ef, 0xd20f39}},
+    {"sakura", "Sakura", true, "papel", Motif::Petals, {0xfff4f7, 0xffffff, 0xffe8ef, 0xf5cbd8, 0x4a2b36, 0x9a6b7b, 0xe75480, 0xd64545}},
+    {"papel", "Papel", true, "papel", Motif::Ruled, {0xf6efdc, 0xfdf6e3, 0xeee8d5, 0xdfd6bd, 0x36454a, 0x6f7f84, 0x268bd2, 0xdc322f}},
+    {"contraste", "Alto contraste", false, "contraste", Motif::None, {0x000000, 0x000000, 0x101010, 0xffffff, 0xffffff, 0xe6e6e6, 0xffff00, 0xff4040}},
+    {"halloween", "Halloween", false, "tactico", Motif::Webs, {0x0f0a14, 0x1a1222, 0x241a30, 0x3a2a4a, 0xfff3e6, 0xbfa3c9, 0xff7a1a, 0xff4d6d}},
+    {"navidad", "Navidad", false, "suave", Motif::Snow, {0x0b1410, 0x12201a, 0x1a2c23, 0x2c4436, 0xf4fff8, 0x9cc3ad, 0xe63946, 0xff6b6b}},
 };
 
 // Diseños. Cada tema trae uno (Theme::style) y en Ajustes se puede elegir
-// otro. Los efectos son primitivas de ImGui (unas decenas de vértices) y solo
-// se dibujan mientras duran: nada cuando no se toca la interfaz, salvo los que
-// tienen movimiento continuo (ambient), que la ventana de la app solo pide
-// teniendo el foco.
-//                       botón                 ratón encima          pulsar               rótulos
-//                       separador             marca                 interruptor          teclas      aviso
+// otro. Cambian la forma de todo y la estructura de la app: navegación,
+// letras, títulos, tarjetas y márgenes. Los efectos son primitivas de ImGui
+// (unas decenas de vértices) y solo se dibujan mientras duran: nada cuando no
+// se toca la interfaz, salvo los que tienen movimiento continuo (ambient),
+// que la ventana de la app solo pide teniendo el foco.
 constexpr Style kStyles[] = {
-    {"plano", "Plano", "Bloques sólidos y sobrios. Al pulsar, el botón se hunde.",
-     ButtonShape::Flat, HoverEffect::Fill, PressEffect::Sink, LabelStyle::Tracked,
-     DividerStyle::Line, MarkShape::Square, SwitchShape::Track, KeycapStyle::Box, ToastLook::Bar},
-    {"psiquico", "Psíquico", "Esquinas cortadas, ecos fantasma al pulsar y estela en el botón principal.",
-     ButtonShape::Chamfer, HoverEffect::Fill, PressEffect::Echo, LabelStyle::Tracked,
-     DividerStyle::Line, MarkShape::Diamond, SwitchShape::Track, KeycapStyle::Box, ToastLook::Ghost,
-     6, 1 | 4, 1, 1, false, Ambient::Ghost},
-    {"tactico", "Táctico", "Mayúsculas, un corte duro en la esquina y glitch al pulsar.",
-     ButtonShape::Chamfer, HoverEffect::Border, PressEffect::Glitch, LabelStyle::Slashes,
-     DividerStyle::Ticked, MarkShape::Bar, SwitchShape::Box, KeycapStyle::Brackets, ToastLook::Header,
-     11, 2, 1, 0.94f, true},
-    {"terminal", "Terminal", "Corchetes de consola, texto que se escribe solo y un barrido al pulsar.",
-     ButtonShape::Bracket, HoverEffect::Fill, PressEffect::Scan, LabelStyle::Prompt,
-     DividerStyle::Dashed, MarkShape::Block, SwitchShape::Box, KeycapStyle::Brackets, ToastLook::Terminal,
-     0, 0, 1, 1, false, Ambient::Cursor},
-    {"contorno", "Contorno", "Contornos finos que se iluminan y una onda cuadrada al pulsar.",
-     ButtonShape::Outline, HoverEffect::Border, PressEffect::Ripple, LabelStyle::Sentence,
-     DividerStyle::Line, MarkShape::Square, SwitchShape::Line, KeycapStyle::Box, ToastLook::TopLine},
-    {"suave", "Suave", "Más aire, un raíl de color que crece y un pequeño rebote al pulsar.",
-     ButtonShape::Rail, HoverEffect::Fill, PressEffect::Squash, LabelStyle::Sentence,
-     DividerStyle::Space, MarkShape::Square, SwitchShape::Track, KeycapStyle::Plain, ToastLook::Card,
-     0, 0, 1, 1.08f},
-    {"papel", "Papel", "Como tinta: bordes, subrayados que crecen y un destello al pulsar.",
-     ButtonShape::Outline, HoverEffect::Underline, PressEffect::Flash, LabelStyle::Sentence,
-     DividerStyle::Dashed, MarkShape::Square, SwitchShape::Line, KeycapStyle::Plain, ToastLook::Ink},
-    {"contraste", "Alto contraste", "Bordes de 2 px, colores invertidos al pasar el ratón y nada de movimiento.",
-     ButtonShape::Outline, HoverEffect::Invert, PressEffect::Sink, LabelStyle::Plain,
-     DividerStyle::Line, MarkShape::Square, SwitchShape::Box, KeycapStyle::Box, ToastLook::Bold,
-     0, 0, 2, 1, false, Ambient::None, false},
+    {.id = "plano", .name = "Plano",
+     .summary = "Bloques sólidos, títulos en negrita pesada y la barra lateral de siempre. Al pulsar, el botón se hunde.",
+     .title = TitleLook::Block, .display = Face::SegoeBlack, .titleSize = 36},
+    {.id = "psiquico", .name = "Psíquico",
+     .summary = "Raíl de iconos, esquinas cortadas, títulos finos con eco y estela en el botón principal.",
+     .button = ButtonShape::Chamfer, .press = PressEffect::Echo, .mark = MarkShape::Diamond, .toast = ToastLook::Ghost,
+     .cut = 6, .cutCorners = 1 | 4, .ambient = Ambient::Ghost, .nav = NavLayout::Rail, .title = TitleLook::Echo,
+     .card = CardLook::Framed, .display = Face::SegoeLight, .titleSize = 36, .pad = 36, .navWidth = 88},
+    {.id = "neon", .name = "Neón",
+     .summary = "Pestañas arriba, dobles contornos como tubos de neón y títulos con aberración de color.",
+     .button = ButtonShape::Double, .hover = HoverEffect::Border, .press = PressEffect::Echo, .mark = MarkShape::Diamond,
+     .toggle = SwitchShape::Line, .toast = ToastLook::TopLine, .upperButtons = true, .nav = NavLayout::Topbar,
+     .title = TitleLook::Chroma, .card = CardLook::Neon, .display = Face::SegoeSemibold, .titleSize = 28, .gap = 16},
+    {.id = "tactico", .name = "Táctico",
+     .summary = "Pestañas de HUD, letra condensada, todo en mayúsculas numerado, cortes duros y glitch al pulsar.",
+     .button = ButtonShape::Chamfer, .hover = HoverEffect::Border, .press = PressEffect::Glitch,
+     .label = LabelStyle::Slashes, .divider = DividerStyle::Ticked, .mark = MarkShape::Bar, .toggle = SwitchShape::Box,
+     .keycap = KeycapStyle::Brackets, .toast = ToastLook::Header, .cut = 11, .cutCorners = 2, .density = 0.94f,
+     .upperButtons = true, .nav = NavLayout::Topbar, .title = TitleLook::Index, .card = CardLook::Hud,
+     .body = Face::Bahnschrift, .display = Face::BahnschriftCondensed, .titleSize = 28, .pad = 26, .gap = 10},
+    {.id = "terminal", .name = "Terminal",
+     .summary = "Letra de consola, menú en árbol, marcos de texto, cursor que parpadea y barrido al pulsar.",
+     .button = ButtonShape::Bracket, .press = PressEffect::Scan, .label = LabelStyle::Prompt,
+     .divider = DividerStyle::Dashed, .mark = MarkShape::Block, .toggle = SwitchShape::Box,
+     .keycap = KeycapStyle::Brackets, .toast = ToastLook::Terminal, .ambient = Ambient::Cursor,
+     .title = TitleLook::Prompt, .card = CardLook::Ascii, .body = Face::Consolas, .display = Face::Consolas,
+     .titleSize = 22, .pad = 28, .gap = 12, .navWidth = 244},
+    {.id = "contorno", .name = "Contorno",
+     .summary = "Raíl de iconos, contornos finos que se iluminan, títulos subrayados y una onda al pulsar.",
+     .button = ButtonShape::Outline, .hover = HoverEffect::Border, .press = PressEffect::Ripple,
+     .label = LabelStyle::Sentence, .toggle = SwitchShape::Line, .toast = ToastLook::TopLine, .nav = NavLayout::Rail,
+     .title = TitleLook::Rule, .card = CardLook::Framed, .display = Face::SegoeSemibold, .titleSize = 28,
+     .navWidth = 84},
+    {.id = "suave", .name = "Suave",
+     .summary = "Mucho aire, menú flotante, títulos grandes, un raíl de color que crece y rebote al pulsar.",
+     .button = ButtonShape::Rail, .press = PressEffect::Squash, .label = LabelStyle::Sentence,
+     .divider = DividerStyle::Space, .keycap = KeycapStyle::Plain, .toast = ToastLook::Card, .density = 1.08f,
+     .title = TitleLook::Soft, .card = CardLook::Tile, .titleSize = 36, .pad = 40, .gap = 18, .navWidth = 232,
+     .floatingNav = true},
+    {.id = "papel", .name = "Papel",
+     .summary = "Como una revista: cabecera con serifa, fotos con marco, subrayados que crecen y destello al pulsar.",
+     .button = ButtonShape::Outline, .hover = HoverEffect::Underline, .press = PressEffect::Flash,
+     .label = LabelStyle::Sentence, .divider = DividerStyle::Dashed, .toggle = SwitchShape::Line,
+     .keycap = KeycapStyle::Plain, .toast = ToastLook::Ink, .nav = NavLayout::Topbar, .title = TitleLook::Masthead,
+     .card = CardLook::Polaroid, .display = Face::Georgia, .titleSize = 36, .pad = 40, .gap = 18},
+    {.id = "contraste", .name = "Alto contraste",
+     .summary = "Bordes de 2 px, títulos en negro sobre blanco, colores invertidos al pasar el ratón y nada de movimiento.",
+     .button = ButtonShape::Outline, .hover = HoverEffect::Invert, .label = LabelStyle::Plain,
+     .toggle = SwitchShape::Box, .toast = ToastLook::Bold, .line = 2, .motion = false, .title = TitleLook::Heavy,
+     .card = CardLook::Heavy, .display = Face::SegoeBlack, .titleSize = 28, .pad = 28},
 };
 
 ImU32 Rgb(uint32_t hex) { return IM_COL32((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF, 255); }
@@ -229,12 +252,13 @@ Theme FromRoCer0(const RoCer0Theme& t) {
   p.dangerActive = MixRgb(p.danger, black, 0.15f);
   p.warning = t.light ? IM_COL32(183, 121, 31, 255) : IM_COL32(232, 170, 60, 255);
   p.onDanger = TextOn(p.danger);
-  return Theme{t.id, t.name, p, t.light, "RoCer0", t.style};
+  return Theme{t.id, t.name, p, t.light, "RoCer0", t.style, t.motif};
 }
 
 const Theme* current_ = &kNegro;
 const Style* style_ = &kStyles[0];
 bool motion_ = true;
+int backdrop_ = 2; // 0 sin fondo, 1 quieto, 2 animado (Config::themeBackdrop)
 
 ImVec4 V(ImU32 color) { return ImGui::ColorConvertU32ToFloat4(color); }
 ImVec4 V(ImU32 color, float alpha) {
@@ -302,6 +326,7 @@ void BeginThemeFrame(const Config& config) {
   current_ = &FindTheme(config.theme);
   style_ = &StyleFor(*current_, config.themeStyle);
   motion_ = config.themeMotion && style_->motion;
+  backdrop_ = config.themeBackdrop == "no" ? 0 : config.themeBackdrop == "quieto" ? 1 : 2;
   ImGuiStyle& s = ImGui::GetStyle();
   // Los bordes no se escalan con el DPI (ScaleAllSizes no los toca): 1 px, o
   // 2 en Alto contraste, en los controles nativos (desplegables, campos).
@@ -315,6 +340,26 @@ const Style& CurrentStyle() { return *style_; }
 const Palette& Colors() { return current_->colors; }
 bool ThemeMotion() { return motion_; }
 Ambient AmbientMotion() { return motion_ ? style_->ambient : Ambient::None; }
+
+bool BackdropVisible() { return backdrop_ > 0 && current_->motif != Motif::None; }
+
+bool BackdropMoves() {
+  if (!motion_ || backdrop_ < 2) return false;
+  switch (current_->motif) {
+  case Motif::Psychic:
+  case Motif::Stars:
+  case Motif::Orbits:
+  case Motif::Horizon:
+  case Motif::Rain:
+  case Motif::Waves:
+  case Motif::Bubbles:
+  case Motif::Petals:
+  case Motif::Snow:
+    return true;
+  default:
+    return false;
+  }
+}
 
 void ApplyBaseStyle(float scale) {
   ImGuiStyle& s = ImGui::GetStyle();

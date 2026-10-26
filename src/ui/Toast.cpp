@@ -1,6 +1,7 @@
 #include "ui/Toast.h"
 
 #include "app/Config.h"
+#include "ui/Backdrop.h"
 #include "ui/OverlayWindow.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
@@ -349,6 +350,10 @@ float DrawToast(OverlayWindow& w, const Config& config, const ToastFrame& f) {
     dl->AddRect(a, b, C(n.error ? p.danger : p.text), 0, 0, LineW());
     break;
   }
+  // El fondo ilustrado del tema, más tenue que en la app: el aviso va encima del juego.
+  ImVec2 ba = a;
+  if (st.toast == ToastLook::Header) ba.y += Px(kHeaderH);
+  DrawBackdrop(dl, ba, b, 0.55f);
   if (shutter > 0) dl->AddRectFilled(a, b, C(p.text, 0.30f * shutter));
 
   // ---------------------------------------------------------------- icono

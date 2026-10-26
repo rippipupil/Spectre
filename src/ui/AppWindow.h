@@ -81,6 +81,9 @@ public:
   float Scale() const { return scale_; }
   // Barra de título con los colores del tema (Windows 11; en Windows 10 solo el modo oscuro).
   void SetTitleColors(const Palette& palette);
+  // Letras del diseño del tema. Antes de Open: el primer frame ya sale con
+  // ellas. Abierta: se cambian antes del siguiente frame.
+  void SetFonts(Face body, Face display);
 
   std::function<void()> onCloseRequested; // botón X o Alt+F4
   std::function<void()> onMinimized;      // minimizada: el visor pausa el vídeo
@@ -103,7 +106,8 @@ private:
   bool lost_ = false;
   bool cloaked_ = false;  // oculta hasta el primer frame (sin destello blanco)
   bool sizing_ = false;   // arrastrando el borde
-  bool rebuildFonts_ = false; // cambió el DPI
+  bool rebuildFonts_ = false; // cambió el DPI o el diseño trae otras letras
+  Face fontBody_ = Face::Segoe, fontDisplay_ = Face::Segoe; // letras del diseño
   UINT width_ = 0, height_ = 0;
   bool resizePending_ = false;
   bool videoSupport_ = false;

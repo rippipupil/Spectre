@@ -26,7 +26,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 outputDir, storageLimitGB, deleteAfterDays, showNotifications,
                                                 notifyGame, notifyUpdates, soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
-                                                theme, themeStyle, themeMotion, panelLayout, panelLateralX, panelCompactX,
+                                                theme, themeStyle, themeMotion, themeBackdrop, panelLayout, panelLateralX, panelCompactX,
                                                 panelCompactY, hotkeys)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
@@ -50,6 +50,7 @@ static void Sanitize(Config& c) {
   if (c.monitorIndex < 0) c.monitorIndex = 0;
   if (!IsKnownTheme(c.theme)) c.theme = "negro";
   if (!c.themeStyle.empty() && !IsKnownStyle(c.themeStyle)) c.themeStyle.clear();
+  if (c.themeBackdrop != "animado" && c.themeBackdrop != "quieto" && c.themeBackdrop != "no") c.themeBackdrop = "animado";
   if (c.panelLayout != "lateral" && c.panelLayout != "compacto") c.panelLayout = "lateral";
   // !(x >= 0) también descarta NaN (un config.json editado a mano).
   for (float* f : {&c.panelLateralX, &c.panelCompactX, &c.panelCompactY})

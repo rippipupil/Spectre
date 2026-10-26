@@ -1,6 +1,7 @@
 #include "ui/AppUi.h"
 
 #include "common/Util.h"
+#include "ui/Backdrop.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
@@ -22,7 +23,8 @@ using namespace ui;
 
 namespace {
 
-constexpr float kSidebarWidth = 224.0f;
+constexpr float kTopbarHeight = 56.0f; // pestañas arriba (NavLayout::Topbar)
+constexpr float kFloatMargin = 14.0f;  // margen de la barra lateral flotante (Suave)
 constexpr float kFooterHeight = 60.0f;
 // Las miniaturas se piden al ancho real de la tarjeta, redondeado hacia arriba
 // a un múltiplo de 128 px: con la ventana maximizada una miniatura pequeña se
@@ -88,18 +90,41 @@ bool Editable(const MediaItem& item) { return item.Video() && !item.audioOnly; }
 // Se puede abrir en el editor de fotos: una imagen que no sea un GIF animado.
 bool PhotoEditable(const MediaItem& item) { return item.kind == MediaKind::Screenshot && !IsGif(item); }
 
-void PageTitle(const char* title, const std::string& subtitle) {
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  ImVec2 q = ImGui::GetCursorScreenPos();
-  float ts = Px(kTitle);
-  Text(dl, Big(), ts, q, C(Colors().text), title);
-  float h = ts + Px(4);
-  if (!subtitle.empty()) {
-    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x, q.y + ts + Px(6)), C(Colors().textMuted), subtitle.c_str());
-    h += Px(kSmall) + Px(6);
+// «Para Discord» de varios: los vídeos con imagen que no son ya una copia para Discord.
+bool ExportableForDiscord(const MediaItem& item) { return Editable(item) && item.kind != MediaKind::Export; }
+
+// «12 seleccionados», «1 vídeo»
+std::string Count(size_t n, const char* one, const char* many) {
+  return std::to_string(n) + " " + (n == 1 ? one : many);
+}
+
+// Casilla plana de 1 px (tarjetas de la biblioteca y diálogos).
+void DrawCheckbox(ImDrawList* dl, ImVec2 c, bool on, bool hover) {
+  const Palette& p = Colors();
+  ImVec2 b0 = c - ImVec2(Px(8), Px(8)), b1 = c + ImVec2(Px(8), Px(8));
+  dl->AddRectFilled(b0, b1, C(on ? p.accent : p.bg, on ? 1.0f : 0.86f));
+  dl->AddRect(b0, b1, C(on ? p.accent : hover ? p.text : p.lineStrong), 0, 0, Px(1));
+  if (on) {
+    ImU32 tick = C(p.onAccent);
+    dl->AddLine(c + ImVec2(-Px(4), 0), c + ImVec2(-Px(1), Px(3)), tick, Px(1.5f));
+    dl->AddLine(c + ImVec2(-Px(1), Px(3)), c + ImVec2(Px(4), -Px(3)), tick, Px(1.5f));
   }
-  ImGui::Dummy(ImVec2(0, h));
-  Gap(16);
+}
+
+// Casilla con su texto; todo es clicable.
+bool CheckRow(const char* id, const char* label, bool* value) {
+  const float fs = Px(kSmall);
+  ImVec2 ts = TextSize(ImGui::GetFont(), fs, label);
+  bool pressed = ImGui::InvisibleButton(id, ImVec2(Px(16) + Px(10) + ts.x, std::max(Px(16), ts.y) + Px(4)));
+  bool hov = ImGui::IsItemHovered();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  if (pressed) *value = !*value;
+  ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const float mid = (a.y + b.y) * 0.5f;
+  DrawCheckbox(dl, ImVec2(a.x + Px(8), mid), *value, hov);
+  Text(dl, ImGui::GetFont(), fs, ImVec2(a.x + Px(26), mid - ts.y * 0.5f), C(Colors().text), label);
+  return pressed;
 }
 
 // Imagen ajustada al rectángulo; cover=true la recorta para llenarlo.
@@ -119,18 +144,6 @@ void DrawImage(ImDrawList* dl, const UiTexture& tex, ImVec2 a, ImVec2 b, bool co
     ImVec2 p0(a.x + (aw - w) * 0.5f, a.y + (ah - h) * 0.5f);
     AddTextureImage(dl, tex, p0, ImVec2(p0.x + w, p0.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
   }
-}
-
-// Etiqueta pequeña sobre la miniatura (tipo de archivo, duración).
-void Badge(ImDrawList* dl, ImVec2 pos, const std::string& text, bool alignRight) {
-  const Palette& p = Colors();
-  float fs = Px(kLabel);
-  ImVec2 ts = TextSize(Bold(), fs, text.c_str());
-  ImVec2 pad(Px(6), Px(3));
-  ImVec2 a = alignRight ? ImVec2(pos.x - ts.x - pad.x * 2, pos.y) : pos;
-  ImVec2 b(a.x + ts.x + pad.x * 2, a.y + ts.y + pad.y * 2);
-  dl->AddRectFilled(a, b, C(p.bg, 0.86f));
-  Text(dl, Bold(), fs, a + pad, C(p.text), text.c_str());
 }
 
 bool LinkButton(const char* id, const char* label) {
@@ -173,6 +186,66 @@ bool Chip(const char* id, const std::string& label, bool active) {
 
 bool TypingText() { return ImGui::GetIO().WantTextInput; }
 
+// Entradas principales de la navegación (barra lateral, raíl o pestañas).
+// Ajustes va aparte: en la barra lateral se ven sus apartados uno a uno.
+struct NavEntry {
+  int id;
+  const char* name;
+  Icon icon;
+  bool selected;
+  AppPage page;
+};
+std::vector<NavEntry> MainEntries(const AppModel& m) {
+  return {
+      {1, "Inicio", Icon::Home, m.page == AppPage::Home, AppPage::Home},
+      {2, "Biblioteca", Icon::Grid, m.page == AppPage::Library || m.page == AppPage::Viewer, AppPage::Library},
+      {3, "Editor", Icon::Scissors, m.page == AppPage::Editor, AppPage::Editor},
+  };
+}
+
+// Estado del replay en pocas palabras (la marca y el texto de la navegación).
+struct NavStatus {
+  ImU32 mark;
+  bool filled = true;
+  float alpha = 1.0f;
+  std::string text, shortText;
+};
+NavStatus StatusOf(const AppModel& m) {
+  const Palette& p = Colors();
+  NavStatus s;
+  if (m.stats.recording) {
+    s.mark = p.danger;
+    s.text = "Grabando " + FormatDuration(m.stats.recordSeconds);
+    s.shortText = FormatDuration(m.stats.recordSeconds);
+  } else if (m.replayActive) {
+    s.mark = p.accent;
+    s.text = "Replay activo";
+    s.shortText = "Replay";
+    s.alpha = AmbientMotion() == Ambient::Cursor ? Blink() : Breathe();
+  } else if (m.config.replayEnabled && m.config.onlyInGames) {
+    s.mark = p.textMuted;
+    s.filled = false;
+    s.text = "Esperando a un juego";
+    s.shortText = "Espera";
+  } else {
+    s.mark = p.lineStrong;
+    s.text = "Replay apagado";
+    s.shortText = "Apagado";
+  }
+  return s;
+}
+
+// Número de página para los títulos de Táctico ("01 // INICIO").
+int PageNumber(AppPage page, SettingsPage settings) {
+  switch (page) {
+  case AppPage::Home: return 1;
+  case AppPage::Library: return 2;
+  case AppPage::Editor: return 3;
+  case AppPage::Settings: return 4 + int(settings);
+  default: return 0;
+  }
+}
+
 } // namespace
 
 // ------------------------------------------------------------------ ciclo de vida
@@ -201,7 +274,8 @@ void AppUi::OnClosed() {
   scrubbing_ = false;
   trimMode_ = false;
   menuPath_.clear();
-  openRename_ = openDelete_ = false;
+  openRename_ = openDelete_ = openBulkDelete_ = false;
+  EndSelection();
 }
 
 void AppUi::PauseMedia() {
@@ -266,13 +340,87 @@ void AppUi::SaveCurrentFrame(const MediaItem& item, const AppActions& a) {
 }
 
 bool AppUi::Selected(const std::string& path) const {
-  return std::find(selected_.begin(), selected_.end(), path) != selected_.end();
+  return selected_.count(path) > 0;
 }
 
 void AppUi::ToggleSelected(const std::string& path) {
-  auto it = std::find(selected_.begin(), selected_.end(), path);
-  if (it != selected_.end()) selected_.erase(it);
-  else selected_.push_back(path);
+  if (!selected_.erase(path)) selected_.insert(path);
+}
+
+void AppUi::ClickSelect(const std::vector<const MediaItem*>& list, size_t index, bool range) {
+  const std::string path = list[index]->path;
+  size_t anchor = list.size();
+  if (range)
+    for (size_t i = 0; i < list.size(); ++i)
+      if (list[i]->path == selectAnchor_) anchor = i;
+  if (anchor < list.size()) {
+    // Mayús+clic: todo el tramo entre el último pulsado y este queda elegido.
+    for (size_t i = std::min(anchor, index); i <= std::max(anchor, index); ++i)
+      selected_.insert(list[i]->path);
+  } else {
+    ToggleSelected(path);
+  }
+  selectAnchor_ = path;
+}
+
+void AppUi::EndSelection() {
+  selected_.clear();
+  selectAnchor_.clear();
+  selectMode_ = false;
+}
+
+std::vector<const MediaItem*> AppUi::SelectedItems(const AppModel& m) const {
+  std::vector<const MediaItem*> out;
+  if (selected_.empty()) return out;
+  for (const auto& item : m.items)
+    if (selected_.count(item.path)) out.push_back(&item);
+  return out;
+}
+
+void AppUi::FavoriteSelection(AppModel& m, const AppActions& a) {
+  const auto chosen = SelectedItems(m);
+  if (chosen.empty() || !a.setFavorites) return;
+  // Si ya lo son todos, se quitan; si no, todos pasan a serlo.
+  const bool all = std::all_of(chosen.begin(), chosen.end(), [](const MediaItem* item) { return item->favorite; });
+  std::vector<std::string> paths;
+  for (const auto* item : chosen) paths.push_back(item->path);
+  a.setFavorites(paths, !all);
+}
+
+void AppUi::ExportSelection(AppModel& m, const AppActions& a) {
+  std::vector<const MediaItem*> videos;
+  for (const auto* item : SelectedItems(m))
+    if (ExportableForDiscord(*item)) videos.push_back(item);
+  if (videos.empty() || !a.exportManyForDiscord) return;
+  std::stable_sort(videos.begin(), videos.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
+  std::vector<std::string> paths;
+  for (const auto* item : videos) paths.push_back(item->path);
+  a.exportManyForDiscord(paths);
+  EndSelection();
+}
+
+void AppUi::JoinSelection(AppModel& m, const AppActions& a) {
+  auto chosen = SelectedItems(m);
+  if (chosen.size() < 2) return;
+  std::stable_sort(chosen.begin(), chosen.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
+  std::vector<std::string> paths;
+  for (const auto* item : chosen) paths.push_back(item->path);
+  a.joinClips(paths);
+  EndSelection();
+}
+
+void AppUi::CopySelection(AppModel& m, const AppActions& a) {
+  std::vector<std::string> paths;
+  for (const auto* item : SelectedItems(m)) paths.push_back(item->path);
+  if (!paths.empty() && a.copyManyToClipboard) a.copyManyToClipboard(paths);
+}
+
+void AppUi::AskDeleteSelection(AppModel& m) {
+  bulkDelete_.clear();
+  for (const auto* item : SelectedItems(m)) bulkDelete_.push_back(item->path);
+  if (bulkDelete_.empty()) return;
+  bulkKeepFavorites_ = false;
+  openBulkDelete_ = true;
 }
 
 void AppUi::TakeMediaResults(AppWindow& w, AppModel& m, const AppActions& a) {
@@ -398,8 +546,25 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
                    ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse);
   ImGui::PopStyleVar(3);
 
-  Sidebar(w, m, a);
-  ImGui::SameLine(0, 0);
+  // Navegación del diseño: barra lateral (flotante en Suave), raíl de iconos
+  // o pestañas arriba. La página ocupa lo que queda, con el fondo ilustrado
+  // del tema detrás (en el visor y el editor, más tenue: no compite con el vídeo).
+  const Style& st = CurrentStyle();
+  ImVec2 content(0, 0);
+  switch (st.nav) {
+  case NavLayout::Sidebar: content.x = Px(st.navWidth) + (st.floatingNav ? Px(kFloatMargin) : 0.0f); break;
+  case NavLayout::Rail: content.x = Px(st.navWidth); break;
+  case NavLayout::Topbar: content.y = Px(kTopbarHeight); break;
+  }
+  if (BackdropVisible())
+    DrawBackdrop(ImGui::GetWindowDrawList(), content, io.DisplaySize,
+                 m.page == AppPage::Viewer || m.page == AppPage::Editor ? 0.45f : 1.0f);
+  switch (st.nav) {
+  case NavLayout::Sidebar: Sidebar(w, m, a); break;
+  case NavLayout::Rail: NavRail(m); break;
+  case NavLayout::Topbar: NavTopbar(m); break;
+  }
+  ImGui::SetCursorScreenPos(content);
   // Al cambiar de página (o de sección de Ajustes), la nueva entra con la
   // animación del diseño: se desliza, sube, tiembla o se descubre de arriba abajo.
   const int shown = int(m.page) * 64 + (m.page == AppPage::Settings ? int(m.settingsPage) : 0);
@@ -439,10 +604,6 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
     if (const MediaItem* item = Find(m, starToggle_)) a.setFavorite(item->path, !item->favorite);
     starToggle_.clear();
   }
-  if (!selectToggle_.empty()) {
-    ToggleSelected(selectToggle_);
-    selectToggle_.clear();
-  }
 
   // La ventana se dibuja cuando algo cambia. El movimiento de fondo del diseño
   // solo con la ventana delante (detrás de un juego no lo ve nadie): el rastro
@@ -451,6 +612,8 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   unsigned long long now = GetTickCount64();
   if (w.Focused() && AmbientMotion() == Ambient::Ghost) w.AnimateAt(now + 33);
   if (w.Focused() && AmbientMotion() == Ambient::Cursor) w.AnimateAt(now + 500 - now % 500 + 1);
+  // Fondo que se mueve (lluvia, nieve, estrellas...): a 25 fps, también solo delante.
+  if (w.Focused() && BackdropMoves()) w.AnimateAt(now + 40);
   if (FrameRequested()) w.Animate();
   // El reloj de la grabación, no detrás de un juego (ahí no lo ve nadie).
   if (m.stats.recording && (w.Focused() || !m.gameDetected)) w.AnimateAt(now + 1000 - now % 1000);
@@ -482,15 +645,20 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
   (void)w;
   (void)a;
   const Palette& p = Colors();
-  const float navW = Px(kSidebarWidth);
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, V(p.bgAlt));
+  const Style& st = CurrentStyle();
+  const float navW = Px(st.navWidth);
+  // Suave: una tarjeta separada del borde de la ventana.
+  const float margin = st.floatingNav ? Px(kFloatMargin) : 0.0f;
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  ImGui::SetCursorScreenPos(origin + ImVec2(margin, margin));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, Px(20)));
-  ImGui::BeginChild("side", ImVec2(navW, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
-                    ImGuiWindowFlags_NoScrollbar);
+  ImGui::BeginChild("side", ImVec2(navW, ImGui::GetIO().DisplaySize.y - margin * 2),
+                    ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   ImVec2 win = ImGui::GetWindowPos();
   float winH = ImGui::GetWindowHeight();
-  dl->AddRectFilled(ImVec2(win.x + navW - Px(1), win.y), ImVec2(win.x + navW, win.y + winH), C(p.line));
+  NavChrome(dl, win, ImVec2(win.x + navW, win.y + winH), false);
   DrawHoverTrail(dl);
 
   // Marca y estado
@@ -499,52 +667,35 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
     Wordmark(dl, ImVec2(q.x + Px(20), q.y), "SPECTRE", C(p.text));
     float ss = Px(kSmall);
     float y = q.y + Px(kSmall) + Px(14);
-    ImU32 mark;
-    bool filled = true;
-    float alpha = 1.0f;
-    std::string text;
-    if (m.stats.recording) {
-      mark = p.danger;
-      text = "Grabando " + FormatDuration(m.stats.recordSeconds);
-    } else if (m.replayActive) {
-      mark = p.accent;
-      text = "Replay activo";
-      alpha = AmbientMotion() == Ambient::Cursor ? Blink() : Breathe();
-    } else if (m.config.replayEnabled && m.config.onlyInGames) {
-      mark = p.textMuted;
-      filled = false;
-      text = "Esperando a un juego";
-    } else {
-      mark = p.lineStrong;
-      text = "Replay apagado";
-    }
-    DrawMark(dl, ImVec2(q.x + Px(24), y + ss * 0.5f), Px(3.5f), C(mark, alpha), filled);
-    Text(dl, ImGui::GetFont(), ss, ImVec2(q.x + Px(36), y), C(p.textMuted), text.c_str());
+    const NavStatus s = StatusOf(m);
+    DrawMark(dl, ImVec2(q.x + Px(24), y + ss * 0.5f), Px(3.5f), C(s.mark, s.alpha), s.filled);
+    Text(dl, ImGui::GetFont(), ss, ImVec2(q.x + Px(36), y), C(p.textMuted), s.text.c_str());
     ImGui::Dummy(ImVec2(0, y + ss - q.y + Px(22)));
   }
 
   // Filas de 34 px con el hueco normal. Con la ventana baja se juntan (hasta
   // 28 px y sin hueco) para no pisar el pie; si ni así cabe, el pie no se
   // dibuja (la versión y el atajo del panel también están en General).
+  // Terminal las pone pegadas: es un árbol y las ramas tienen que unirse.
+  const bool tree = st.title == TitleLook::Prompt;
   const float unit = Px(1);
   const float footerTop = win.y + winH - Px(kHint) * 2 - Px(26);
-  const float spacing = ImGui::GetStyle().ItemSpacing.y / unit;
+  const float spacing = tree ? 0.0f : ImGui::GetStyle().ItemSpacing.y / unit;
   const float room = (footerTop - Px(14) - ImGui::GetCursorScreenPos().y) / unit - (12 + kLabel + 6);
-  const int rows = 3 + int(SettingsPage::Count);
+  const std::vector<NavEntry> entries = MainEntries(m);
+  const int rows = int(entries.size()) + int(SettingsPage::Count);
   float pitch = (room + 2 * 34) / float(rows + 2); // filas de 34 y el hueco también en el rótulo
   if (pitch < 34) pitch = room / float(rows);      // sin hueco
   pitch = std::clamp(pitch, 28.0f, 34 + spacing);
-  const float rowH = std::min(pitch, 34.0f);
+  const float rowH = tree ? pitch : std::min(pitch, 34.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, Px(pitch - rowH)));
-  if (NavItem(1, "Inicio", m.page == AppPage::Home, rowH)) Navigate(m, AppPage::Home);
-  char library[48];
-  snprintf(library, sizeof(library), "Biblioteca");
-  if (NavItem(2, library, m.page == AppPage::Library || m.page == AppPage::Viewer, rowH)) Navigate(m, AppPage::Library);
-  if (NavItem(3, "Editor", m.page == AppPage::Editor, rowH)) Navigate(m, AppPage::Editor);
+  for (const NavEntry& e : entries)
+    if (NavItem(e.id, e.name, e.selected, rowH)) Navigate(m, e.page);
   NavLabel(m.settings.dirty ? "AJUSTES  (SIN APLICAR)" : "AJUSTES");
   for (int i = 0; i < int(SettingsPage::Count); ++i) {
     auto page = SettingsPage(i);
-    if (NavItem(10 + i, SettingsPageName(page), m.page == AppPage::Settings && m.settingsPage == page, rowH)) {
+    if (NavItem(10 + i, SettingsPageName(page), m.page == AppPage::Settings && m.settingsPage == page, rowH,
+                tree ? 1 : 0, i + 1 == int(SettingsPage::Count))) {
       Navigate(m, AppPage::Settings);
       m.settingsPage = page;
     }
@@ -565,6 +716,157 @@ void AppUi::Sidebar(AppWindow& w, AppModel& m, const AppActions& a) {
   ImGui::PopStyleColor();
 }
 
+void AppUi::NavRail(AppModel& m) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  const float navW = Px(st.navWidth);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, Px(18)));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, Px(4)));
+  ImGui::BeginChild("rail", ImVec2(navW, 0), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 win = ImGui::GetWindowPos();
+  const float winH = ImGui::GetWindowHeight();
+  NavChrome(dl, win, ImVec2(win.x + navW, win.y + winH), false);
+  DrawHoverTrail(dl);
+
+  // La "S" de la marca arriba y, debajo, una raya hasta las entradas.
+  const ImVec2 q = ImGui::GetCursorScreenPos();
+  const float mono = Px(34);
+  Monogram(dl, ImVec2(win.x + navW * 0.5f, q.y + mono * 0.5f), mono);
+  const float ruleY = q.y + mono + Px(16);
+  dl->AddRectFilled(ImVec2(win.x + Px(22), ruleY), ImVec2(win.x + navW - Px(22), ruleY + LineW()), C(p.line));
+  ImGui::Dummy(ImVec2(0, mono + Px(30)));
+
+  const float rowH = Px(64);
+  for (const NavEntry& e : MainEntries(m))
+    if (RailItem(e.id, e.icon, e.name, e.selected, rowH)) Navigate(m, e.page);
+  if (RailItem(9, Icon::Gear, "Ajustes", m.page == AppPage::Settings, rowH)) Navigate(m, AppPage::Settings);
+  // Cambios sin aplicar: un punto del acento en la esquina del engranaje.
+  if (m.settings.dirty) {
+    const ImVec2 b = ImGui::GetItemRectMax();
+    DrawMark(dl, ImVec2(b.x - Px(22), ImGui::GetItemRectMin().y + Px(12)), Px(3), C(p.accent), true);
+  }
+
+  // Estado abajo: la marca y una palabra.
+  const NavStatus s = StatusOf(m);
+  const float ls = Px(kLabel);
+  const float y = win.y + winH - Px(22) - ls;
+  if (y > ImGui::GetItemRectMax().y + Px(24)) {
+    DrawMark(dl, ImVec2(win.x + navW * 0.5f, y - Px(12)), Px(4), C(s.mark, s.alpha), s.filled);
+    std::string text = Ellipsize(ImGui::GetFont(), ls, s.shortText, navW - Px(10));
+    const float tw = TextSize(ImGui::GetFont(), ls, text.c_str()).x;
+    Text(dl, ImGui::GetFont(), ls, ImVec2(win.x + (navW - tw) * 0.5f, y), C(p.textMuted), text.c_str());
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor();
+}
+
+void AppUi::NavTopbar(AppModel& m) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  const float barH = Px(kTopbarHeight);
+  const float width = ImGui::GetIO().DisplaySize.x;
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGui::BeginChild("topbar", ImVec2(width, barH), ImGuiChildFlags_None,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 win = ImGui::GetWindowPos();
+  NavChrome(dl, win, ImVec2(win.x + width, win.y + barH), true);
+  DrawHoverTrail(dl);
+  const float side = Px(st.pad * 0.75f);
+  const float mid = win.y + barH * 0.5f;
+
+  // Marca a la izquierda, con la letra de títulos del diseño.
+  float x = win.x + side;
+  switch (st.title) {
+  case TitleLook::Masthead: {
+    // Papel: el nombre con serifa, como la cabecera de un periódico.
+    const float fs = Px(kTitle);
+    ImFont* df = Display(fs);
+    Text(dl, df, fs, ImVec2(x, mid - fs * 0.55f), C(p.text), "Spectre");
+    x += TextSize(df, fs, "Spectre").x;
+    break;
+  }
+  case TitleLook::Chroma: {
+    // Neón: el nombre con las dos copias desplazadas del título.
+    const float fs = Px(kBody + 2), tr = Px(4);
+    ImFont* df = Display(fs);
+    const ImVec2 pos(x, mid - fs * 0.5f);
+    TrackedText(dl, df, fs, pos - ImVec2(Px(1.5f), 0), C(p.danger, 0.55f), "SPECTRE", tr);
+    TrackedText(dl, df, fs, pos + ImVec2(Px(1.5f), 0), C(p.accent, 0.8f), "SPECTRE", tr);
+    TrackedText(dl, df, fs, pos, C(p.text), "SPECTRE", tr);
+    x += TrackedWidth(df, fs, "SPECTRE", tr);
+    break;
+  }
+  default: {
+    const float mono = Px(28);
+    Monogram(dl, ImVec2(x + mono * 0.5f, mid), mono);
+    x += mono + Px(12);
+    Wordmark(dl, ImVec2(x, mid - Px(kSmall) * 0.5f), "SPECTRE", C(p.text));
+    x += Px(10) + TrackedWidth(Bold(), Px(kSmall), "SPECTRE", Px(3.2f));
+    break;
+  }
+  }
+
+  // Pestañas
+  ImGui::SetCursorScreenPos(ImVec2(x + Px(28), win.y));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(Px(2), 0));
+  for (const NavEntry& e : MainEntries(m)) {
+    if (TabItem(e.id, e.name, e.selected, barH)) Navigate(m, e.page);
+    ImGui::SameLine();
+  }
+  const char* settings = m.settings.dirty ? "Ajustes *" : "Ajustes";
+  if (TabItem(9, settings, m.page == AppPage::Settings, barH)) Navigate(m, AppPage::Settings);
+  const float tabsEnd = ImGui::GetItemRectMax().x;
+  ImGui::PopStyleVar();
+
+  // Estado a la derecha, si cabe.
+  const NavStatus s = StatusOf(m);
+  const float ss = Px(kSmall);
+  const bool upper = st.title == TitleLook::Index || st.title == TitleLook::Chroma;
+  const std::string text = upper ? Upper(s.text) : s.text;
+  const float tw = upper ? TrackedWidth(ImGui::GetFont(), ss, text.c_str(), Px(1)) : TextSize(ImGui::GetFont(), ss, text.c_str()).x;
+  const float tx = win.x + width - side - tw;
+  if (tx - Px(20) > tabsEnd + Px(24)) {
+    DrawMark(dl, ImVec2(tx - Px(12), mid), Px(3.5f), C(s.mark, s.alpha), s.filled);
+    if (upper) TrackedText(dl, ImGui::GetFont(), ss, ImVec2(tx, mid - ss * 0.5f), C(p.textMuted), text.c_str(), Px(1));
+    else Text(dl, ImGui::GetFont(), ss, ImVec2(tx, mid - ss * 0.5f), C(p.textMuted), text.c_str());
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor();
+}
+
+// Apartados de Ajustes en una columna dentro de la página (con raíl o
+// pestañas; la barra lateral ya los tiene).
+void AppUi::SettingsNav(AppModel& m) {
+  const Palette& p = Colors();
+  const Style& st = CurrentStyle();
+  const float colW = Px(196);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(10), Px(st.pad * 0.75f)));
+  ImGui::BeginChild("subnav", ImVec2(colW, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 win = ImGui::GetWindowPos();
+  dl->AddRectFilled(ImVec2(win.x + colW - LineW(), win.y), ImVec2(win.x + colW, win.y + ImGui::GetWindowHeight()),
+                    C(p.line));
+  DrawHoverTrail(dl);
+  const bool tree = st.title == TitleLook::Prompt;
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, tree ? 0.0f : Px(2)));
+  NavLabel(m.settings.dirty ? "AJUSTES  (SIN APLICAR)" : "AJUSTES");
+  for (int i = 0; i < int(SettingsPage::Count); ++i) {
+    auto page = SettingsPage(i);
+    if (NavItem(10 + i, SettingsPageName(page), m.settingsPage == page, 34, tree ? 1 : 0,
+                i + 1 == int(SettingsPage::Count)))
+      m.settingsPage = page;
+  }
+  ImGui::PopStyleVar();
+  ImGui::EndChild();
+  ImGui::PopStyleVar();
+}
+
 // ------------------------------------------------------------------ Inicio
 
 void AppUi::StatusCard(AppModel& m, const AppActions& a) {
@@ -574,7 +876,8 @@ void AppUi::StatusCard(AppModel& m, const AppActions& a) {
   ImVec2 q = ImGui::GetCursorScreenPos();
   float width = ImGui::GetContentRegionAvail().x;
   const float pad = Px(20);
-  float height = Px(106) + ActionHeight();
+  const float headH = HeadlineHeight();
+  float height = pad * 2 + headH + Px(8) + Px(kSmall) + Px(20) + ActionHeight();
   CardFrame(dl, q, ImVec2(q.x + width, q.y + height), m.stats.recording ? p.danger : p.accent);
 
   std::string status, detail;
@@ -592,9 +895,10 @@ void AppUi::StatusCard(AppModel& m, const AppActions& a) {
     detail = "Actívalo para poder guardar lo que acaba de pasar en cualquier momento.";
   }
   if (m.gameDetected && !m.gameName.empty()) detail += "  Juego: " + m.gameName + ".";
-  Text(dl, Bold(), Px(kBody) + Px(2), ImVec2(q.x + pad, q.y + pad), C(p.text), status.c_str());
-  Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x + pad, q.y + pad + Px(26)), C(p.textMuted),
-       Ellipsize(ImGui::GetFont(), Px(kSmall), detail, width - pad * 2).c_str());
+  // El estado como titular, con la letra de títulos del diseño.
+  Headline(dl, ImVec2(q.x + pad + Px(4), q.y + pad), status, C(p.text), width - pad * 2 - Px(4));
+  Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x + pad + Px(4), q.y + pad + headH + Px(8)), C(p.textMuted),
+       Ellipsize(ImGui::GetFont(), Px(kSmall), detail, width - pad * 2 - Px(4)).c_str());
 
   float gap = Px(10);
   float bw = (width - pad * 2 - gap * 2) / 3.0f;
@@ -727,13 +1031,13 @@ void StatTile(ImVec2 a, float width, float height, const std::string& label, con
               const std::string& detail) {
   const Palette& p = Colors();
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(a, ImVec2(a.x + width, a.y + height), C(p.surface));
+  // La casilla con la forma de tarjeta del diseño, el rótulo con su estilo y
+  // el número con la letra de títulos.
+  TileFrame(dl, a, ImVec2(a.x + width, a.y + height));
   const float pad = Px(14), inner = width - pad * 2;
   ImFont* font = ImGui::GetFont();
-  Text(dl, font, Px(kLabel), ImVec2(a.x + pad, a.y + pad), C(p.textMuted),
-       Ellipsize(font, Px(kLabel), label, inner).c_str());
-  Text(dl, Bold(), Px(kBody) + Px(2), ImVec2(a.x + pad, a.y + pad + Px(kLabel) + Px(8)), C(p.text),
-       Ellipsize(Bold(), Px(kBody) + Px(2), value, inner).c_str());
+  DrawLabel(dl, ImVec2(a.x + pad, a.y + pad), label.c_str(), Px(kLabel), C(p.textMuted));
+  Headline(dl, ImVec2(a.x + pad, a.y + pad + Px(kLabel) + Px(8)), value, C(p.text), inner);
   Text(dl, font, Px(kSmall), ImVec2(a.x + pad, a.y + height - pad - Px(kSmall)), C(p.textFaint),
        Ellipsize(font, Px(kSmall), detail, inner).c_str());
 }
@@ -772,11 +1076,11 @@ void AppUi::StatsSection(const AppModel& m) {
   tiles.push_back({"OCUPA", FormatBytes(st.bytes),
                    st.firstDay >= 0 ? "desde el " + DayText(st.firstDay) : std::string("")});
 
-  const float gap = Px(10);
+  const float gap = Px(CurrentStyle().gap * 0.75f);
   const float avail = ImGui::GetContentRegionAvail().x;
   const int cols = avail > Px(760) ? 4 : 2;
   const float tileW = std::floor((avail - gap * float(cols - 1)) / float(cols));
-  const float tileH = Px(92);
+  const float tileH = Px(28 + kLabel) + HeadlineHeight() + Px(kSmall + 20);
   ImVec2 q = ImGui::GetCursorScreenPos();
   const int rows = int((tiles.size() + size_t(cols) - 1) / size_t(cols));
   for (size_t i = 0; i < tiles.size(); ++i) {
@@ -797,10 +1101,10 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
       RequestDuration(item);
   const Palette& p = Colors();
   const Config& c = m.config;
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(32), Px(26)));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(CurrentStyle().pad), Px(CurrentStyle().pad * 0.8f)));
   ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
   DrawHoverTrail(ImGui::GetWindowDrawList());
-  PageTitle("Inicio", "Todo lo que hace falta durante la partida, y lo último que has guardado.");
+  PageTitle("Inicio", "Todo lo que hace falta durante la partida, y lo último que has guardado.", 1);
   StatusCard(m, a);
   Gap(22);
 
@@ -837,7 +1141,10 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
   ImGui::EndGroup();
   ImGui::SameLine(0, Px(32));
   ImGui::BeginGroup();
-  ImGui::BeginChild("toggles", ImVec2(colW, Px(4) + Px(kHint) + Px(4) + Px(36) * 3), ImGuiChildFlags_None,
+  // El rótulo y tres filas con su separación (la cámara se quedaba cortada).
+  const float spacingY = ImGui::GetStyle().ItemSpacing.y;
+  ImGui::BeginChild("toggles", ImVec2(colW, Px(kHint) + Px(4) + (RowHeight(36) + spacingY) * 3 + Px(4)),
+                    ImGuiChildFlags_None,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
   DrawHoverTrail(ImGui::GetWindowDrawList());
   SectionLabel("CAPTURA");
@@ -861,20 +1168,23 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
     Help(text.c_str());
   } else {
     const int count = 4;
-    float gap = Px(14);
+    float gap = Px(CurrentStyle().gap);
     float cardW = (ImGui::GetContentRegionAvail().x - gap * float(count - 1)) / float(count);
+    bool openMenu = false;
     for (int i = 0; i < count && i < int(m.items.size()); ++i) {
       if (i > 0) ImGui::SameLine(0, gap);
       ImGui::PushID(i);
       bool menu = false;
       const MediaItem& item = m.items[size_t(i)];
-      if (Card(w, item, cardW, &menu)) View(m, item.path, AppPage::Home);
+      if (Card(w, item, cardW, &menu, -1, i + 1)) View(m, item.path, AppPage::Home);
       if (menu) {
         menuPath_ = item.path;
-        ImGui::OpenPopup("item-menu");
+        openMenu = true;
       }
       ImGui::PopID();
     }
+    // Fuera del PushID de la tarjeta: ItemMenu busca el menú con el id de aquí.
+    if (openMenu) ImGui::OpenPopup("item-menu");
   }
   ItemMenu(m, a);
 
@@ -907,13 +1217,12 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
 
 // ------------------------------------------------------------------ biblioteca
 
-bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection) {
+bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection, int number) {
   (void)w;
   const Palette& p = Colors();
-  const float thumbH = std::floor(width * 9.0f / 16.0f);
-  const float textH = Px(50);
-  ImVec2 size(width, thumbH + textH);
-  bool pressed = ImGui::InvisibleButton("card", size);
+  // Dónde van la miniatura y el pie según la tarjeta del diseño (Widgets MediaCard).
+  const MediaCard card = MediaCardRects(ImGui::GetCursorScreenPos(), width);
+  bool pressed = ImGui::InvisibleButton("card", card.b - card.a);
   bool hov = ImGui::IsItemHovered();
   Motion mo = Animate();
   if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -921,18 +1230,18 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   if (!ImGui::IsRectVisible(a, b)) return false;
-  ImVec2 ta = a, tb(b.x, a.y + thumbH);
-  dl->AddRectFilled(ta, tb, C(p.surface));
-  if (UiTexture* tex = ThumbFor(item, width)) {
+  const ImVec2 ta = card.thumbA, tb = card.thumbB;
+  MediaCardBack(dl, card, mo.hover, selection > 0);
+  if (UiTexture* tex = ThumbFor(item, tb.x - ta.x)) {
     DrawImage(dl, *tex, ta, tb, true);
   } else {
     DrawIcon(dl, item.Video() ? Icon::Play : Icon::Shot, (ta + tb) * 0.5f, Px(12), C(p.textFaint));
   }
   RequestDuration(item);
-  HoverOutline(dl, a, b, mo.hover);
-  Badge(dl, ImVec2(ta.x + Px(8), ta.y + Px(8)), BadgeText(item), false);
+  MediaCardFront(dl, card, mo.hover, selection > 0);
+  Tag(dl, ImVec2(ta.x + Px(8), ta.y + Px(8)), BadgeText(item), false);
   if (item.Video() && item.duration > 0)
-    Badge(dl, ImVec2(tb.x - Px(8), tb.y - Px(8) - Px(kLabel) - Px(6)), FormatDuration(item.duration), true);
+    Tag(dl, ImVec2(tb.x - Px(8), tb.y - Px(8) - Px(kLabel) - Px(6)), FormatDuration(item.duration), true);
 
   // Estrella de favorito: siempre si lo es, al pasar el ratón si no.
   ImVec2 starC(tb.x - Px(18), ta.y + Px(18));
@@ -945,33 +1254,21 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   }
   if (overStar) ImGui::SetTooltip(item.favorite ? "Quitar de favoritos" : "Favorito: el límite de espacio no lo borra");
 
-  // Casilla para elegir vídeos y unirlos: al pasar el ratón y, mientras haya
-  // alguno elegido, en todas las tarjetas.
+  // Casilla para elegir varios (borrar, favoritos, Discord, unir): al pasar
+  // el ratón y, mientras se está eligiendo, en todas las tarjetas.
   bool overCheck = false;
   if (selection >= 0) {
     ImVec2 boxC(ta.x + Px(18), tb.y - Px(18));
     overCheck = hov && std::fabs(ImGui::GetMousePos().x - boxC.x) < Px(14) &&
                 std::fabs(ImGui::GetMousePos().y - boxC.y) < Px(14);
-    if (selection > 0 || hov || !selected_.empty()) {
-      ImVec2 b0 = boxC - ImVec2(Px(8), Px(8)), b1 = boxC + ImVec2(Px(8), Px(8));
-      dl->AddRectFilled(b0, b1, C(selection > 0 ? p.accent : p.bg, selection > 0 ? 1.0f : 0.86f));
-      dl->AddRect(b0, b1, C(selection > 0 ? p.accent : overCheck ? p.text : p.lineStrong), 0, 0, Px(1));
-      if (selection > 0) {
-        ImU32 tick = C(p.onAccent);
-        dl->AddLine(boxC + ImVec2(-Px(4), 0), boxC + ImVec2(-Px(1), Px(3)), tick, Px(1.5f));
-        dl->AddLine(boxC + ImVec2(-Px(1), Px(3)), boxC + ImVec2(Px(4), -Px(3)), tick, Px(1.5f));
-      }
-    }
-    if (selection > 0) dl->AddRect(a, b, C(p.accent), 0, 0, Px(1));
-    if (overCheck) ImGui::SetTooltip(selection > 0 ? "Quitar de la selección" : "Elegir para unir con otros clips");
+    if (selection > 0 || hov || Selecting()) DrawCheckbox(dl, boxC, selection > 0, overCheck);
+    if (selection > 0) dl->AddRect(a, b, C(p.accent), 0, 0, std::max(Px(1), LineW()));
+    if (overCheck)
+      ImGui::SetTooltip(selection > 0 ? "Quitar de la selección"
+                                      : "Seleccionar (también Ctrl+clic, y Mayús+clic para un tramo)");
   }
 
-  float fs = Px(kBody);
-  std::string title = Ellipsize(Bold(), fs, Title(item), width - Px(4));
-  Text(dl, Bold(), fs, ImVec2(a.x, tb.y + Px(10)), C(p.text), title.c_str());
-  std::string sub = item.date + "  ·  " + FormatBytes(item.size);
-  Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(a.x, tb.y + Px(30)), C(p.textFaint),
-       Ellipsize(ImGui::GetFont(), Px(kSmall), sub, width - Px(4)).c_str());
+  MediaCardCaption(dl, card, Title(item), item.date + "  ·  " + FormatBytes(item.size), mo.hover, number);
   if (pressed && overStar) {
     // El clic en la estrella no abre el visor; se aplica al final del frame.
     starToggle_ = item.path;
@@ -1006,7 +1303,7 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
       a.exportForDiscord(path);
     }
     if (ImGui::MenuItem("Unir con otros clips...")) {
-      if (!Selected(path)) selected_.push_back(path);
+      selected_.insert(path);
       Navigate(m, AppPage::Library);
     }
     if (ImGui::BeginMenu("Cámara lenta")) {
@@ -1031,6 +1328,38 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   ImGui::EndPopup();
 }
 
+void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
+  if (!ImGui::BeginPopup("selection-menu")) return;
+  const auto chosen = SelectedItems(m);
+  const size_t n = chosen.size();
+  if (n == 0) {
+    ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    return;
+  }
+  size_t videos = 0, favorites = 0, exportable = 0;
+  for (const auto* item : chosen) {
+    videos += item->Video() ? 1 : 0;
+    favorites += item->favorite ? 1 : 0;
+    exportable += ExportableForDiscord(*item) ? 1 : 0;
+  }
+  const std::string count = std::to_string(n);
+  if (ImGui::MenuItem(favorites == n ? "Quitar de favoritos" : "Añadir a favoritos")) FavoriteSelection(m, a);
+  // Discord acepta 10 archivos por mensaje: con más, solo se ofrece copiarlos.
+  if (ImGui::MenuItem(("Copiar " + count + (n > 10 ? " al portapapeles" : " para pegar en Discord")).c_str()))
+    CopySelection(m, a);
+  if (exportable > 0) {
+    std::string label = "Exportar " + Count(exportable, "vídeo", "vídeos") + " para Discord (menos de 20 MB)";
+    if (ImGui::MenuItem(label.c_str())) ExportSelection(m, a);
+  }
+  if (n >= 2 && videos == n && ImGui::MenuItem(("Unir " + count + " vídeos").c_str())) JoinSelection(m, a);
+  ImGui::Separator();
+  if (ImGui::MenuItem(("Mover " + count + " a la papelera...").c_str())) AskDeleteSelection(m);
+  ImGui::Separator();
+  if (ImGui::MenuItem("Quitar selección")) EndSelection();
+  ImGui::EndPopup();
+}
+
 void AppUi::Dialogs(AppModel& m, const AppActions& a) {
   const Palette& p = Colors();
   ImGuiIO& io = ImGui::GetIO();
@@ -1042,6 +1371,19 @@ void AppUi::Dialogs(AppModel& m, const AppActions& a) {
     ImGui::OpenPopup("Mover a la papelera");
     openDelete_ = false;
     deleteHasBin_ = HasRecycleBin(deletePath_);
+  }
+  if (openBulkDelete_) {
+    ImGui::OpenPopup("Mover varios a la papelera");
+    openBulkDelete_ = false;
+    // Una vez al abrir, por carpeta: todo suele estar en la misma unidad.
+    std::unordered_map<std::string, bool> binByFolder;
+    bulkNoBin_ = 0;
+    for (const auto& path : bulkDelete_) {
+      const std::string folder = path.substr(0, path.find_last_of("\\/") + 1);
+      auto it = binByFolder.find(folder);
+      if (it == binByFolder.end()) it = binByFolder.emplace(folder, HasRecycleBin(path)).first;
+      if (!it->second) ++bulkNoBin_;
+    }
   }
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(24), Px(20)));
   ImGui::PushStyleColor(ImGuiCol_PopupBg, V(p.bg));
@@ -1128,13 +1470,201 @@ void AppUi::Dialogs(AppModel& m, const AppActions& a) {
     }
     ImGui::EndPopup();
   }
+  ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(Px(480), 0));
+  if (ImGui::BeginPopupModal("Mover varios a la papelera", nullptr,
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoSavedSettings)) {
+    // Lo que se va: lo elegido que sigue en la biblioteca, sin los favoritos si se dejan fuera.
+    std::unordered_set<std::string> asked(bulkDelete_.begin(), bulkDelete_.end());
+    std::vector<const MediaItem*> items;
+    size_t favorites = 0;
+    uint64_t bytes = 0;
+    for (const auto& item : m.items) {
+      if (!asked.count(item.path)) continue;
+      if (item.favorite) {
+        ++favorites;
+        if (bulkKeepFavorites_) continue;
+      }
+      items.push_back(&item);
+      bytes += item.size;
+    }
+    const size_t n = items.size();
+    const bool allNoBin = bulkNoBin_ > 0 && bulkNoBin_ >= bulkDelete_.size();
+    std::string title = n == 0 ? std::string("No queda nada que borrar")
+                        : allNoBin ? "¿Borrar " + Count(n, "archivo", "archivos") + " para siempre?"
+                                   : "¿Mover " + Count(n, "archivo", "archivos") + " a la papelera?";
+    Text(ImGui::GetWindowDrawList(), Bold(), Px(kBody) + Px(2), ImGui::GetCursorScreenPos(), C(p.text), title.c_str());
+    Gap(30);
+    if (n > 0) {
+      // Los primeros nombres, para saber qué se va sin tener que contarlo.
+      std::string names = FormatBytes(bytes) + "  ·  ";
+      for (size_t i = 0; i < n && i < 3; ++i) names += (i > 0 ? ", " : "") + items[i]->name;
+      if (n > 3) names += " y " + std::to_string(n - 3) + " más";
+      ImGui::PushTextWrapPos(0);
+      ImGui::TextWrapped("%s", names.c_str());
+      ImGui::PopTextWrapPos();
+      Gap(6);
+    }
+    if (favorites > 0) {
+      std::string note = bulkKeepFavorites_ ? (favorites == 1 ? std::string("El favorito se queda.")
+                                                              : "Los " + std::to_string(favorites) + " favoritos se quedan.")
+                                            : "Incluye " + Count(favorites, "favorito", "favoritos") + ".";
+      Warning(note.c_str());
+      Gap(4);
+      CheckRow("keep-favorites", "Dejar fuera los favoritos", &bulkKeepFavorites_);
+      Gap(6);
+    }
+    if (bulkNoBin_ == 0)
+      Help("Podrás recuperarlos desde la papelera de reciclaje de Windows.");
+    else if (allNoBin)
+      Help("Esta unidad no tiene papelera (memoria USB o carpeta de red): Windows te pedirá confirmarlo y no se "
+           "podrán recuperar.");
+    else
+      Help((Count(bulkNoBin_, "está", "están") + " en una unidad sin papelera (memoria USB o carpeta de red): "
+                                                  "Windows te pedirá confirmarlo y esos no se podrán recuperar.")
+               .c_str());
+    Gap(14);
+    const std::string okLabel = n == 0 ? std::string("Borrar")
+                                : allNoBin ? "Borrar " + std::to_string(n) + " para siempre"
+                                           : "Mover " + std::to_string(n) + " a la papelera";
+    const float cw = Px(130);
+    const float ow = std::max(Px(170), TextSize(ImGui::GetFont(), Px(kSmall), okLabel.c_str()).x + Px(32));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - cw - ow - Px(8));
+    bool cancel = GhostButton("cancel", "Cancelar", cw) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    ImGui::SameLine(0, Px(8));
+    ImGui::BeginDisabled(n == 0);
+    // Intro no cuenta en el frame en que se abre (el Intro que eligió la
+    // opción del menú con el teclado lo confirmaría sin verlo).
+    bool ok = GhostButton("ok", okLabel.c_str(), ow, Tone::Danger) ||
+              (n > 0 && !ImGui::IsWindowAppearing() && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
+    ImGui::EndDisabled();
+    if (cancel) {
+      bulkDelete_.clear();
+      ImGui::CloseCurrentPopup();
+    } else if (ok) {
+      std::vector<std::string> paths;
+      for (const auto* item : items) paths.push_back(item->path);
+      if (a.recycleMany) a.recycleMany(paths);
+      bulkDelete_.clear();
+      EndSelection();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
   ImGui::PopStyleColor(2);
   ImGui::PopStyleVar();
 }
 
+void AppUi::SelectionBar(AppModel& m, const AppActions& a, const std::vector<const MediaItem*>& list) {
+  const Palette& p = Colors();
+  const auto chosen = SelectedItems(m);
+  const size_t n = chosen.size();
+  size_t shown = 0;
+  for (const auto* item : list)
+    if (Selected(item->path)) ++shown;
+  const bool allShown = !list.empty() && shown == list.size();
+  uint64_t bytes = 0;
+  size_t videos = 0, favorites = 0, exportable = 0;
+  for (const auto* item : chosen) {
+    bytes += item->size;
+    videos += item->Video() ? 1 : 0;
+    favorites += item->favorite ? 1 : 0;
+    exportable += ExportableForDiscord(*item) ? 1 : 0;
+  }
+  std::string text;
+  if (n == 0) {
+    text = "Elige con la casilla o con un clic. Mayús+clic elige un tramo entero.";
+  } else {
+    text = Count(n, "seleccionado", "seleccionados") + "  ·  " + FormatBytes(bytes);
+    // Los que quedan fuera de los filtros también cuentan: que se sepa.
+    if (n > shown) text += "  ·  " + Count(n - shown, "no se ve", "no se ven") + " con estos filtros";
+  }
+
+  struct Action {
+    const char* id;
+    std::string label;
+    Tone tone;
+    bool enabled;
+    std::string tip;
+  };
+  const Action actions[] = {
+      {"sel-all", allShown ? std::string("Ninguno") : "Todos (" + std::to_string(list.size()) + ")", Tone::Normal,
+       !list.empty(),
+       allShown ? "Quita de la selección lo que se ve" : "Selecciona todo lo que se ve con estos filtros (Ctrl+A)"},
+      {"sel-fav", n > 0 && favorites == n ? "Quitar favorito" : "Favorito", Tone::Normal, n > 0,
+       "Los favoritos nunca los borra el límite de espacio"},
+      {"sel-discord", "Para Discord", Tone::Normal, exportable > 0,
+       exportable > 0
+           ? "Una copia de menos de 20 MB de " + Count(exportable, "vídeo", "vídeos") +
+                 ", uno detrás de otro. Al acabar se copian para pegarlos en Discord."
+           : std::string("Elige algún vídeo: las capturas, los audios y las copias para Discord no se exportan")},
+      {"sel-join", "Unir", Tone::Normal, n >= 2 && videos == n,
+       n >= 2 && videos == n ? "Del más antiguo al más reciente, sin recodificar: solo vídeos grabados con la misma "
+                               "calidad, resolución y audio. El resultado es un vídeo nuevo; los originales no cambian."
+                             : "Elige dos vídeos o más (sin capturas) para unirlos"},
+      {"sel-delete", "Borrar", Tone::Danger, n > 0, "A la papelera de reciclaje (Supr)"},
+  };
+  constexpr int kActions = int(sizeof(actions) / sizeof(actions[0]));
+
+  // Una fila si cabe con el texto; si no (ventana estrecha), el texto arriba y los botones debajo.
+  const float fs = Px(kSmall), gap = Px(8), pad = Px(16), closeW = Px(30);
+  float widths[kActions];
+  float total = closeW;
+  for (int i = 0; i < kActions; ++i) {
+    widths[i] = std::max(Px(64), TextSize(ImGui::GetFont(), fs, actions[i].label.c_str()).x + Px(26));
+    total += widths[i] + gap;
+  }
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 q = ImGui::GetCursorScreenPos();
+  const float barW = ImGui::GetContentRegionAvail().x - Px(12);
+  const bool oneRow = barW - pad - Px(10) - total >= Px(170);
+  const float topH = oneRow ? Px(48) : Px(40);
+  const float barH = oneRow ? topH : topH + Px(30) + Px(12);
+  // El marco de las tarjetas del diseño, con el acento a la izquierda.
+  TileFrame(dl, q, ImVec2(q.x + barW, q.y + barH), 0.4f);
+  dl->AddRectFilled(q, ImVec2(q.x + Px(3), q.y + barH), C(p.accent));
+  const float textW = oneRow ? barW - pad - Px(10) - total - Px(12) : barW - pad - Px(10) - closeW - Px(12);
+  Text(dl, ImGui::GetFont(), fs, ImVec2(q.x + pad, q.y + (topH - fs) * 0.5f), C(n > 0 ? p.text : p.textMuted),
+       Ellipsize(ImGui::GetFont(), fs, text, textW).c_str());
+
+  if (oneRow) ImGui::SetCursorScreenPos(ImVec2(q.x + barW - Px(10) - total, q.y + (barH - Px(30)) * 0.5f));
+  else ImGui::SetCursorScreenPos(ImVec2(q.x + pad, q.y + topH));
+  int pressed = -1;
+  for (int i = 0; i < kActions; ++i) {
+    if (i > 0) ImGui::SameLine(0, gap);
+    ImGui::BeginDisabled(!actions[i].enabled);
+    if (GhostButton(actions[i].id, actions[i].label.c_str(), widths[i], actions[i].tone, 30)) pressed = i;
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", actions[i].tip.c_str());
+  }
+  if (oneRow) ImGui::SameLine(0, gap);
+  else ImGui::SetCursorScreenPos(ImVec2(q.x + barW - Px(10) - closeW, q.y + (topH - closeW) * 0.5f));
+  const bool close = IconButton("sel-close", Icon::Close, closeW, "Dejar de seleccionar (Esc)");
+  ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + barH));
+  Gap(12);
+
+  switch (pressed) {
+  case 0:
+    if (allShown) {
+      for (const auto* item : list) selected_.erase(item->path);
+      selectMode_ = true; // la barra se queda para elegir otros
+    } else {
+      for (const auto* item : list) selected_.insert(item->path);
+    }
+    break;
+  case 1: FavoriteSelection(m, a); break;
+  case 2: ExportSelection(m, a); break;
+  case 3: JoinSelection(m, a); break;
+  case 4: AskDeleteSelection(m); break;
+  default: break;
+  }
+  if (close) EndSelection();
+}
+
 void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   const Palette& p = Colors();
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(32), Px(26)));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(CurrentStyle().pad), Px(CurrentStyle().pad * 0.8f)));
   ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   auto list = Filtered(m);
@@ -1145,16 +1675,46 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   else
     snprintf(subtitle, sizeof(subtitle), "%zu de %zu  ·  %s  ·  %s", list.size(), m.items.size(),
              FormatBytes(bytes).c_str(), m.outputDir.c_str());
-  PageTitle("Biblioteca", subtitle);
+  const ImVec2 titlePos = ImGui::GetCursorScreenPos();
+  const float titleW = ImGui::GetContentRegionAvail().x - Px(12);
+  PageTitle("Biblioteca", subtitle, 2);
+  if (!m.items.empty()) {
+    // «Seleccionar», a la derecha del título: el clic elige en vez de abrir.
+    const ImVec2 back = ImGui::GetCursorScreenPos();
+    const bool selecting = Selecting();
+    const char* label = selecting ? "Cancelar" : "Seleccionar";
+    const float bw = std::max(Px(110), TextSize(ImGui::GetFont(), Px(kSmall), label).x + Px(28));
+    ImGui::SetCursorScreenPos(ImVec2(titlePos.x + titleW - bw, titlePos.y + PageTitleActionY(28)));
+    if (GhostButton("select", label, bw, Tone::Normal, 28)) {
+      if (selecting) EndSelection();
+      else selectMode_ = true;
+    }
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip(selecting ? "Deja de seleccionar (Esc)"
+                                  : "Elige varios para borrarlos, marcarlos como favoritos, exportarlos o unirlos. "
+                                    "También con Ctrl+clic, Mayús+clic o Ctrl+A");
+    ImGui::SetCursorScreenPos(back);
+  }
 
   // Barra de filtros
   {
     static const std::vector<std::pair<int, std::string>> filters = {
         {0, "Todo"}, {1, "Clips"}, {2, "Grabaciones"}, {3, "Capturas"}, {4, "Favoritos"}};
     float avail = ImGui::GetContentRegionAvail().x;
+    // Juego, orden, «Al azar» y sus huecos; la búsqueda se lleva lo que sobre.
+    // Si le quedan menos de 160 px el filtro se estrecha, y lo que no quepa
+    // (ventana pequeña o letras anchas) baja a otra línea en vez de salirse.
+    const float fixedW = Px(12) + Px(170) + Px(8) + Px(150) + Px(8) + Px(84) + Px(8);
     float segW = std::min(Px(470), avail * 0.5f);
+    if (avail - segW - fixedW < Px(160)) segW = std::max(Px(400), avail - fixedW - Px(160));
+    segW = std::min(segW, avail);
+    const float rowRight = ImGui::GetCursorScreenPos().x + avail;
+    const auto next = [&](float width, float gap) {
+      if (ImGui::GetItemRectMax().x + gap + width <= rowRight) ImGui::SameLine(0, gap);
+      else Gap(4);
+    };
     if (int v = Segmented("filter", filters, filter_, segW); v >= 0) filter_ = v;
-    ImGui::SameLine(0, Px(12));
+    next(Px(170), Px(12));
     // Juegos que aparecen en la biblioteca
     std::vector<std::string> games;
     for (const auto& item : m.items) {
@@ -1170,10 +1730,10 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
         if (ImGui::Selectable(g.c_str(), g == game_)) game_ = g;
       ImGui::EndCombo();
     }
-    ImGui::SameLine(0, Px(8));
+    next(Px(150), Px(8));
     ImGui::SetNextItemWidth(Px(150));
     ChoiceCombo<int>("##sort", sort_, {{0, "Más recientes"}, {1, "Más antiguos"}, {2, "Más grandes"}, {3, "Más largos"}});
-    ImGui::SameLine(0, Px(8));
+    next(Px(84), Px(8));
     // Un vídeo cualquiera de los que se ven, para recordar partidas.
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - Px(28)) * 0.5f);
     if (GhostButton("random", "Al azar", Px(84), Tone::Normal, 28)) {
@@ -1188,57 +1748,50 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
       }
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Abre un vídeo cualquiera de los que se ven");
-    ImGui::SameLine(0, Px(8));
+    next(Px(120), Px(8));
     float searchW = std::max(Px(120), ImGui::GetContentRegionAvail().x);
     ImGui::SetNextItemWidth(searchW);
     ImGui::InputTextWithHint("##search", "Buscar", &search_);
   }
   Gap(16);
 
-  // Vídeos elegidos para unir: los que ya no están (borrados, renombrados) salen.
-  selected_.erase(std::remove_if(selected_.begin(), selected_.end(),
-                                 [&](const std::string& path) {
-                                   const MediaItem* item = Find(m, path);
-                                   return !item || !item->Video();
-                                 }),
-                  selected_.end());
+  // Los elegidos que ya no están (borrados, renombrados) salen de la selección:
+  // una pasada por la biblioteca, sin buscar cada uno en toda la lista.
   if (!selected_.empty()) {
-    const Palette& pal = Colors();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 q = ImGui::GetCursorScreenPos();
-    const float barW = ImGui::GetContentRegionAvail().x - Px(12), barH = Px(48);
-    dl->AddRectFilled(q, ImVec2(q.x + barW, q.y + barH), C(pal.surface));
-    dl->AddRectFilled(q, ImVec2(q.x + Px(3), q.y + barH), C(pal.accent));
-    const size_t n = selected_.size();
-    std::string text = n == 1 ? std::string("1 vídeo elegido. Elige otro con la casilla o Ctrl+clic.")
-                              : std::to_string(n) + " vídeos elegidos. Se unen del más antiguo al más reciente.";
-    const float bw = Px(150);
-    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x + Px(16), q.y + (barH - Px(kSmall)) * 0.5f), C(pal.text),
-         Ellipsize(ImGui::GetFont(), Px(kSmall), text, barW - bw * 2 - Px(48)).c_str());
-    ImGui::SetCursorScreenPos(ImVec2(q.x + barW - bw * 2 - Px(8) - Px(10), q.y + (barH - Px(30)) * 0.5f));
-    if (GhostButton("unselect", "Quitar selección", bw, Tone::Normal, 30)) selected_.clear();
-    ImGui::SameLine(0, Px(8));
-    ImGui::BeginDisabled(n < 2);
-    std::string join = n < 2 ? std::string("Unir") : "Unir " + std::to_string(n) + " vídeos";
-    if (SolidButton("join", join.c_str(), bw, 30)) {
-      std::vector<const MediaItem*> chosen;
-      for (const auto& path : selected_)
-        if (const MediaItem* item = Find(m, path)) chosen.push_back(item);
-      std::stable_sort(chosen.begin(), chosen.end(), [](auto* x, auto* y) { return x->modified < y->modified; });
-      std::vector<std::string> paths;
-      for (const auto* item : chosen) paths.push_back(item->path);
-      a.joinClips(paths);
-      selected_.clear();
+    const auto chosen = SelectedItems(m);
+    if (chosen.size() < selected_.size()) {
+      std::unordered_set<std::string> still;
+      for (const auto* item : chosen) still.insert(item->path);
+      selected_ = std::move(still);
     }
-    ImGui::EndDisabled();
-    if (n >= 2 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-      ImGui::SetTooltip("Sin recodificar: solo vídeos grabados con la misma calidad, resolución y audio. El "
-                        "resultado es un vídeo nuevo; los originales no cambian.");
-    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + barH));
+  }
+  ImGuiIO& io = ImGui::GetIO();
+  if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !TypingText()) {
+    // Ctrl+A elige todo lo que se ve; Supr lo elegido va a la papelera; Esc deja de elegir.
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false))
+      for (const auto* item : list) selected_.insert(item->path);
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !selected_.empty()) AskDeleteSelection(m);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && Selecting()) EndSelection();
+  }
+  if (Selecting()) SelectionBar(m, a, list);
+  if (m.exportBatchTotal > 0) {
+    // «Para Discord» de varios: por cuál va, con una barra de toda la tanda.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    const float lineW = ImGui::GetContentRegionAvail().x - Px(12);
+    const int current = std::min(m.exportBatchDone + 1, m.exportBatchTotal);
+    std::string text = "Exportando para Discord " + std::to_string(current) + " de " + std::to_string(m.exportBatchTotal);
+    if (m.exportPercent >= 0) text += "  ·  " + std::to_string(m.exportPercent) + " %";
+    Text(dl, ImGui::GetFont(), Px(kSmall), q, C(p.textMuted), text.c_str());
+    const char* cancel = "Cancelar";
+    ImGui::SetCursorScreenPos(ImVec2(q.x + lineW - TextSize(ImGui::GetFont(), Px(kHint), cancel).x, q.y));
+    if (LinkButton("cancel-batch", cancel) && a.cancelExport) a.cancelExport();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cancela este y los que esperan; los ya hechos se quedan");
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + Px(kSmall) + Px(8)));
+    const float fraction =
+        (float(m.exportBatchDone) + float(std::max(0, m.exportPercent)) / 100.0f) / float(m.exportBatchTotal);
+    Bar(ImVec2(lineW, Px(2)), fraction, p.accent);
     Gap(12);
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
-        !TypingText())
-      selected_.clear();
   }
 
   if (m.items.empty()) {
@@ -1265,12 +1818,16 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
   ImGui::BeginChild("grid", ImVec2(0, 0), ImGuiChildFlags_None);
   DrawHoverTrail(ImGui::GetWindowDrawList());
-  const float gap = Px(16);
+  const float gap = Px(CurrentStyle().gap);
+  // Hueco a la derecha para la barra de desplazamiento (y el contorno de fuera de Neón).
   float avail = ImGui::GetContentRegionAvail().x - Px(12);
   int cols = std::max(1, int((avail + gap) / (Px(250) + gap)));
   float cardW = std::floor((avail - gap * float(cols - 1)) / float(cols));
-  float rowH = std::floor(cardW * 9.0f / 16.0f) + Px(50) + gap;
+  float rowH = MediaCardHeight(cardW) + gap;
   int rows = int((list.size() + size_t(cols) - 1) / size_t(cols));
+  const bool selecting = Selecting();
+  int clicked = -1;
+  bool openItemMenu = false, openSelectionMenu = false;
   ImGuiListClipper clipper;
   clipper.Begin(rows, rowH);
   while (clipper.Step()) {
@@ -1282,22 +1839,37 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
         ImGui::PushID(int(i));
         bool menu = false;
         const MediaItem& item = *list[i];
-        const int selection = item.Video() ? (Selected(item.path) ? 1 : 0) : -1;
-        if (Card(w, item, cardW, &menu, selection)) {
-          // Con algo elegido (o con Ctrl), el clic elige en vez de abrir.
-          if (selection >= 0 && (!selected_.empty() || ImGui::GetIO().KeyCtrl)) ToggleSelected(item.path);
+        const int selection = Selected(item.path) ? 1 : 0;
+        if (Card(w, item, cardW, &menu, selection, int(i) + 1)) {
+          // Eligiendo (o con Ctrl o Mayús), el clic elige en vez de abrir.
+          if (selecting || io.KeyCtrl || io.KeyShift) clicked = int(i);
           else View(m, item.path, AppPage::Library);
         }
         if (menu) {
-          menuPath_ = list[i]->path;
-          ImGui::OpenPopup("item-menu");
+          // Sobre uno de varios elegidos, el menú es el de toda la selección.
+          if (selection > 0 && selected_.size() > 1) {
+            openSelectionMenu = true;
+          } else {
+            menuPath_ = item.path;
+            openItemMenu = true;
+          }
         }
         ImGui::PopID();
       }
       ImGui::Dummy(ImVec2(0, gap - ImGui::GetStyle().ItemSpacing.y));
     }
   }
+  // Fuera del PushID de la tarjeta: ItemMenu y SelectionMenu buscan el menú con el id de aquí.
+  if (openItemMenu) ImGui::OpenPopup("item-menu");
+  if (openSelectionMenu) ImGui::OpenPopup("selection-menu");
+  if (!selectToggle_.empty()) {
+    for (size_t i = 0; i < list.size(); ++i)
+      if (list[i]->path == selectToggle_) clicked = int(i);
+    selectToggle_.clear();
+  }
+  if (clicked >= 0) ClickSelect(list, size_t(clicked), io.KeyShift);
   ItemMenu(m, a);
+  SelectionMenu(m, a);
   ImGui::EndChild();
   ImGui::PopStyleVar();
   (void)p;
@@ -1798,10 +2370,11 @@ void AppUi::PageEditor(AppWindow& w, AppModel& m, const AppActions& a) {
 }
 
 void AppUi::EditorPicker(AppWindow& w, AppModel& m) {
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(32), Px(26)));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(CurrentStyle().pad), Px(CurrentStyle().pad * 0.8f)));
   ImGui::BeginChild("page", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  PageTitle("Editor", "Elige un vídeo o una captura para editarla. Se guarda una copia: el original no cambia.");
+  PageTitle("Editor", "Elige un vídeo o una captura para editarla. Se guarda una copia: el original no cambia.",
+            PageNumber(AppPage::Editor, m.settingsPage));
 
   // Vídeos o capturas, y buscar por nombre o juego.
   std::vector<const MediaItem*> list;
@@ -1852,11 +2425,11 @@ void AppUi::EditorPicker(AppWindow& w, AppModel& m) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
   ImGui::BeginChild("pick-grid", ImVec2(0, 0), ImGuiChildFlags_None);
   DrawHoverTrail(ImGui::GetWindowDrawList());
-  const float gap = Px(16);
+  const float gap = Px(CurrentStyle().gap);
   const float avail = ImGui::GetContentRegionAvail().x - Px(12);
   const int cols = std::max(1, int((avail + gap) / (Px(250) + gap)));
   const float cardW = std::floor((avail - gap * float(cols - 1)) / float(cols));
-  const float rowH = std::floor(cardW * 9.0f / 16.0f) + Px(50) + gap;
+  const float rowH = MediaCardHeight(cardW) + gap;
   const int rows = int((list.size() + size_t(cols) - 1) / size_t(cols));
   std::string open;
   ImGuiListClipper clipper;
@@ -1869,7 +2442,7 @@ void AppUi::EditorPicker(AppWindow& w, AppModel& m) {
         if (c > 0) ImGui::SameLine(0, gap);
         ImGui::PushID(int(i));
         bool menu = false; // aquí no hay menú: se elige con un clic
-        if (Card(w, *list[i], cardW, &menu)) open = list[i]->path;
+        if (Card(w, *list[i], cardW, &menu, -1, int(i) + 1)) open = list[i]->path;
         ImGui::PopID();
       }
       ImGui::Dummy(ImVec2(0, gap - ImGui::GetStyle().ItemSpacing.y));
@@ -1892,20 +2465,29 @@ void AppUi::PageSettings(AppWindow& w, AppModel& m, const AppActions& a) {
   const Palette& p = Colors();
   if (!m.settings.devicesLoaded && a.loadDevices) a.loadDevices();
   const float footerH = Px(kFooterHeight);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(32), Px(26)));
+  const Style& st = CurrentStyle();
+  // Con raíl o pestañas, los apartados van en una columna a la izquierda.
+  const bool column = st.nav != NavLayout::Sidebar;
+  if (column) {
+    SettingsNav(m);
+    ImGui::SameLine(0, 0);
+    ImGui::BeginGroup();
+  }
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Px(st.pad), Px(st.pad * 0.8f)));
   ImGui::BeginChild("page", ImVec2(0, -footerH), ImGuiChildFlags_AlwaysUseWindowPadding);
   DrawHoverTrail(ImGui::GetWindowDrawList());
-  PageTitle(SettingsPageName(m.settingsPage), "");
+  PageTitle(SettingsPageName(m.settingsPage), "", PageNumber(AppPage::Settings, m.settingsPage), "Ajustes");
   DrawSettingsPage(m.settingsPage, m.settings, a.settings);
   Gap(16);
   ImGui::EndChild();
   ImGui::PopStyleVar();
 
-  // Pie: aplicar o descartar
+  // Pie: aplicar o descartar (tapa el fondo ilustrado del tema).
   ImVec2 q = ImGui::GetCursorScreenPos();
   float wAvail = ImGui::GetContentRegionAvail().x;
   ImDrawList* dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(q, ImVec2(q.x + wAvail, q.y + Px(1)), C(p.line));
+  dl->AddRectFilled(q, ImVec2(q.x + wAvail, q.y + footerH), C(p.bg));
+  dl->AddRectFilled(q, ImVec2(q.x + wAvail, q.y + LineW()), C(p.line));
   float bw = Px(130);
   float y = q.y + (footerH - Px(32)) * 0.5f;
   float ss = Px(kHint);
@@ -1922,6 +2504,7 @@ void AppUi::PageSettings(AppWindow& w, AppModel& m, const AppActions& a) {
   }
   ImGui::SetCursorScreenPos(q);
   ImGui::Dummy(ImVec2(wAvail, footerH));
+  if (column) ImGui::EndGroup();
 }
 
 } // namespace spectre

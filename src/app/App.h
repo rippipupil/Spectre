@@ -57,6 +57,16 @@ private:
   // copia al portapapeles.
   void ExportForDiscord(const std::string& path);
   void FinishExport();
+  // Selección de la biblioteca: «Para Discord» de varios, uno detrás de otro
+  // (al acabar la tanda se copian todos), y varios a la papelera de una vez.
+  void ExportManyForDiscord(const std::vector<std::string>& paths);
+  void StartExport(const std::string& path);
+  void StartQueuedExport();
+  void FinishBatchExport(const ExportResult& r);
+  void EndExportBatch();
+  // Hay una exportación en marcha o por recoger, o una tanda esperando turno.
+  bool ExportBusy() const { return exportRunning_ || exporter_.Busy() || !exportQueue_.empty(); }
+  void RecycleMany(std::vector<std::string> paths);
   // «Editar» de la biblioteca: guarda una copia con los cambios en otro hilo
   // (<nombre>_editado_<fecha>.mp4, .gif o .m4a junto al original).
   void SaveEdit(const std::string& path, const EditSettings& settings);
@@ -260,6 +270,18 @@ private:
   // Edición guardada «Para Discord»: se exporta después y, si sale una copia
   // aparte, esta (la intermedia) se borra.
   std::string discordAfterEdit_;
+  // «Para Discord» de varios: los que esperan turno, el de la tanda que se
+  // está exportando, las copias ya hechas y lo que falló.
+  std::deque<std::string> exportQueue_;
+  // Desde StartExport hasta recoger el resultado: el hilo de Exporter deja de
+  // estar ocupado un poco antes de que llegue el aviso de que acabó.
+  bool exportRunning_ = false;
+  bool exportBatchCancelled_ = false;
+  std::string exportBatchInput_;
+  std::vector<std::string> exportBatchOutputs_;
+  int exportBatchTotal_ = 0;
+  int exportBatchFailed_ = 0;
+  std::string exportBatchError_;
 };
 
 } // namespace spectre
