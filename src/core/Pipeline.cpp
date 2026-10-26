@@ -219,12 +219,8 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
         settings_.replaySeconds);
   acceptPackets_ = true;
 
-  // 5. Cámara (opcional).
-  if (settings_.camera) {
-    camera_ = std::make_unique<Camera>();
-    UINT camWidth = UINT(std::max(width_ * settings_.cameraSizePercent / 100, 16));
-    if (!camera_->Start(gpu_.Device(), settings_.cameraId, camWidth)) camera_.reset();
-  }
+  // 5. Cámara (opcional). Se abre en su hilo: aquí no se espera.
+  if (settings_.camera) StartCamera(false);
 
   running_ = true;
   failed_ = false;
@@ -298,8 +294,16 @@ void Pipeline::Stop() {
   if (videoThread_.joinable()) videoThread_.join();
   audio_.Stop();
   ReleaseRecorder();
-  if (camera_) camera_->Stop();
-  camera_.reset();
+  {
+    // Stop no espera a la cámara: si su driver tarda en soltarla, su hilo
+    // termina solo (ver Camera).
+    std::unique_ptr<Camera> camera;
+    {
+      GpuLock lock(GpuMutex());
+      camera = std::move(camera_);
+    }
+    if (camera) camera->Stop();
+  }
   if (capture_) capture_->Stop();
   capture_.reset();
   acceptPackets_ = false;
@@ -316,6 +320,38 @@ void Pipeline::Stop() {
   window_ = {};
 }
 
+void Pipeline::StartCamera(bool userAsked) {
+  auto camera = std::make_unique<Camera>();
+  UINT camWidth = UINT(std::max(width_ * settings_.cameraSizePercent / 100, 16));
+  if (!camera->Start(gpu_.Device(), settings_.cameraId, camWidth, notify_, userAsked)) return;
+  GpuLock lock(GpuMutex());
+  camera_ = std::move(camera);
+  cameraComposited_ = false;
+}
+
+void Pipeline::SetCamera(const PipelineSettings& s) {
+  if (!running_) return; // al arrancar ya se usan los ajustes nuevos
+  const bool reopen = s.camera != settings_.camera ||
+                      (s.camera && (s.cameraId != settings_.cameraId || s.cameraSizePercent != settings_.cameraSizePercent));
+  if (!reopen && s.cameraCorner == settings_.cameraCorner) return;
+  std::unique_ptr<Camera> old;
+  {
+    GpuLock lock(GpuMutex());
+    settings_.camera = s.camera;
+    settings_.cameraId = s.cameraId;
+    settings_.cameraCorner = s.cameraCorner;
+    settings_.cameraSizePercent = s.cameraSizePercent;
+    if (reopen) old = std::move(camera_);
+  }
+  if (reopen || s.camera)
+    Log("Cámara: %s con la captura en marcha, sin reiniciarla",
+        !reopen ? "cambia de esquina" : s.camera ? (old ? "se vuelve a abrir" : "se activa") : "se desactiva");
+  if (old) old->Stop(); // no espera
+  if (reopen && s.camera) StartCamera(true);
+}
+
+std::string Pipeline::TakeCameraStall() { return running_ && camera_ ? camera_->TakeStall() : std::string(); }
+
 RECT Pipeline::CameraRect(UINT camWidth, UINT camHeight) const {
   LONG w = LONG(width_ * settings_.cameraSizePercent / 100) & ~1L;
   LONG h = LONG(double(w) * camHeight / std::max<UINT>(camWidth, 1)) & ~1L;
@@ -331,7 +367,16 @@ bool Pipeline::Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& fra
   if (camera_) {
     ComPtr<ID3D11Texture2D> cam;
     UINT cw = 0, ch = 0;
-    if (camera_->Latest(&cam, &cw, &ch)) converter_.Overlay(cam.Get(), cw, ch, CameraRect(cw, ch), dst, slice);
+    if (camera_->Latest(&cam, &cw, &ch)) {
+      int64_t t0 = QpcNow();
+      bool ok = converter_.Overlay(cam.Get(), cw, ch, CameraRect(cw, ch), dst, slice);
+      if (!cameraComposited_) {
+        // Una vez por cámara: si algo se atasca al componerla, que se vea en el log.
+        cameraComposited_ = true;
+        Log("Cámara: primera composición sobre el vídeo %s en %.1f ms (%ux%u)", ok ? "hecha" : "FALLÓ",
+            QpcToSeconds(QpcNow() - t0) * 1000.0, cw, ch);
+      }
+    }
   }
   return true;
 }

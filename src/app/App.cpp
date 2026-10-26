@@ -117,9 +117,14 @@ bool SameCaptureSettings(const Config& a, const Config& b) {
          a.gpuPriority == b.gpuPriority && a.captureSystemAudio == b.captureSystemAudio &&
          a.outputDeviceId == b.outputDeviceId && a.gameAudioOnly == b.gameAudioOnly && a.captureMic == b.captureMic &&
          a.micDeviceId == b.micDeviceId && a.systemVolume == b.systemVolume && a.micVolume == b.micVolume &&
-         a.separateTracks == b.separateTracks && a.cameraEnabled == b.cameraEnabled && a.cameraId == b.cameraId &&
-         a.cameraCorner == b.cameraCorner && a.cameraSizePercent == b.cameraSizePercent &&
-         a.maxBufferMB == b.maxBufferMB;
+         a.separateTracks == b.separateTracks && a.maxBufferMB == b.maxBufferMB;
+}
+
+// La webcam no está aquí arriba: se cambia con la captura en marcha
+// (Pipeline::SetCamera), sin vaciar el replay ni esperar a que abra.
+bool SameCameraSettings(const Config& a, const Config& b) {
+  return a.cameraEnabled == b.cameraEnabled && a.cameraId == b.cameraId && a.cameraCorner == b.cameraCorner &&
+         a.cameraSizePercent == b.cameraSizePercent;
 }
 } // namespace
 
@@ -532,13 +537,19 @@ void App::ToggleMicrophone() {
 }
 
 void App::ToggleCamera() {
+  // Antes reiniciaba toda la captura aquí, en el hilo del panel, y abría la
+  // cámara con él: el panel se quedaba congelado lo que tardara (o para
+  // siempre si el driver no volvía). Ahora la cámara se abre y se cierra en su
+  // hilo y el replay sigue; si no abre, llega otro aviso con el motivo.
   Config next = config_;
   next.cameraEnabled = !next.cameraEnabled;
-  bool restarts = pipeline_.Running() && !pipeline_.Recording();
+  ULONGLONG t0 = GetTickCount64();
   ApplyConfig(next, true);
-  if (!restartPending_)
-    Toast(std::string(config_.cameraEnabled ? "Cámara activada" : "Cámara desactivada") +
-          (restarts ? ". El replay empieza de cero." : ""));
+  Log("Cámara %s desde el panel o la ventana (%llu ms)", config_.cameraEnabled ? "activada" : "desactivada",
+      GetTickCount64() - t0);
+  if (!config_.cameraEnabled) Toast("Cámara desactivada");
+  else if (pipeline_.Running()) Toast("Cámara activada");
+  else Toast("Cámara activada: se verá en cuanto empiece la captura");
 }
 
 void App::SetClipSeconds(int seconds) {
@@ -1016,6 +1027,8 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   } else if (pipeline_.Running()) {
     pipeline_.SetReplaySeconds(config_.replayEnabled ? config_.clipSeconds : 3.0);
   }
+  // También grabando: la cámara solo se compone encima, no corta nada.
+  if (!SameCameraSettings(old, config_) && pipeline_.Running()) pipeline_.SetCamera(BuildSettings());
   UpdatePipeline();
 
   const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
@@ -2021,6 +2034,10 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       UpdatePipeline(std::exchange(restartPending_, false));
     if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerHealth) CheckUpdatesQuietly();
+    if (wp == kTimerHealth) {
+      std::string stall = pipeline_.TakeCameraStall();
+      if (!stall.empty()) Toast(stall, true);
+    }
     if (wp == kTimerPreview) {
       KillTimer(hwnd_, kTimerPreview);
       previewing_ = true;
