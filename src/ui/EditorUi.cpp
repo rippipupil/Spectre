@@ -4,6 +4,7 @@
 #include "app/TextImage.h"
 #include "common/Util.h"
 #include "ui/AppUi.h"
+#include "ui/EditorWidgets.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
@@ -59,6 +60,11 @@ std::string Length(double seconds) {
   return s;
 }
 
+} // namespace
+
+// Piezas de las herramientas que comparte el editor de fotos (EditorWidgets.h).
+namespace editui {
+
 bool TypingText() { return ImGui::GetIO().WantTextInput; }
 
 std::string NameOf(const std::string& path) {
@@ -68,7 +74,7 @@ std::string NameOf(const std::string& path) {
 
 // Título de una herramienta. Con `on`, un interruptor a la derecha y toda la
 // fila lo cambia; bold=false para las opciones dentro de una herramienta.
-bool SwitchRow(const char* label, bool* on, bool bold = false) {
+bool SwitchRow(const char* label, bool* on, bool bold) {
   const Palette& p = Colors();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const float w = ImGui::GetContentRegionAvail().x, h = Px(28);
@@ -92,7 +98,7 @@ bool SwitchRow(const char* label, bool* on, bool bold = false) {
   return changed;
 }
 
-bool ToolHeader(const char* title, bool* on = nullptr) { return SwitchRow(title, on, true); }
+bool ToolHeader(const char* title, bool* on) { return SwitchRow(title, on, true); }
 
 // Texto pequeño encima de un control.
 void Label(const char* text) {
@@ -180,6 +186,15 @@ bool PercentSlider(const char* id, float* value) {
   return changed;
 }
 
+// 0xRRGGBB de un color de ImGui (ABGR).
+uint32_t Rgb(ImU32 c) { return ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu); }
+
+} // namespace editui
+
+using namespace editui;
+
+namespace {
+
 // Lo que cambia la forma de la imagen: con lo mismo, una vista previa exacta
 // anterior sigue sirviendo mientras llega la nueva (color, texto).
 bool SameShape(const EditSettings& a, const EditSettings& b) {
@@ -189,9 +204,6 @@ bool SameShape(const EditSettings& a, const EditSettings& b) {
          a.camShape == b.camShape && a.camBorder == b.camBorder && a.camBorderColor == b.camBorderColor &&
          a.camMirror == b.camMirror;
 }
-
-// 0xRRGGBB de un color de ImGui (ABGR).
-uint32_t Rgb(ImU32 c) { return ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu); }
 
 std::string OverlayKey(const EditSettings& s, const EditGeometry& g) {
   if (s.text.empty() && s.watermark.empty()) return {};
@@ -717,7 +729,7 @@ void EditorUi::Header(const MediaItem& item, Exit* exit) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const ImVec2 q = ImGui::GetCursorScreenPos();
   const float rowH = Px(34), avail = ImGui::GetContentRegionAvail().x;
-  if (IconButton("back", Icon::Back, rowH, "Volver al visor (Esc)")) exit->back = true;
+  if (IconButton("back", Icon::Back, rowH, "Volver (Esc)")) exit->back = true;
   const float tx = q.x + rowH + Px(10);
   const float resetW = Px(140);
   const float actionsW = rowH * 2 + Px(4) + Px(10) + resetW;

@@ -6,10 +6,12 @@
 
 #include "app/Config.h"
 #include "app/Library.h"
+#include "app/PhotoEdit.h"
 #include "app/VideoEdit.h"
 #include "core/Pipeline.h"
 #include "ui/AppWindow.h"
 #include "ui/EditorUi.h"
+#include "ui/PhotoEditorUi.h"
 #include "ui/Player.h"
 #include "ui/SettingsPages.h"
 
@@ -49,6 +51,7 @@ struct AppModel {
   std::string editRenderPath;
   int editPercent = -1;
   std::string editSaved, editSavedFrom; // la última copia guardada y de qué archivo salió
+  std::string photoSavePath;            // captura cuya copia editada se está guardando
 };
 
 struct AppActions {
@@ -78,6 +81,9 @@ struct AppActions {
   // «Editar»: guarda una copia con esos cambios (en otro hilo) o cancela la que se está guardando.
   std::function<void(const std::string&, const EditSettings&)> saveEdit;
   std::function<void()> cancelEdit;
+  // Editor de fotos: guarda una copia de la captura con esos cambios (en otro
+  // hilo). target: 0 PNG, 1 JPG, 2 para Discord (JPG copiado al portapapeles).
+  std::function<void(const std::string&, const PhotoSettings&, int)> savePhoto;
   // Parte el vídeo en dos copias sin recodificar: hasta ese segundo y desde él.
   std::function<void(const std::string&, double)> split;
   std::function<void(const std::string&, bool)> setFavorite;
@@ -118,7 +124,11 @@ private:
   void PageLibrary(AppWindow& w, AppModel& m, const AppActions& a);
   void PageViewer(AppWindow& w, AppModel& m, const AppActions& a);
   void PageEditor(AppWindow& w, AppModel& m, const AppActions& a);
-  // Abre «Editar» con ese vídeo; Volver lleva a su visor.
+  // Pestaña Editor sin nada abierto: elegir un vídeo o una captura.
+  void EditorPicker(AppWindow& w, AppModel& m);
+  void LeaveEditors();
+  // Abre «Editar» con ese vídeo o esa captura; Volver lleva a su visor (o a
+  // la pestaña Editor si se abrió desde ella).
   void Edit(AppModel& m, const std::string& path);
   void PageSettings(AppWindow& w, AppModel& m, const AppActions& a);
   void StatusCard(AppModel& m, const AppActions& a);
@@ -151,6 +161,10 @@ private:
   int shownPage_ = -1;
   Player player_;
   EditorUi editor_; // con su propio reproductor: el del visor se cierra al entrar
+  PhotoEditorUi photo_;  // capturas
+  int pickFilter_ = 0;   // Editor: 0 vídeos, 1 capturas
+  std::string pickSearch_;
+  std::string lastEdit_; // lo último abierto en un editor, para seguir con ello
   float volume_ = 1.0f;
   bool muted_ = false;
   std::string playerPath_;

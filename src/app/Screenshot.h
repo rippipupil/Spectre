@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/PhotoEdit.h"
 #include "capture/CaptureSource.h"
 
 #include <cstdint>
@@ -28,5 +29,15 @@ void TakeScreenshot(ScreenshotRequest request, std::function<void(bool ok, const
 // TakeScreenshot.
 void SaveImageAsync(std::string path, bool jpeg, std::vector<uint8_t> bgr, unsigned width, unsigned height,
                     std::function<void(bool ok, const std::string& text)> done);
+
+// Lee una imagen (PNG, JPG, BMP...) en BGRA de arriba abajo con WIC, reducida
+// si algún lado pasa de maxSide. Bloquea; llamar con COM iniciado.
+bool ReadImageFile(const std::string& path, int maxSide, PhotoImage* image, std::string* error);
+
+// Editor de fotos: lee input, le aplica settings y guarda la copia en output
+// (PNG o JPG), en un hilo propio y con prioridad baja. done, como en
+// TakeScreenshot.
+void SavePhotoEditAsync(std::string input, std::string output, PhotoSettings settings, bool jpeg,
+                        std::function<void(bool ok, const std::string& text)> done);
 
 } // namespace spectre

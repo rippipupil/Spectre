@@ -243,6 +243,9 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     Defer([this, path, settings] { SaveEdit(path, settings); });
   };
   appActions_.cancelEdit = [this] { editWorker_.Cancel(); };
+  appActions_.savePhoto = [this](const std::string& path, const PhotoSettings& settings, int target) {
+    Defer([this, path, settings, target] { SavePhoto(path, settings, target); });
+  };
   appActions_.split = [this](const std::string& path, double at) { Defer([this, path, at] { SplitClip(path, at); }); };
   appActions_.setFavorite = [this](const std::string& path, bool favorite) {
     library_->SetFavorite(path, favorite);
@@ -789,6 +792,40 @@ void App::FinishEdit() {
   if (menu_.Visible()) RefreshPanelClips();
   if (appWindow_.Visible()) RescanLibrary();
   EnforceStorageLimit(); // algo nuevo en la carpeta
+}
+
+namespace {
+
+// Lo que devuelve el hilo de SavePhotoEditAsync a la ventana (WM_SPECTRE_PHOTO).
+struct PhotoSaved {
+  bool ok = false;
+  bool discord = false;
+  std::string input, output, error;
+};
+
+} // namespace
+
+void App::SavePhoto(const std::string& path, const PhotoSettings& settings, int target) {
+  PhotoSettings s = settings;
+  // Para Discord: JPG y, si no se eligió otro tamaño, como mucho 1920 px de
+  // lado largo (pesa poco y se ve igual en el chat).
+  const bool jpeg = target != 0, discord = target == 2;
+  if (discord && s.size == PhotoSize::Same) s.size = PhotoSize::Large;
+  auto in = std::filesystem::path(Widen(path));
+  const std::string output = Narrow(
+      FreePath(in.parent_path(), in.stem().wstring() + L"_editado_" + Widen(TimestampForFile()), jpeg ? L".jpg" : L".png")
+          .wstring());
+  appModel_.photoSavePath = path;
+  appWindow_.Invalidate();
+  HWND hwnd = hwnd_;
+  SavePhotoEditAsync(path, output, std::move(s), jpeg, [hwnd, path, discord](bool ok, const std::string& text) {
+    auto* r = new PhotoSaved;
+    r->ok = ok;
+    r->discord = discord;
+    r->input = path;
+    (ok ? r->output : r->error) = text;
+    if (!PostMessageW(hwnd, WM_SPECTRE_PHOTO, 0, reinterpret_cast<LPARAM>(r))) delete r;
+  });
 }
 
 void App::SaveFrame(const MediaItem& item, std::vector<uint8_t> bgr, int width, int height) {
@@ -2120,6 +2157,30 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       appWindow_.Invalidate();
     }
     return 0;
+  case WM_SPECTRE_PHOTO: {
+    std::unique_ptr<PhotoSaved> r(reinterpret_cast<PhotoSaved*>(lp));
+    appModel_.photoSavePath.clear();
+    appWindow_.Invalidate();
+    if (!r->ok) {
+      Toast(r->error.empty() ? "No se pudo guardar la imagen" : r->error, true);
+      return 0;
+    }
+    appModel_.editSaved = r->output;
+    appModel_.editSavedFrom = r->input;
+    const std::string note = LowDiskNote();
+    if (r->discord) {
+      const bool copied = CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, r->output);
+      Toast(copied ? "Imagen para Discord copiada: pégala con Ctrl+V" + note
+                   : "Imagen guardada: " + FileNameOf(r->output) + ". No se pudo copiar al portapapeles",
+            !copied || !note.empty());
+    } else {
+      Toast("Imagen guardada: " + FileNameOf(r->output) + note, !note.empty());
+    }
+    if (menu_.Visible()) RefreshPanelClips();
+    if (appWindow_.Visible()) RescanLibrary();
+    EnforceStorageLimit(); // algo nuevo en la carpeta
+    return 0;
+  }
   case WM_SPECTRE_LIBRARY: {
     std::unique_ptr<LimitResult> result(reinterpret_cast<LimitResult*>(lp));
     if (result) ReportStorageLimit(*result);

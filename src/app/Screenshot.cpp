@@ -1,6 +1,7 @@
 #include "app/Screenshot.h"
 
 #include "app/CrashHandler.h"
+#include "app/TextImage.h"
 #include "common/Util.h"
 
 #include <d3d11.h>
@@ -8,6 +9,7 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -185,6 +187,53 @@ bool Capture(const ScreenshotRequest& request, std::string* error) {
 
 } // namespace
 
+bool ReadImageFile(const std::string& path, int maxSide, PhotoImage* image, std::string* error) {
+  auto fail = [&](const char* what, HRESULT hr) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "No se pudo leer la imagen (%s, 0x%08X)", what, unsigned(hr));
+    *error = buf;
+    return false;
+  };
+  ComPtr<IWICImagingFactory> wic;
+  HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+  if (FAILED(hr)) return fail("WIC", hr);
+  ComPtr<IWICBitmapDecoder> decoder;
+  ComPtr<IWICBitmapFrameDecode> frame;
+  hr = wic->CreateDecoderFromFilename(Widen(path).c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+                                      &decoder);
+  if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+  if (FAILED(hr)) return fail("abrir", hr);
+  UINT w = 0, h = 0;
+  frame->GetSize(&w, &h);
+  if (w == 0 || h == 0) return fail("tamaño", E_FAIL);
+  ComPtr<IWICBitmapSource> source = frame;
+  if (maxSide > 0 && (w > UINT(maxSide) || h > UINT(maxSide))) {
+    const double k = double(maxSide) / double(std::max(w, h));
+    const UINT sw = std::max(1u, UINT(w * k)), sh = std::max(1u, UINT(h * k));
+    ComPtr<IWICBitmapScaler> scaler;
+    hr = wic->CreateBitmapScaler(&scaler);
+    if (SUCCEEDED(hr)) hr = scaler->Initialize(source.Get(), sw, sh, WICBitmapInterpolationModeFant);
+    if (FAILED(hr)) return fail("reducir", hr);
+    source = scaler;
+    w = sw;
+    h = sh;
+  }
+  // BGRA con el alfa ya aplicado sobre negro: las capturas son opacas.
+  ComPtr<IWICFormatConverter> converter;
+  hr = wic->CreateFormatConverter(&converter);
+  if (SUCCEEDED(hr))
+    hr = converter->Initialize(source.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0,
+                               WICBitmapPaletteTypeCustom);
+  if (FAILED(hr)) return fail("convertir", hr);
+  image->width = int(w);
+  image->height = int(h);
+  image->bgra.resize(size_t(w) * size_t(h) * 4);
+  hr = converter->CopyPixels(nullptr, w * 4, UINT(image->bgra.size()), image->bgra.data());
+  if (FAILED(hr)) return fail("leer", hr);
+  for (size_t i = 3; i < image->bgra.size(); i += 4) image->bgra[i] = 255;
+  return true;
+}
+
 void TakeScreenshot(ScreenshotRequest request, std::function<void(bool ok, const std::string& text)> done) {
   auto pending = std::make_shared<PendingWrite>();
   std::thread([request = std::move(request), done = std::move(done), pending] {
@@ -220,6 +269,35 @@ void SaveImageAsync(std::string path, bool jpeg, std::vector<uint8_t> bgr, unsig
       Log("Fotograma: excepción: %s", e.what());
     }
     if (done) done(ok, ok ? path : error);
+    if (SUCCEEDED(co)) CoUninitialize();
+  }).detach();
+}
+
+void SavePhotoEditAsync(std::string input, std::string output, PhotoSettings settings, bool jpeg,
+                        std::function<void(bool ok, const std::string& text)> done) {
+  auto pending = std::make_shared<PendingWrite>();
+  std::thread([input = std::move(input), output = std::move(output), settings = std::move(settings), jpeg,
+               done = std::move(done), pending] {
+    InstallThreadCrashHandler();
+    HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED); // WIC
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::string error;
+    bool ok = false;
+    try {
+      PhotoImage source, result;
+      PhotoRender options;
+      options.finalSize = true;
+      if (ReadImageFile(input, 16384, &source, &error)) {
+        if (!RenderPhoto(settings, source, RasterizeText, options, &result)) error = "No se pudo editar la imagen";
+        else ok = Encode(Widen(output), jpeg, PhotoToBgr(result), UINT(result.width), UINT(result.height), &error);
+      }
+      if (ok) Log("Imagen editada: %s (%dx%d)", output.c_str(), result.width, result.height);
+      else Log("Imagen editada: %s", error.c_str());
+    } catch (const std::exception& e) {
+      error = std::string("No se pudo guardar la imagen: ") + e.what();
+      Log("Imagen editada: excepción: %s", e.what());
+    }
+    if (done) done(ok, ok ? output : error);
     if (SUCCEEDED(co)) CoUninitialize();
   }).detach();
 }
