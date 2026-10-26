@@ -156,9 +156,11 @@ void CamBackground::Frame(int64_t index, const CapturedFrame& frame, const RECT*
   if (!worker_.joinable()) return;
   const ULONGLONG now = GetTickCount64();
   if (!rect || disabled_) {
+    // Sin cámara a la vista no hay pista que reciba (una grabación que empiece
+    // ahora no la declara), aunque su encoder siga abierto un rato.
+    activeStream_ = -1;
     if ((active_ || asked_) && (disabled_ || now - lastSeen_ > kIdleMs)) {
       if (active_) Retire(std::move(active_));
-      activeStream_ = -1;
       std::unique_ptr<Aux> ready;
       {
         std::lock_guard lock(mutex_);
@@ -210,6 +212,7 @@ void CamBackground::Frame(int64_t index, const CapturedFrame& frame, const RECT*
                   int(a.converter.OutHeight()), &src, &dst))
     return;
   const int stream = a.stream;
+  activeStream_ = stream;
   auto sink = [this, stream](const AVPacket* pkt, int) { buffer_->Push(pkt, stream); };
   auto render = [&](ID3D11Texture2D* target, UINT slice) {
     return a.converter.ConvertRegion(frame.texture.Get(), src, target, slice, dst);
