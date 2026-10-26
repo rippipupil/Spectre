@@ -44,6 +44,9 @@ struct AppModel {
   // Exportación para Discord en marcha (una cada vez): archivo y porcentaje; -1 = ninguna.
   std::string exportPath;
   int exportPercent = -1;
+  // «Para Discord» de varios: los que tiene la tanda y los que ya acabaron (0 = ninguna).
+  int exportBatchTotal = 0;
+  int exportBatchDone = 0;
   std::string editPath; // archivo abierto en «Editar» (al volver, el visor lo enseña)
   // Edición guardándose (una cada vez): archivo y porcentaje; -1 = ninguna.
   std::string editRenderPath;
@@ -85,6 +88,12 @@ struct AppActions {
   std::function<bool(const std::string&, const std::string&, std::string*, std::string*)> rename;
   // A la papelera después del frame (el Explorador puede tardar); un error llega como aviso.
   std::function<void(const std::string&)> recycle;
+  // Selección de la biblioteca: varios a la papelera en una sola operación,
+  // favoritos de una vez, «Para Discord» uno detrás de otro y copiar varios.
+  std::function<void(const std::vector<std::string>&)> recycleMany;
+  std::function<void(const std::vector<std::string>&, bool)> setFavorites;
+  std::function<void(const std::vector<std::string>&)> exportManyForDiscord;
+  std::function<void(const std::vector<std::string>&)> copyManyToClipboard;
   std::function<void(const std::string&, bool)> toast;
   SettingsActions settings;
 };
@@ -122,12 +131,25 @@ private:
   void Edit(AppModel& m, const std::string& path);
   void PageSettings(AppWindow& w, AppModel& m, const AppActions& a);
   void StatusCard(AppModel& m, const AppActions& a);
-  // selection: -1 sin casilla (Inicio), 0 o 1 en la biblioteca (elegido para unir).
+  // selection: -1 sin casilla (Inicio), 0 o 1 en la biblioteca (elegido o no).
   bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection = -1);
   void StatsSection(const AppModel& m);
   void SaveCurrentFrame(const MediaItem& item, const AppActions& a);
+  // Selección de la biblioteca: casillas, Ctrl+clic, Mayús+clic (un tramo) y «Seleccionar».
   bool Selected(const std::string& path) const;
   void ToggleSelected(const std::string& path);
+  bool Selecting() const { return selectMode_ || !selected_.empty(); }
+  void ClickSelect(const std::vector<const MediaItem*>& list, size_t index, bool range);
+  void EndSelection();
+  std::vector<const MediaItem*> SelectedItems(const AppModel& m) const;
+  void SelectionBar(AppModel& m, const AppActions& a, const std::vector<const MediaItem*>& list);
+  void SelectionMenu(AppModel& m, const AppActions& a);
+  // Lo mismo desde la barra, el menú contextual y las teclas.
+  void FavoriteSelection(AppModel& m, const AppActions& a);
+  void ExportSelection(AppModel& m, const AppActions& a);
+  void JoinSelection(AppModel& m, const AppActions& a);
+  void CopySelection(AppModel& m, const AppActions& a);
+  void AskDeleteSelection(AppModel& m);
   void ItemMenu(AppModel& m, const AppActions& a);
   void Dialogs(AppModel& m, const AppActions& a);
   void Timeline(AppWindow& w, const MediaItem& item, float width);
@@ -177,9 +199,19 @@ private:
   bool openDelete_ = false;
   bool deleteHasBin_ = true; // la unidad del archivo tiene papelera
   std::string starToggle_; // estrella pulsada en una tarjeta este frame
-  // Vídeos elegidos en la biblioteca para unirlos (casilla, Ctrl+clic o «Unir con otros...»).
+  // Elegidos en la biblioteca (casilla, Ctrl+clic, Mayús+clic, «Seleccionar» o
+  // «Unir con otros...»): se unen, se marcan como favoritos, se exportan para
+  // Discord, se copian o van a la papelera a la vez.
   std::vector<std::string> selected_;
   std::string selectToggle_; // casilla pulsada en una tarjeta este frame
+  std::string selectAnchor_; // el último pulsado: Mayús+clic elige desde ahí hasta el nuevo
+  bool selectMode_ = false;  // «Seleccionar»: el clic elige en vez de abrir
+  // «Mover a la papelera» de varios: los archivos, si se dejan fuera los
+  // favoritos y cuántos están en una unidad sin papelera.
+  std::vector<std::string> bulkDelete_;
+  bool openBulkDelete_ = false;
+  bool bulkKeepFavorites_ = false;
+  size_t bulkNoBin_ = 0;
   unsigned randomSeed_ = 0;  // «Al azar»: no repetir el mismo vídeo dos veces seguidas
 };
 
