@@ -360,6 +360,16 @@ std::shared_ptr<UiTexture> AppWindow::CreateRenderTexture(int width, int height)
 
 // ------------------------------------------------------------------ ImGui
 
+void AppWindow::SetFonts(Face body, Face display) {
+  if (body == fontBody_ && display == fontDisplay_) return;
+  fontBody_ = body;
+  fontDisplay_ = display;
+  if (imgui_) {
+    rebuildFonts_ = true;
+    Invalidate();
+  }
+}
+
 void AppWindow::SetupImGui() {
   IMGUI_CHECKVERSION();
   imgui_ = ImGui::CreateContext();
@@ -368,7 +378,7 @@ void AppWindow::SetupImGui() {
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-  ui::LoadFonts(scale_, &fonts_, true, fontBody_, fontDisplay_);
+  ui::LoadFonts(scale_, &fonts_, ui::FontUse::App, fontBody_, fontDisplay_);
   fontMemoryFreed_ = false;
   ApplyBaseStyle(scale_);
   ImGui_ImplWin32_Init(hwnd_);
@@ -386,7 +396,7 @@ void AppWindow::Render(const std::function<void()>& draw) {
   if (rebuildFonts_) {
     rebuildFonts_ = false;
     ImGui_ImplDX11_InvalidateDeviceObjects();
-    ui::LoadFonts(scale_, &fonts_, true, fontBody_, fontDisplay_);
+    ui::LoadFonts(scale_, &fonts_, ui::FontUse::App, fontBody_, fontDisplay_);
     fontMemoryFreed_ = false;
     ImGui::GetStyle() = ImGuiStyle();
     ApplyBaseStyle(scale_);

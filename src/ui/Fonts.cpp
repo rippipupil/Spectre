@@ -166,7 +166,7 @@ ImFont* FontSet::ForSize(ImFont* font, float size) const {
   return best;
 }
 
-void LoadFonts(float scale, FontSet* out, bool allSizes, Face body, Face display) {
+void LoadFonts(float scale, FontSet* out, FontUse use, Face body, Face display) {
   ImFontAtlas* atlas = ImGui::GetIO().Fonts;
   atlas->Clear();
   *out = FontSet{};
@@ -177,6 +177,7 @@ void LoadFonts(float scale, FontSet* out, bool allSizes, Face body, Face display
   // como ClearType. Nítido y con el mismo ancho que el diseño de la fuente (el
   // hinting completo ensancha el texto un 7 % y descuadraría los paneles).
   atlas->FontBuilderFlags = ImGuiFreeTypeBuilderFlags_LightHinting;
+  const bool allSizes = use != FontUse::Toast;
   FaceData regular, bold;
   BodyFaces(body, &regular, &bold);
   for (int i = 0; i < FontSet::kCount; ++i) {
@@ -186,7 +187,10 @@ void LoadFonts(float scale, FontSet* out, bool allSizes, Face body, Face display
   }
   FaceData heading;
   if (allSizes) heading = DisplayFace(display);
-  for (int i = 0; i < FontSet::kDisplayCount && allSizes; ++i) out->heading[i] = Add(heading, kDisplaySizes[i] * scale);
+  for (int i = 0; i < FontSet::kDisplayCount && allSizes; ++i) {
+    if (use == FontUse::Panel && i > 1) continue; // el panel no dibuja 28 ni 36 px
+    out->heading[i] = Add(heading, kDisplaySizes[i] * scale);
+  }
   if (!out->regular[kMainIndex]) {
     // Sin Segoe UI (Windows recortado): la fuente de ImGui a todos los tamaños.
     ImFontConfig cfg;
@@ -199,9 +203,10 @@ void LoadFonts(float scale, FontSet* out, bool allSizes, Face body, Face display
     if (!out->regular[i]) out->regular[i] = out->regular[kMainIndex];
     if (!out->bold[i]) out->bold[i] = out->bold[kMainIndex] ? out->bold[kMainIndex] : out->regular[i];
   }
-  // Sin letra de títulos (los avisos no la cargan): la negrita más grande.
+  // Sin letra de títulos (los avisos no la cargan): la negrita más grande. Los
+  // tamaños que el panel no carga usan su título de 22 px, de la misma familia.
   for (int i = 0; i < FontSet::kDisplayCount; ++i)
-    if (!out->heading[i]) out->heading[i] = out->bold[FontSet::kCount - 1];
+    if (!out->heading[i]) out->heading[i] = out->heading[1] ? out->heading[1] : out->bold[FontSet::kCount - 1];
   ImGui::GetIO().FontDefault = out->Main();
   atlas->Build();
   // Ya rasterizadas: los TTF (unos 2-4 MB) no hacen falta.

@@ -1718,6 +1718,9 @@ void App::PollClickOutside() {
 
 void App::OpenApp(std::optional<AppPage> page) {
   const bool wasOpen = appWindow_.Visible();
+  // Las letras del diseño del tema antes de crearla: el atlas se hace una vez.
+  const Style& style = StyleFor(FindTheme(config_.theme), config_.themeStyle);
+  appWindow_.SetFonts(style.body, style.display);
   if (!appWindow_.Open()) {
     Toast("No se pudo abrir la ventana de Spectre. Mira spectre.log", true);
     return;

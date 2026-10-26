@@ -36,12 +36,17 @@ struct FontSet {
   ImFont* ForSize(ImFont* font, float size) const;
 };
 
-// Vacía el atlas del contexto de ImGui actual, añade las letras de texto
-// (regular y negrita) a todos los tamaños y las de los títulos a los suyos, y
-// lo construye. Sin Segoe UI usa la fuente de ImGui. allSizes=false carga
-// solo los dos tamaños que usan los avisos (15 px el título y 13 px el
-// detalle) y ningún título: el atlas se construye unas tres veces más rápido.
-void LoadFonts(float scale, FontSet* out, bool allSizes = true, Face body = Face::Segoe, Face display = Face::Segoe);
+// Qué tamaños hacen falta en cada ventana:
+// - App: el texto (regular y negrita) a todos los tamaños y los cuatro títulos.
+// - Panel: el texto a todos los tamaños y solo los títulos que dibuja (17 y
+//   22 px: la marca y la "S"); el atlas ocupa la mitad que con los cuatro.
+// - Toast: los dos tamaños de los avisos (15 px el título y 13 px el detalle)
+//   y ningún título: el atlas se construye unas tres veces más rápido.
+enum class FontUse { App, Panel, Toast };
+
+// Vacía el atlas del contexto de ImGui actual, añade las letras que pide `use`
+// y lo construye. Sin Segoe UI usa la fuente de ImGui.
+void LoadFonts(float scale, FontSet* out, FontUse use, Face body = Face::Segoe, Face display = Face::Segoe);
 // Cuando el backend ya subió el atlas a la GPU (tras el primer frame): libera
 // la copia en RAM. Fuera de un frame. false si aún no estaba subido.
 bool ReleaseFontMemory();

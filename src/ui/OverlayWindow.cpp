@@ -278,7 +278,7 @@ void OverlayWindow::SetupImGui() {
 
   // Solo los rangos por defecto (Latin-1): los iconos se dibujan con líneas,
   // así que no hace falta fusionar Segoe UI Symbol.
-  ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu, fontBody_, fontDisplay_);
+  ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu ? ui::FontUse::Panel : ui::FontUse::Toast, fontBody_, fontDisplay_);
   fontMemoryFreed_ = false;
   rebuildFonts_ = false;
 
@@ -296,7 +296,7 @@ void OverlayWindow::Render(const std::function<void()>& draw) {
   if (rebuildFonts_) {
     rebuildFonts_ = false;
     ImGui_ImplDX11_InvalidateDeviceObjects();
-    ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu, fontBody_, fontDisplay_);
+    ui::LoadFonts(scale_, &fonts_, kind_ == Kind::Menu ? ui::FontUse::Panel : ui::FontUse::Toast, fontBody_, fontDisplay_);
     fontMemoryFreed_ = false;
     ImGui::GetStyle() = ImGuiStyle();
     ApplyBaseStyle(scale_);
