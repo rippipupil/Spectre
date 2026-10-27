@@ -1516,10 +1516,44 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
   }
 }
 
+// Estado en Discord (Rich Presence): el interruptor y cómo va la conexión.
+void DiscordSection(SettingsModel& m) {
+  using S = DiscordStatus::State;
+  const Palette& p = Colors();
+  auto& c = m.config;
+  Heading("DISCORD");
+  m.dirty |= SwitchField("Mostrar en Discord lo que grabas", &c.discordPresence,
+                         "Tu perfil de Discord enseña «Jugando a Spectre» con el juego que clipeas y los clips que "
+                         "llevas guardados en la partida. Solo con Discord abierto en este PC.");
+  if (!c.discordPresence) return;
+  const DiscordStatus& d = m.discord;
+  switch (d.state) {
+  case S::Off:
+    Help("Se conecta al pulsar Aplicar.");
+    break;
+  case S::NoAppId:
+    UpdateStatusLine(p.warning, false, "Esta versión de Spectre no trae su aplicación de Discord: el estado no se puede enseñar.");
+    break;
+  case S::Waiting:
+    UpdateStatusLine(p.textMuted, false, "Discord no está abierto: Spectre se conecta solo cuando lo abras.");
+    break;
+  case S::Connected:
+    UpdateStatusLine(p.accent, false,
+                     d.user.empty() ? std::string("Conectado a Discord.") : "Conectado a Discord como " + d.user + ".");
+    Help("Se ve mientras juegas con el replay activo o grabas; en el escritorio no se enseña nada.");
+    break;
+  case S::Rejected:
+    UpdateStatusLine(p.danger, false,
+                     "Discord no aceptó la conexión" + (d.error.empty() ? std::string(".") : ": " + d.error));
+    break;
+  }
+}
+
 void PageGeneral(SettingsModel& m, const SettingsActions& a) {
   auto& c = m.config;
   AppearanceSection(m);
   PanelSection(m);
+  DiscordSection(m);
 
   Heading("INICIO Y CIERRE");
   m.dirty |= SwitchField("Iniciar con Windows", &c.autostart,

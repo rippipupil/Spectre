@@ -68,13 +68,21 @@ set(SPECTRE_UPDATE_REPO "" CACHE STRING "Repositorio de GitHub de las releases (
 if(SPECTRE_UPDATE_REPO AND NOT SPECTRE_UPDATE_REPO MATCHES "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
   message(FATAL_ERROR "SPECTRE_UPDATE_REPO no válido: '${SPECTRE_UPDATE_REPO}'")
 endif()
+# Aplicación de Discord del estado en Discord (Rich Presence): su «Application
+# ID» del portal de desarrolladores, que no es secreto. Da el nombre que sale
+# en el perfil («Jugando a Spectre») y el icono. Vacío: sin estado en Discord.
+set(SPECTRE_DISCORD_APP_ID "1564603344742514708" CACHE STRING "Application ID de la aplicación de Discord (Rich Presence)")
+if(SPECTRE_DISCORD_APP_ID AND NOT SPECTRE_DISCORD_APP_ID MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "SPECTRE_DISCORD_APP_ID no válido: '${SPECTRE_DISCORD_APP_ID}'")
+endif()
 file(GLOB_RECURSE SPECTRE_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_executable(spectre WIN32 ${SPECTRE_SOURCES} res/spectre.rc)
 target_include_directories(spectre PRIVATE src)
 target_compile_definitions(spectre PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
   SPECTRE_VERSION="${SPECTRE_BUILD_VERSION}"
-  SPECTRE_UPDATE_REPO="${SPECTRE_UPDATE_REPO}")
+  SPECTRE_UPDATE_REPO="${SPECTRE_UPDATE_REPO}"
+  SPECTRE_DISCORD_APP_ID="${SPECTRE_DISCORD_APP_ID}")
 target_compile_options(spectre PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /EHsc)
 # FreeType también directamente: ui/Fonts.cpp busca las instancias (Bold,
 # SemiCondensed...) de Bahnschrift, que es una fuente variable.

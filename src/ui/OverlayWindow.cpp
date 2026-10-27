@@ -4,6 +4,7 @@
 #include "common/Util.h"
 #include "ui/Theme.h"
 
+#include <d3d10.h>
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
@@ -205,15 +206,32 @@ void OverlayWindow::ReleaseMouseButtons() {
 bool OverlayWindow::CreateGraphics(UINT width, UINT height) {
   width_ = width;
   height_ = height;
+  ++generation_;
+  videoSupport_ = false;
   const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-  HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
-                                 UINT(std::size(levels)), D3D11_SDK_VERSION, &device_, nullptr, &context_);
+  // El panel con VIDEO_SUPPORT, que es lo que pide Media Foundation para la
+  // vista previa de los clips; los avisos no reproducen nada.
+  HRESULT hr = E_FAIL;
+  if (kind_ == Kind::Menu) {
+    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                           D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, levels,
+                           UINT(std::size(levels)), D3D11_SDK_VERSION, &device_, nullptr, &context_);
+    videoSupport_ = SUCCEEDED(hr);
+  }
+  if (FAILED(hr))
+    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
+                           UINT(std::size(levels)), D3D11_SDK_VERSION, &device_, nullptr, &context_);
   if (FAILED(hr)) {
     // Sin GPU utilizable (escritorio remoto...): WARP por software.
     hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
                            UINT(std::size(levels)), D3D11_SDK_VERSION, &device_, nullptr, &context_);
   }
   if (FAILED(hr)) return false;
+  if (videoSupport_) {
+    // El reproductor de la vista previa usa el dispositivo desde sus hilos.
+    ComPtr<ID3D10Multithread> mt;
+    if (SUCCEEDED(device_.As(&mt))) mt->SetMultithreadProtected(TRUE);
+  }
 
   ComPtr<IDXGIDevice> dxgiDevice;
   ComPtr<IDXGIAdapter> adapter;
@@ -246,7 +264,12 @@ bool OverlayWindow::CreateGraphics(UINT width, UINT height) {
   return SUCCEEDED(device_->CreateRenderTargetView(back.Get(), nullptr, &rtv_));
 }
 
+std::shared_ptr<UiTexture> OverlayWindow::CreateTexture(const uint8_t* bgra, int width, int height) {
+  return MakeImageTexture(device_.Get(), bgra, width, height);
+}
+
 void OverlayWindow::DestroyGraphics() {
+  videoSupport_ = false;
   rtv_.Reset();
   visual_.Reset();
   target_.Reset();

@@ -6,8 +6,10 @@
 #include <wrl/client.h>
 
 #include "ui/Fonts.h"
+#include "ui/Texture.h"
 
 #include <functional>
+#include <memory>
 
 struct ImGuiContext;
 
@@ -67,6 +69,16 @@ public:
   const ui::FontSet& FontSizes() const { return fonts_; }
   float Scale() const { return scale_; }
 
+  // GPU de la ventana visible (nula oculta). El panel la crea con
+  // VIDEO_SUPPORT para la vista previa de los clips (Player); si el driver no
+  // lo admite (o va por WARP), VideoSupport() es false.
+  ID3D11Device* Device() const { return device_.Get(); }
+  bool VideoSupport() const { return videoSupport_; }
+  // Miniatura de esta GPU (BGRA de arriba abajo). Deja de valer al ocultarla
+  // o recrearla: Generation() cambia cada vez que se crea su GPU.
+  std::shared_ptr<UiTexture> CreateTexture(const uint8_t* bgra, int width, int height);
+  unsigned Generation() const { return generation_; }
+
   std::function<void()> onCloseRequested; // Alt+F4 sobre la ventana
   std::function<void()> onDeactivated;    // el usuario hizo clic en otra ventana
 
@@ -88,6 +100,8 @@ private:
   bool hasHitRegion_ = false;
   bool lost_ = false;
   bool noActivate_ = false;
+  bool videoSupport_ = false;
+  unsigned generation_ = 0;       // sube con cada GPU creada (CreateGraphics)
   HWND below_ = nullptr;          // ventana que debe quedar debajo (StayAbove)
   ULONGLONG reassertSecond_ = 0;  // ventana de un segundo para contar reafirmaciones
   int reasserts_ = 0;

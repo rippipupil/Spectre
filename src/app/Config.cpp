@@ -31,7 +31,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 notifyGame, notifyUpdates, soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
                                                 theme, themeStyle, themeMotion, themeBackdrop, panelLayout, panelLateralX, panelCompactX,
-                                                panelCompactY, hotkeys, voice)
+                                                panelCompactY, hotkeys, discordPresence, voice)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 

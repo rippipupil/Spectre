@@ -117,6 +117,10 @@ struct Config {
   float panelCompactX = 1.0f;          // compacto: a la derecha y centrado en vertical
   float panelCompactY = 0.5f;
 
+  // Estado en Discord (app/DiscordPresence.h): «Clipeando <juego>» y los clips
+  // guardados en el perfil, mientras Discord está abierto.
+  bool discordPresence = true;
+
   HotkeyConfig hotkeys;
   VoiceConfig voice;
 };

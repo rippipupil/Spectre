@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 
 #include "ui/Fonts.h"
+#include "ui/Texture.h"
 
 #include <cstdint>
 #include <functional>
@@ -15,22 +16,6 @@ struct ImGuiContext;
 namespace spectre {
 
 struct Palette;
-using Microsoft::WRL::ComPtr;
-
-// Textura de la interfaz (miniatura, captura, fotograma de vídeo). Se libera
-// con el último shared_ptr.
-struct UiTexture {
-  ComPtr<ID3D11Texture2D> texture;
-  ComPtr<ID3D11ShaderResourceView> srv;
-  // Solo en texturas con mipmaps: el muestreador de ImGui lee únicamente el
-  // nivel 0, así que se dibujan con este (ver AddTextureImage).
-  ComPtr<ID3D11SamplerState> sampler;
-  int width = 0, height = 0;
-  unsigned long long Id() const { return static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(srv.Get())); }
-};
-
-// dl->AddImage, pero con el muestreador de la textura si lo tiene.
-void AddTextureImage(ImDrawList* dl, const UiTexture& tex, ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1, ImU32 tint);
 
 // Ventana normal de Spectre (la que se abre desde el menú Inicio, el exe o la
 // bandeja), dibujada con Dear ImGui sobre una swapchain flip de Direct3D 11.

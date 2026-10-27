@@ -4,6 +4,7 @@
 // la configuración (model.config) que App aplica al pulsar Aplicar.
 
 #include "app/Config.h"
+#include "app/DiscordPresence.h"
 #include "app/Library.h"
 #include "app/System.h"
 #include "app/Updater.h"
@@ -48,6 +49,7 @@ struct SettingsModel {
   // Calidad que había antes de elegir Fuente, mientras se muestra su aviso
   // (Cancelar la devuelve).
   std::string qualityBeforeSource;
+  DiscordStatus discord; // conexión del estado en Discord (Ajustes > General)
   // Ajustes > Voz: lo que hace el oyente, si espera a un juego («Solo con un
   // juego abierto») y los reconocedores de Windows instalados.
   VoiceStatus voice;

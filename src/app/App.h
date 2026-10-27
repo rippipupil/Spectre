@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Config.h"
+#include "app/DiscordPresence.h"
 #include "app/Export.h"
 #include "app/Fullscreen.h"
 #include "app/Library.h"
@@ -14,6 +15,7 @@
 #include "ui/KeyboardHook.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
+#include "ui/PanelMedia.h"
 #include "ui/Toast.h"
 
 #include <shellapi.h>
@@ -137,6 +139,9 @@ private:
   void AnnounceGame();
   // Ajustes > Avisos > Versiones nuevas: una comprobación al abrir y cada 12 h.
   void CheckUpdatesQuietly();
+  // Estado en Discord: lo que se graba y los clips de la partida (barato si no
+  // cambia). newClips: clips que se acaban de guardar.
+  void UpdatePresence(int newClips = 0);
   void SyncModels(); // el config activo cambió: panel y ventana lo muestran
   void RefreshMenuModel();
   void RefreshPanelClips();
@@ -289,6 +294,16 @@ private:
   int exportBatchTotal_ = 0;
   int exportBatchFailed_ = 0;
   std::string exportBatchError_;
+
+  // Panel Alt+Z: miniaturas y vista previa de los recientes (solo con el panel abierto).
+  PanelMedia panelMedia_;
+  // Estado en Discord: el hilo solo existe con la opción activada.
+  DiscordPresence discord_;
+  DWORD presencePid_ = 0;           // juego de la partida en la que se cuentan los clips (0 = ninguno)
+  int presenceClips_ = 0;           // clips guardados en esa partida
+  int64_t presenceSince_ = 0;       // segundos UNIX: desde cuándo se juega
+  bool presenceRecording_ = false;
+  int64_t presenceRecordSince_ = 0; // segundos UNIX: desde cuándo se graba
 };
 
 } // namespace spectre

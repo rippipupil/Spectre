@@ -73,13 +73,15 @@ private:
 } // namespace
 
 struct Player::Impl {
+  ComPtr<ID3D11Device> device; // el de la ventana que dibuja (se suelta el último)
   std::string path;
   ComPtr<IMFDXGIDeviceManager> manager;
   ComPtr<IMFMediaEngine> engine;
   ComPtr<IMFMediaEngineEx> engineEx;
   EngineNotify* notify = nullptr;
   std::shared_ptr<UiTexture> texture;
-  int width = 0, height = 0;
+  int width = 0, height = 0;   // del vídeo
+  int frameW = 0, frameH = 0; // fotogramas a tamaño fijo (SetFrameSize); 0 = el del vídeo
   float volume = 1.0f;
   bool muted = false;
   double rate = 1.0;
@@ -99,14 +101,15 @@ Player::~Player() { Close(); }
 
 bool Player::Available() { return MediaFoundationAvailable(); }
 
-bool Player::Open(AppWindow& window, const std::string& path, bool autoplay) {
+bool Player::Open(ID3D11Device* device, const std::string& path, bool autoplay) {
   Close();
-  if (!Available() || !window.Device() || !window.VideoSupport()) return false;
+  if (!Available() || !device) return false;
   auto impl = std::make_unique<Impl>();
+  impl->device = device;
   impl->path = path;
   UINT token = 0;
   HRESULT hr = MFCreateDXGIDeviceManager(&token, &impl->manager);
-  if (SUCCEEDED(hr)) hr = impl->manager->ResetDevice(window.Device(), token);
+  if (SUCCEEDED(hr)) hr = impl->manager->ResetDevice(device, token);
   ComPtr<IMFMediaEngineClassFactory> factory;
   if (SUCCEEDED(hr))
     hr = CoCreateInstance(CLSID_MFMediaEngineClassFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
@@ -218,20 +221,37 @@ void Player::SetRate(double rate) {
   impl_->engine->SetPlaybackRate(rate);
 }
 
-std::shared_ptr<UiTexture> Player::Frame(AppWindow& window) {
+void Player::SetFrameSize(int width, int height) {
+  if (!impl_) return;
+  impl_->frameW = std::max(0, width);
+  impl_->frameH = std::max(0, height);
+}
+
+std::shared_ptr<UiTexture> Player::Frame() {
   if (!impl_ || !impl_->notify->ready) return impl_ ? impl_->texture : nullptr;
   LONGLONG pts = 0;
   if (impl_->engine->OnVideoStreamTick(&pts) != S_OK) return impl_->texture;
   DWORD w = 0, h = 0;
   if (FAILED(impl_->engine->GetNativeVideoSize(&w, &h)) || w == 0 || h == 0) return impl_->texture;
-  if (!impl_->texture || impl_->texture->width != int(w) || impl_->texture->height != int(h)) {
-    impl_->texture = window.CreateRenderTexture(int(w), int(h));
-    impl_->width = int(w);
-    impl_->height = int(h);
-  }
+  impl_->width = int(w);
+  impl_->height = int(h);
+  const bool fixed = impl_->frameW > 0 && impl_->frameH > 0;
+  const int texW = fixed ? impl_->frameW : int(w), texH = fixed ? impl_->frameH : int(h);
+  if (!impl_->texture || impl_->texture->width != texW || impl_->texture->height != texH)
+    impl_->texture = MakeRenderTexture(impl_->device.Get(), texW, texH);
   if (!impl_->texture) return nullptr;
   MFVideoNormalizedRect src{0.0f, 0.0f, 1.0f, 1.0f};
-  RECT dst{0, 0, LONG(w), LONG(h)};
+  RECT dst{0, 0, LONG(texW), LONG(texH)};
+  if (fixed) {
+    // Encajado sin deformar; el resto queda del color del borde.
+    const double k = std::min(double(texW) / double(w), double(texH) / double(h));
+    const LONG dw = std::max<LONG>(1, LONG(std::lround(double(w) * k)));
+    const LONG dh = std::max<LONG>(1, LONG(std::lround(double(h) * k)));
+    dst.left = (LONG(texW) - dw) / 2;
+    dst.top = (LONG(texH) - dh) / 2;
+    dst.right = dst.left + dw;
+    dst.bottom = dst.top + dh;
+  }
   MFARGB border{0, 0, 0, 255};
   if (SUCCEEDED(impl_->engine->TransferVideoFrame(impl_->texture->texture.Get(), &src, &dst, &border)))
     ++impl_->frames;
