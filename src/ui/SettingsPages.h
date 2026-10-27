@@ -7,6 +7,7 @@
 #include "app/Library.h"
 #include "app/System.h"
 #include "app/Updater.h"
+#include "app/Voice.h"
 #include "audio/AudioCapture.h"
 #include "capture/Camera.h"
 #include "capture/CaptureSource.h"
@@ -20,7 +21,7 @@
 namespace spectre {
 
 enum class SettingsPage {
-  Replay, Video, Audio, Camera, Hotkeys, Storage, Notifications, General, Performance, Projects, Count
+  Replay, Video, Audio, Camera, Hotkeys, Voice, Storage, Notifications, General, Performance, Projects, Count
 };
 const char* SettingsPageName(SettingsPage page);
 
@@ -47,6 +48,11 @@ struct SettingsModel {
   // Calidad que había antes de elegir Fuente, mientras se muestra su aviso
   // (Cancelar la devuelve).
   std::string qualityBeforeSource;
+  // Ajustes > Voz: lo que hace el oyente, si espera a un juego («Solo con un
+  // juego abierto») y los reconocedores de Windows instalados.
+  VoiceStatus voice;
+  bool voiceWaiting = false;
+  std::vector<VoiceRecognizer> recognizers;
 };
 
 struct SettingsActions {

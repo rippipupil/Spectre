@@ -68,5 +68,7 @@ constexpr WPARAM kExportDone = 1000;
 constexpr UINT WM_SPECTRE_EDIT = WM_APP + 20;           // wParam = % de la edición que se guarda, o kEditDone
 constexpr WPARAM kEditDone = 1000;
 constexpr UINT WM_SPECTRE_PHOTO = WM_APP + 21;          // lParam = new PhotoSaved* (copia editada de una captura)
+constexpr UINT WM_SPECTRE_VOICE = WM_APP + 25;          // lParam = new VoiceEvent* (orden de voz reconocida)
+constexpr UINT WM_SPECTRE_VOICE_STATUS = WM_APP + 26;   // el estado de los comandos de voz cambió (Ajustes > Voz)
 
 } // namespace spectre

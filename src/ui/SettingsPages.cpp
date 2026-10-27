@@ -32,6 +32,7 @@ const char* SettingsPageName(SettingsPage page) {
   case SettingsPage::Audio: return "Audio";
   case SettingsPage::Camera: return "Cámara";
   case SettingsPage::Hotkeys: return "Atajos";
+  case SettingsPage::Voice: return "Voz";
   case SettingsPage::Storage: return "Almacenamiento";
   case SettingsPage::Notifications: return "Avisos";
   case SettingsPage::General: return "General";
@@ -712,6 +713,138 @@ void PageHotkeys(SettingsModel& m, const SettingsActions& a) {
     Gap(4);
     ErrorText(m.hotkeyError.c_str());
   }
+}
+
+// ---------------------------------------------------------------------- voz
+
+std::string Ago(ULONGLONG at) {
+  const ULONGLONG seconds = (GetTickCount64() - at) / 1000;
+  if (seconds < 2) return "ahora mismo";
+  if (seconds < 60) return "hace " + std::to_string(seconds) + " s";
+  if (seconds < 3600) return "hace " + std::to_string(seconds / 60) + " min";
+  return "hace más de una hora";
+}
+
+int Percent(float confidence) { return int(std::lround(std::clamp(confidence, 0.0f, 1.0f) * 100.0f)); }
+
+int MinimumPercent(const std::string& sensitivity) {
+  return sensitivity == "estricta" ? 80 : sensitivity == "permisiva" ? 40 : 60;
+}
+
+// Si escucha, con qué, y lo último que oyó: sirve para probar las frases.
+void VoiceState(const SettingsModel& m) {
+  const Palette& p = Colors();
+  const VoiceConfig& active = m.base.voice; // lo aplicado; m.config es la copia que se edita
+  if (!active.enabled) {
+    if (m.config.voice.enabled) Help("Pulsa Aplicar para empezar a escuchar.");
+    return;
+  }
+  const VoiceStatus& v = m.voice;
+  FieldLabel("Estado");
+  if (m.voiceWaiting) {
+    ImGui::TextColored(V(p.textMuted), "En pausa hasta que abras un juego");
+  } else if (v.state == VoiceStatus::State::Listening) {
+    ImGui::TextColored(V(p.accent), "Escuchando");
+  } else if (v.state == VoiceStatus::State::Error) {
+    ImGui::TextColored(V(p.danger), "No escucha");
+  } else {
+    ImGui::TextColored(V(p.textMuted), "Arrancando...");
+  }
+  if (!m.voiceWaiting && v.state == VoiceStatus::State::Listening && !v.recognizer.empty())
+    ValueRow("Reconocedor", v.recognizer);
+  if (!m.voiceWaiting && v.state == VoiceStatus::State::Error && !v.error.empty()) ErrorText(v.error.c_str());
+  if (!m.voiceWaiting && !v.note.empty()) Warning(v.note.c_str());
+  if (!m.voiceWaiting && v.heardAt) {
+    ValueRow("Lo último que oyó", v.heard.empty() ? std::string("algo que no es ninguna frase") : "«" + v.heard + "»");
+    std::string detail;
+    if (v.accepted)
+      detail = "Orden aceptada, confianza " + std::to_string(Percent(v.confidence)) + " %, " + Ago(v.heardAt) + ".";
+    else if (!v.heard.empty())
+      detail = "No se aceptó: confianza " + std::to_string(Percent(v.confidence)) + " % y hace falta " +
+               std::to_string(MinimumPercent(active.sensitivity)) + " %, " + Ago(v.heardAt) +
+               ". Habla más claro o baja la exigencia.";
+    else
+      detail = "No era ninguna orden, " + Ago(v.heardAt) + ".";
+    Help(detail.c_str());
+  }
+  if (m.config.voice.enabled && !SameVoiceConfig(m.config.voice, active))
+    Help("Los cambios de esta página se usan al pulsar Aplicar.");
+}
+
+void PageVoice(SettingsModel& m) {
+  auto& v = m.config.voice;
+  Heading("COMANDOS DE VOZ");
+  m.dirty |= SwitchField("Activar los comandos de voz", &v.enabled,
+                         "Di la palabra de activación y una orden, por ejemplo «Spectre clip», y Spectre hace lo "
+                         "mismo que con su atajo, sin soltar el mando ni el teclado.");
+  Help("Usa el reconocimiento de voz de Windows, sin conexión: lo que dices no sale del PC y no hay nada que "
+       "descargar. Apagados, Spectre no abre el micrófono para esto.");
+  VoiceState(m);
+
+  ImGui::BeginDisabled(!v.enabled);
+  FieldLabel("Palabra de activación");
+  m.dirty |= ImGui::InputTextWithHint("##wake", "Ninguna: basta con la frase", &v.wakeWord);
+  Help("Se dice antes de cada orden. Así una conversación con tus amigos no guarda clips sin querer.");
+  std::vector<std::pair<std::string, const char*>> recognizers = {{"", "Automático (el de español)"}};
+  for (const auto& r : m.recognizers) recognizers.emplace_back(r.id, r.name.c_str());
+  FieldLabel("Reconocedor");
+  m.dirty |= ChoiceCombo<std::string>("##recognizer", v.recognizer, recognizers);
+  if (m.devicesLoaded && m.recognizers.empty())
+    Warning("Windows no tiene ningún reconocedor de voz instalado: mira la ayuda del final de la página.");
+  else if (m.devicesLoaded &&
+           std::none_of(m.recognizers.begin(), m.recognizers.end(), [](const VoiceRecognizer& r) { return r.spanish; }))
+    Warning("No hay reconocedor de español: escribe las frases en el idioma del que tengas o instala el español de "
+            "España (mira la ayuda del final de la página).");
+  FieldLabel("Exigencia");
+  m.dirty |= ChoiceCombo<std::string>("##sensitivity", v.sensitivity,
+                                      {{"estricta", "Estricta: casi nunca se equivoca"},
+                                       {"normal", "Normal"},
+                                       {"permisiva", "Permisiva: entiende con ruido o a lo lejos"}});
+  m.dirty |= SwitchField("Solo con un juego abierto", &v.onlyInGames,
+                         "Escucha solo con un juego a pantalla completa o mientras grabas. En el escritorio el "
+                         "micrófono no se abre.");
+  m.dirty |= SwitchField("Sonido al entender una orden", &v.sound,
+                         "Dos notas cortas en cuanto entiende la orden, antes de que se guarde nada. Útil si el juego "
+                         "tapa los avisos.");
+
+  Heading("FRASES");
+  std::vector<std::string> clip = SplitPhrases(v.saveClip);
+  std::string example = "Varias frases por orden, separadas por comas. Funcionan mejor las de dos o tres palabras que "
+                        "no dices al jugar.";
+  if (!clip.empty()) example += " Por ejemplo, para guardar un clip di «" + SpokenPhrase(v, clip.front()) + "».";
+  Help(example.c_str());
+  Gap(4);
+  for (int i = 0; i < kVoiceCommandCount; ++i) {
+    ImGui::PushID(i);
+    FieldLabel(VoiceCommandName(VoiceCommand(i)));
+    m.dirty |= ImGui::InputTextWithHint("##phrases", "Sin frase", &VoicePhrases(v, VoiceCommand(i)));
+    ImGui::PopID();
+  }
+  std::string repeated = RepeatedPhrase(v);
+  if (!repeated.empty()) {
+    std::string text = "«" + repeated + "» está en dos órdenes: solo cuenta para la primera.";
+    Warning(text.c_str());
+  }
+  Gap(4);
+  if (GhostButton("voice-defaults", "Restaurar las frases", Px(190))) {
+    const VoiceConfig defaults;
+    v.wakeWord = defaults.wakeWord;
+    for (int i = 0; i < kVoiceCommandCount; ++i)
+      VoicePhrases(v, VoiceCommand(i)) = VoicePhrases(defaults, VoiceCommand(i));
+    m.dirty = true;
+  }
+  Help("El clip acaba donde empezaste a decir la orden, no después: la frase no sale al final. Las marcas, igual.");
+
+  Heading("CONSUMO Y MICRÓFONO");
+  Help("El reconocedor solo compara lo que oye con estas frases: entre frase y frase apenas usa CPU y no carga "
+       "ningún modelo en memoria. Escucha el micrófono de Ajustes > Audio (o el predeterminado de Windows) aunque "
+       "no lo grabes en los clips, y lo comparte con Discord y el juego.");
+  Help("Con auriculares Bluetooth, abrir el micrófono hace que Windows pase los cascos a manos libres y el sonido "
+       "pierde calidad. Si te pasa, usa otro micrófono o activa «Solo con un juego abierto».");
+  Help("Para tener el reconocedor de español: Configuración > Hora e idioma > Idioma y región > Agregar un idioma > "
+       "Español (España), y en sus opciones de idioma instala «Reconocimiento de voz». Windows lo trae para español "
+       "de España, inglés, francés, alemán, japonés y chino.");
+  ImGui::EndDisabled();
 }
 
 // ------------------------------------------------------------ almacenamiento
@@ -1465,6 +1598,7 @@ void DrawSettingsPage(SettingsPage page, SettingsModel& m, const SettingsActions
   case SettingsPage::Audio: PageAudio(m); break;
   case SettingsPage::Camera: PageCamera(m); break;
   case SettingsPage::Hotkeys: PageHotkeys(m, a); break;
+  case SettingsPage::Voice: PageVoice(m); break;
   case SettingsPage::Storage: PageStorage(m, a); break;
   case SettingsPage::Notifications: PageNotifications(m, a); break;
   case SettingsPage::General: PageGeneral(m, a); break;

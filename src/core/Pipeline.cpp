@@ -520,7 +520,7 @@ void Pipeline::VideoLoop() {
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
 
-void Pipeline::SaveClip(const std::string& path, double seconds) {
+void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc) {
   if (!running_ || !buffer_) {
     if (notify_) notify_("El replay no está activo", true);
     return;
@@ -528,7 +528,10 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto buffer = buffer_;
   auto notify = notify_;
   // El clip termina en el instante de la tecla, el mismo para vídeo y audio.
-  double end = QpcToSeconds(QpcNow() - startQpc_);
+  // Uno anterior al arranque de la captura (se reinició mientras se hablaba) no vale.
+  const int64_t now = QpcNow();
+  if (endQpc <= startQpc_ || endQpc > now) endQpc = now;
+  double end = QpcToSeconds(endQpc - startQpc_);
   double age;
   {
     std::lock_guard lock(statsMutex_);
