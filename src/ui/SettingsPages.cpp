@@ -1508,8 +1508,10 @@ void CloudSetup(SettingsModel& m, const SettingsActions& a) {
     ImGui::SameLine(0, Px(6));
     if (GhostButton("keys-forget", "Olvidar", Px(110), Tone::Danger, 28) && a.forgetCloudKeys) a.forgetCloudKeys();
   } else {
-    FieldLabel("Access Key ID", "En R2: «Administrar tokens de API de R2» > Crear token, con permiso de lectura y "
-                                "escritura de objetos. En B2: Application Keys > Add a New Application Key.");
+    FieldLabel("Access Key ID", "Mejor una clave que solo sirva para este bucket: si alguien la viera, no llega al "
+                                "resto de tu cuenta. En R2: «Administrar tokens de API de R2» > Crear token, permiso "
+                                "de lectura y escritura de objetos y «Aplicar solo a buckets concretos». En B2: "
+                                "Application Keys > Add a New Application Key, con acceso solo a ese bucket.");
     ImGui::InputText("##keyid", &m.cloudKeyId);
     FieldLabel("Secret Access Key", "Se ve una sola vez al crear la clave.");
     ImGui::InputText("##secret", &m.cloudSecret, ImGuiInputTextFlags_Password);
@@ -1579,7 +1581,8 @@ void CloudAuto(SettingsModel& m) {
       Warning("Lo que se suba solo se borra de este PC: quedará únicamente en tu nube.");
   }
   FieldLabel("Con un juego abierto", "Mientras juegas o grabas, la subida va en segundo plano y con este límite para "
-                                     "no subirte el ping. Compartir un enlace a mano sube igualmente, a 1 MB/s.");
+                                     "no subirte el ping. Si eliges esperar, compartir un enlace a mano sube "
+                                     "igualmente, a 1 MB/s.");
   m.dirty |= ChoiceCombo<int>("##gamelimit", c.gameLimitKBps,
                               {{0, "Esperar a que lo cierre"},
                                {256, "Subir a 0,25 MB/s"},
@@ -1597,7 +1600,7 @@ void CloudCyber(SettingsModel& m, const SettingsActions& a) {
   m.dirty |= SwitchField("Modo cibercafé", &c.cyberMode,
                          "Para un PC que no es tuyo: todo lo que guardes se sube solo a tu nube y se borra de este "
                          "PC al subirse. Las claves no tocan el disco y al salir de Spectre se olvidan, igual que la "
-                         "lista de subidas.");
+                         "lista de subidas. Cerrar la ventana cierra Spectre del todo.");
   if (c.cyberMode != m.base.cloud.cyberMode)
     Warning(c.cyberMode ? "Al aplicar, las claves se borran del disco de este PC (siguen en memoria hasta salir) y lo "
                           "que guardes se sube y se borra de aquí."
@@ -1605,14 +1608,17 @@ void CloudCyber(SettingsModel& m, const SettingsActions& a) {
   Help("En tu PC pulsa «Copiar configuración» y guárdala donde solo la veas tú. En el del cibercafé, abre Spectre, "
        "Ajustes > Nube, y pulsa «Pegar en modo cibercafé»: no hace falta escribir las claves.");
   Gap(4);
-  ImGui::BeginDisabled(!st.configured);
+  // En el cibercafé nunca: el siguiente cliente se llevaría tus claves en un clic.
+  const bool cyber = m.base.cloud.cyberMode;
+  ImGui::BeginDisabled(!st.configured || cyber);
   if (GhostButton("cloud-copy", "Copiar configuración", Px(190), Tone::Normal, 28) && a.copyCloudSettings)
     a.copyCloudSettings();
   ImGui::EndDisabled();
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-    ImGui::SetTooltip(st.configured ? "Un texto con la nube y las claves. No lo compartas: con él se puede subir y "
-                                      "borrar en tu bucket"
-                                    : "Primero guarda la nube y sus claves");
+    ImGui::SetTooltip(cyber ? "No en el modo cibercafé: cópiala desde tu PC"
+                      : st.configured ? "Un texto con la nube y las claves. No lo compartas: con él se puede subir y "
+                                        "borrar en tu bucket"
+                                      : "Primero guarda la nube y sus claves");
   ImGui::SameLine(0, Px(6));
   if (GhostButton("cloud-paste", "Pegar en este PC", Px(160), Tone::Normal, 28) && a.pasteCloudSettings)
     a.pasteCloudSettings(false);

@@ -33,8 +33,15 @@ struct CloudFileState {
   enum class Phase { None, Queued, Uploading, Done, Failed };
   Phase phase = Phase::None;
   float progress = 0; // 0..1 mientras sube
-  std::string link;   // Done: el enlace para compartir (solo lo rellena State)
   std::string error;  // Failed: en lenguaje claro
+  // Sin enlace: firmarlo cuesta; para eso está Link().
+};
+
+// Qué pasa con el archivo del PC cuando se sube.
+enum class CloudDelete {
+  Keep,
+  AfterUpload, // se borra en cuanto se sube (para siempre, sin papelera)
+  AtExit,      // se borra al salir de Spectre (modo cibercafé: lo copiado para pegarlo)
 };
 
 struct CloudKeys {
@@ -94,8 +101,9 @@ public:
   void Start(HWND notify, const CloudConfig& config);
   void Configure(const CloudConfig& config);
   // Al salir: guarda la cola (lo que se estaba subiendo sigue la próxima vez)
-  // y suelta la conexión. En el modo cibercafé olvida lo ya subido.
-  void Stop();
+  // y suelta la conexión. Borra lo subido que tocaba borrar; devuelve lo que
+  // no se pudo (abierto en otro programa). En el modo cibercafé olvida lo ya subido.
+  std::vector<std::string> Stop();
 
   bool Configured() const;
   // persist = false: solo en memoria (modo cibercafé). Las de disco se borran.
@@ -105,9 +113,10 @@ public:
   void ForgetKeys();
   CloudKeys Keys() const;
 
-  // A la cola. front: la primera (compartir ahora). deleteAfter: se borra del
-  // PC al acabar (para siempre). Si ya está subido, solo avisa con el enlace.
-  void Enqueue(const std::string& path, bool front, bool copyLink, bool deleteAfter, bool automatic);
+  // A la cola. front: la primera (compartir ahora). Si ya está subido, solo
+  // avisa con el enlace. En el modo cibercafé va a la nube configurada ahora,
+  // aunque luego se pegue otra.
+  void Enqueue(const std::string& path, bool front, bool copyLink, CloudDelete removal, bool automatic);
   void Cancel(const std::string& path);
   // Vuelve a intentar las fallidas (todas con path vacío).
   void Retry(const std::string& path = {});
@@ -139,6 +148,9 @@ public:
 
 private:
   void Kick(); // arranca el hilo de subida si hay trabajo y no va ya
+  // Borra del PC lo subido que quedó por borrar (atExit: también lo de salir).
+  // Devuelve lo que sigue sin poder borrarse.
+  std::vector<std::string> RemoveUploaded(bool atExit);
   std::shared_ptr<Shared> shared_;
 };
 

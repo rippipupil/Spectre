@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 #include <utility>
 
 namespace spectre {
@@ -328,6 +329,8 @@ std::vector<MediaItem> Library::Scan(const std::string& folder, size_t max, bool
 
 std::vector<MediaItem> Library::ScanShadowPlay(const std::vector<std::string>& folders, const std::string& skipFolder) {
   std::vector<MediaItem> items;
+  // Vídeos\NVIDIA sale dos veces (sola y como subcarpeta de Vídeos): cada archivo, una.
+  std::unordered_set<std::string> seen;
   const std::string skip = skipFolder.empty() ? std::string() : Key(skipFolder);
   // La carpeta de Spectre o una de dentro (Vídeos\Spectre cuando ShadowPlay usa Vídeos).
   auto skipped = [&](const std::wstring& dir) {
@@ -362,6 +365,7 @@ std::vector<MediaItem> Library::ScanShadowPlay(const std::vector<std::string>& f
         // Solo lo que lleva el nombre de ShadowPlay: Vídeos puede tener de todo.
         if (!item.nvidia) continue;
         item.path = Narrow(dirs[d] + L"\\" + fd.cFileName);
+        if (!seen.insert(Key(item.path)).second) continue;
         item.size = (uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
         item.modified = int64_t((uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime);
         items.push_back(std::move(item));

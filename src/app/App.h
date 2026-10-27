@@ -100,7 +100,17 @@ private:
   bool CloudConfigured() const { return cloud_.Configured(); }
   void UploadToCloud(const std::vector<std::string>& paths);
   // Algo nuevo guardado: con la subida automática o el modo cibercafé, a la cola.
-  void AutoUpload(const std::string& path, MediaKind kind);
+  // forPaste: además se copió al portapapeles (en el cibercafé se borra al salir, no al subirse).
+  void AutoUpload(const std::string& path, MediaKind kind, bool forPaste = false);
+  // Modo cibercafé: lo nuevo de la carpeta que aún no va a la nube (recortes,
+  // uniones, lo del editor, copias para Discord...) se pone en la cola.
+  void CyberSweep();
+  // Modo cibercafé: se copió al portapapeles para pegarlo; se sube y se borra al salir.
+  void KeepForPaste(const std::vector<std::string>& paths);
+  // Modo cibercafé: guardado después de activarlo (lo de antes no es de este cliente).
+  bool CyberOwned(const std::string& path) const;
+  // Qué hacer con el archivo del PC al subirlo a mano.
+  CloudDelete ManualRemoval(const std::string& path) const;
   // WM_SPECTRE_CLOUD: avisos de lo que terminó y estado para la ventana.
   void OnCloudChanged();
   void CopyCloudLink(const std::string& path);
@@ -307,6 +317,7 @@ private:
   // Nube y ShadowPlay
   CloudUploader cloud_;
   uint64_t cloudVersion_ = 0; // la de appModel_.cloud
+  uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
   std::shared_ptr<std::atomic<bool>> importCancel_;
   std::shared_ptr<std::atomic<int>> importDone_ = std::make_shared<std::atomic<int>>(0);
   std::shared_ptr<std::atomic<int>> importTotal_ = std::make_shared<std::atomic<int>>(0);

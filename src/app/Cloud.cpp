@@ -640,7 +640,9 @@ std::string XmlEscape(const std::string& s) {
   return out;
 }
 
-enum class Outcome { Done, Retry, Offline, Failed, Restart, Cancelled };
+// InUse: el archivo se está escribiendo o está abierto en otro programa; se espera sin contar como fallo.
+// Gone: ya no está en el PC (lo subido solo, como una copia intermedia del editor, se olvida sin avisar).
+enum class Outcome { Done, Retry, Offline, Failed, Restart, Cancelled, InUse, Gone };
 
 std::string NetworkText(DWORD code) {
   switch (code) {
@@ -781,11 +783,14 @@ struct Entry {
   std::string error;
   std::string when; // fecha de la subida, para Ajustes > Nube
   int64_t at = 0;   // ms Unix de la subida
-  bool copyLink = false, deleteAfter = false, automatic = false;
+  bool copyLink = false, automatic = false;
+  bool deleteAfter = false;   // se borra del PC en cuanto se sube
+  bool deleteAtExit = false;  // se borra al salir de Spectre (modo cibercafé: lo copiado para pegarlo)
   bool urgent = false;        // compartir ahora: no espera a que se cierre el juego
   bool local = true;          // sigue en el PC
   bool deletePending = false; // subido, pero no se pudo borrar del PC todavía
   // Solo en memoria
+  bool thisRun = false; // se puso en la cola (o se reintentó) desde que se abrió Spectre
   float progress = 0;
   int tries = 0;
   ULONGLONG retryAt = 0; // tras un fallo pasajero no se vuelve a probar hasta entonces (las demás siguen)
@@ -811,7 +816,7 @@ struct CloudUploader::Shared {
   std::deque<Entry> entries; // en cola, fallidas y ya subidas; las de la cola se suben en este orden
   uint64_t nextId = 1;
   bool running = false; // hay un hilo de subida
-  bool stop = false;
+  bool stop = true; // hasta Start: sin arrancar, Stop no escribe una cola vacía encima de la guardada
   bool paused = false;
   bool gameActive = false;
   bool offline = false;
@@ -861,11 +866,26 @@ struct CloudUploader::Shared {
   bool HaveTarget() const { return !keys.Empty() && !Trim(config.endpoint).empty() && !CloudBucket(config).empty(); }
   // Con un juego abierto y «Esperar a cerrarlo», solo sube lo que se compartió a mano.
   bool Waits(const Entry& e) const { return gameActive && config.gameLimitKBps == 0 && !e.urgent; }
+  // Modo cibercafé: cada archivo va a la nube que había al guardarlo y nunca
+  // cambia de bucket. Lo de otra configuración (otro cliente) espera, y lo que
+  // quedó en la cola sin destino de otra vez no se sube solo.
+  bool OtherCloud(const Entry& e) const {
+    if (!config.cyberMode) return false;
+    if (e.endpoint.empty()) return !e.thisRun;
+    return e.endpoint != Trim(config.endpoint) || e.bucket != CloudBucket(config);
+  }
+  // Modo cibercafé: nada de lo ya subido (nombres, enlaces) se queda en la
+  // lista; solo lo que aún hay que borrar del PC.
+  void CyberCleanup() {
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [](const Entry& e) { return e.st == Entry::St::Done && !e.deletePending; }),
+                  entries.end());
+  }
   // Hay algo que subir ahora o tras la espera de un reintento.
   bool HasWork() const {
     if (!HaveTarget() || paused || stop) return false;
     for (const auto& e : entries)
-      if (e.st == Entry::St::Queued && !Waits(e)) return true;
+      if (e.st == Entry::St::Queued && !Waits(e) && !OtherCloud(e)) return true;
     return false;
   }
   // La siguiente que toca; si todas esperan un reintento, *waitMs dice cuánto falta.
@@ -874,7 +894,7 @@ struct CloudUploader::Shared {
     if (!HasWork()) return nullptr;
     const ULONGLONG now = GetTickCount64();
     for (auto& e : entries) {
-      if (e.st != Entry::St::Queued || Waits(e)) continue;
+      if (e.st != Entry::St::Queued || Waits(e) || OtherCloud(e)) continue;
       if (e.retryAt <= now) return &e;
       const ULONGLONG wait = e.retryAt - now;
       if (*waitMs == 0 || wait < *waitMs) *waitMs = wait;
@@ -902,12 +922,13 @@ struct CloudUploader::Shared {
       if (!e.error.empty()) v["error"] = e.error;
       if (e.copyLink) v["copy"] = true;
       if (e.deleteAfter) v["delete"] = true;
+      if (e.deleteAtExit) v["deleteAtExit"] = true;
       if (e.automatic) v["auto"] = true;
       if (e.urgent) v["urgent"] = true;
       if (e.deletePending) v["deletePending"] = true;
       items.push_back(std::move(v));
     }
-    return {{"version", 1}, {"items", std::move(items)}};
+    return {{"version", 1}, {"paused", paused}, {"items", std::move(items)}};
   }
 
   void Load() {
@@ -915,6 +936,7 @@ struct CloudUploader::Shared {
     if (!in) return;
     try {
       auto j = nlohmann::json::parse(in, nullptr, true, true);
+      paused = j.value("paused", false); // «Pausar» sigue tras reiniciar
       for (const auto& v : j.value("items", nlohmann::json::array())) {
         Entry e;
         e.id = nextId++;
@@ -938,6 +960,7 @@ struct CloudUploader::Shared {
         e.error = v.value("error", "");
         e.copyLink = v.value("copy", false);
         e.deleteAfter = v.value("delete", false);
+        e.deleteAtExit = v.value("deleteAtExit", false);
         e.automatic = v.value("auto", false);
         e.urgent = v.value("urgent", false);
         e.deletePending = v.value("deletePending", false);
@@ -957,6 +980,9 @@ using Shared = CloudUploader::Shared;
 
 // Escribe cloud.json; force = false: como mucho cada 5 s (progreso de las partes).
 void SaveQueue(Shared& sh, bool force) {
+  // saveMutex antes de la foto: si no, dos hilos pueden escribir sus fotos al
+  // revés y ganar la más vieja. Nadie coge saveMutex con mutex cogido.
+  std::lock_guard save(sh.saveMutex);
   std::string text;
   {
     std::lock_guard lock(sh.mutex);
@@ -965,7 +991,6 @@ void SaveQueue(Shared& sh, bool force) {
     sh.lastSave = now;
     text = sh.ToJson().dump();
   }
-  std::lock_guard save(sh.saveMutex);
   if (!WriteFileAtomic(QueuePath(), text.data(), text.size())) Log("Nube: no se pudo guardar cloud.json");
 }
 
@@ -1082,11 +1107,17 @@ Outcome Upload(Shared& sh, Http& http, const Target& t, Job& job, std::vector<ui
     DWORD e = GetLastError();
     if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) {
       *error = "El archivo ya no está en el PC.";
-      return Outcome::Failed;
+      if (!job.uploadId.empty()) { // que el bucket suelte las partes ya subidas
+        const std::string uri = ObjectUri(t, job.key), query = CanonicalQuery({{"uploadId", job.uploadId}});
+        HttpResponse r;
+        http.Request(t.host, t.port, L"DELETE", uri + "?" + query,
+                     SignedHeaders(t, "DELETE", uri, query, Hex(Sha256("", 0))), nullptr, 0, nullptr, &r);
+      }
+      return Outcome::Gone;
     }
-    *error = e == ERROR_SHARING_VIOLATION ? "El archivo se está escribiendo o está abierto en otro programa. Se reintenta solo."
-                                          : "No se pudo abrir el archivo (error " + std::to_string(e) + ").";
-    return e == ERROR_SHARING_VIOLATION ? Outcome::Retry : Outcome::Failed;
+    if (e == ERROR_SHARING_VIOLATION) return Outcome::InUse; // se sube cuando lo suelten
+    *error = "No se pudo abrir el archivo (error " + std::to_string(e) + ").";
+    return Outcome::Failed;
   }
   struct Closer {
     HANDLE h;
@@ -1312,15 +1343,17 @@ void Worker(std::shared_ptr<Shared> sh) {
 
     bool deleted = false;
     if (o == Outcome::Done) {
-      Log("Nube: subido %s (%s) como %s", job.name.c_str(), FormatBytes(job.size).c_str(), job.key.c_str());
-      bool removeLocal;
+      // Sin la clave: con ella y la dirección pública, el log abriría el enlace.
+      Log("Nube: subido %s (%s)", job.name.c_str(), FormatBytes(job.size).c_str());
+      std::string removePath; // la ruta de ahora: pudo renombrarse mientras subía
       {
         std::lock_guard lock(sh->mutex);
         Entry* e = sh->Find(job.id);
-        removeLocal = e && e->deleteAfter;
+        // Tras Stop (al salir) también lo que se borraba al salir: esa limpieza ya pasó.
+        if (e && (e->deleteAfter || (sh->stop && e->deleteAtExit))) removePath = e->path;
       }
-      if (removeLocal) {
-        deleted = DeleteFileW(Widen(job.path).c_str()) != FALSE;
+      if (!removePath.empty()) {
+        deleted = DeleteFileW(Widen(removePath).c_str()) != FALSE;
         if (!deleted) Log("Nube: subido, pero no se pudo borrar del PC (%lu): %s", GetLastError(), job.name.c_str());
       }
     }
@@ -1329,6 +1362,17 @@ void Worker(std::shared_ptr<Shared> sh) {
     sh->currentId = 0;
     Entry* e = sh->Find(job.id);
     if (!e) continue; // se canceló mientras subía
+    if (o == Outcome::Gone) {
+      if (e->automatic) {
+        Log("Nube: %s ya no está en el PC: no se sube", e->name.c_str());
+        sh->entries.erase(sh->At(e));
+        sh->Changed();
+        lock.unlock();
+        SaveQueue(*sh, true);
+        continue;
+      }
+      o = Outcome::Failed;
+    }
     switch (o) {
     case Outcome::Done: {
       e->st = Entry::St::Done;
@@ -1341,7 +1385,7 @@ void Worker(std::shared_ptr<Shared> sh) {
       e->at = int64_t(UnixMillis());
       e->when = NowText();
       e->local = !deleted;
-      e->deletePending = e->deleteAfter && !deleted;
+      e->deletePending = !deleted && (e->deleteAfter || (sh->stop && e->deleteAtExit));
       sh->offline = false;
       CloudEvent ev;
       ev.path = e->path;
@@ -1353,9 +1397,10 @@ void Worker(std::shared_ptr<Shared> sh) {
       ev.deleted = deleted;
       sh->events.push_back(std::move(ev));
       // La más reciente al final: el orden de la lista es el de las subidas.
+      // Tras salir en el modo cibercafé no se apunta (salvo lo que falta borrar).
       Entry done = std::move(*e);
       sh->entries.erase(sh->At(e));
-      sh->entries.push_back(std::move(done));
+      if (!(sh->stop && sh->config.cyberMode && !done.deletePending)) sh->entries.push_back(std::move(done));
       size_t history = 0;
       for (const auto& x : sh->entries) history += x.st == Entry::St::Done ? 1 : 0;
       for (auto it = sh->entries.begin(); history > kMaxHistory && it != sh->entries.end();) {
@@ -1373,6 +1418,13 @@ void Worker(std::shared_ptr<Shared> sh) {
     }
     case Outcome::Cancelled:
       e->progress = 0;
+      sh->Changed();
+      break;
+    case Outcome::InUse:
+      // Se está escribiendo (una grabación, una exportación) o está abierto en
+      // otro programa: se vuelve a probar sin contarlo como fallo.
+      e->progress = 0;
+      e->retryAt = GetTickCount64() + 15000;
       sh->Changed();
       break;
     case Outcome::Offline:
@@ -1396,6 +1448,7 @@ void Worker(std::shared_ptr<Shared> sh) {
         break;
       }
       [[fallthrough]];
+    case Outcome::Gone: // a mano: se avisa como un fallo
     case Outcome::Failed:
       Log("Nube: no se pudo subir %s: %s", e->name.c_str(), error.c_str());
       e->st = Entry::St::Failed;
@@ -1502,21 +1555,60 @@ void CloudUploader::Start(HWND notify, const CloudConfig& config) {
     shared_->Changed();
   }
   // Subidas terminadas que no se pudieron borrar del PC (estaba abierto en otro programa).
-  std::vector<std::string> retryDelete;
+  RemoveUploaded(false);
   {
     std::lock_guard lock(shared_->mutex);
-    for (auto& e : shared_->entries)
-      if (e.st == Entry::St::Done && e.deletePending) retryDelete.push_back(e.path);
-  }
-  for (const auto& path : retryDelete) {
-    bool gone = DeleteFileW(Widen(path).c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
-    std::lock_guard lock(shared_->mutex);
-    if (Entry* e = shared_->FindPath(path); e && gone) {
-      e->deletePending = false;
-      e->local = false;
+    Shared& sh = *shared_;
+    if (sh.config.cyberMode) {
+      // Otra sesión (quizá de otro cliente) pudo acabar sin Stop: Windows
+      // cerró la sesión o mataron el proceso. Lo subido no se enseña, y lo que
+      // no llegó a subirse no va solo a la nube de quien pegue ahora la suya.
+      sh.CyberCleanup();
+      sh.paused = false; // la pausa era del cliente anterior
+      for (auto& e : sh.entries) {
+        if (e.st == Entry::St::Done) continue;
+        e.st = Entry::St::Failed;
+        e.error = "Quedó de otra sesión del modo cibercafé y no se sube sola. «Reintentar» la sube a la nube que "
+                  "esté configurada ahora.";
+        e.endpoint.clear();
+        e.bucket.clear();
+        e.region.clear();
+        e.uploadId.clear();
+        e.etags.clear();
+        e.partSize = 0;
+      }
+      sh.Changed();
     }
   }
+  SaveQueue(*shared_, true);
   Kick();
+}
+
+std::vector<std::string> CloudUploader::RemoveUploaded(bool atExit) {
+  std::vector<std::string> paths;
+  {
+    std::lock_guard lock(shared_->mutex);
+    for (const auto& e : shared_->entries)
+      if (e.st == Entry::St::Done && e.local && (e.deletePending || (atExit && e.deleteAtExit)))
+        paths.push_back(e.path);
+  }
+  std::vector<std::string> left;
+  for (const auto& path : paths) {
+    const bool gone = DeleteFileW(Widen(path).c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+    if (!gone) left.push_back(path);
+    std::lock_guard lock(shared_->mutex);
+    const std::string lower = LowerPath(path);
+    for (auto& e : shared_->entries)
+      if (e.lower == lower && e.st == Entry::St::Done && e.local) {
+        e.local = !gone;
+        e.deletePending = !gone;
+      }
+  }
+  if (!paths.empty()) {
+    std::lock_guard lock(shared_->mutex);
+    shared_->Changed();
+  }
+  return left;
 }
 
 void CloudUploader::Configure(const CloudConfig& config) {
@@ -1530,23 +1622,26 @@ void CloudUploader::Configure(const CloudConfig& config) {
   Kick();
 }
 
-void CloudUploader::Stop() {
+std::vector<std::string> CloudUploader::Stop() {
   {
     std::lock_guard lock(shared_->mutex);
-    if (shared_->stop) return;
+    if (shared_->stop) return {};
     shared_->stop = true;
     ++shared_->testGen;
-    if (shared_->config.cyberMode) {
-      // PC compartido: nada de lo ya subido (nombres, enlaces) se queda aquí.
-      shared_->entries.erase(std::remove_if(shared_->entries.begin(), shared_->entries.end(),
-                                            [](const Entry& e) { return e.st == Entry::St::Done && !e.deletePending; }),
-                             shared_->entries.end());
-    }
+  }
+  shared_->cv.notify_all();
+  // Lo que había que borrar del PC: lo que no se pudo al subirse (la ventana o
+  // el panel lo tenían abierto, y ya se cerraron) y lo que se borraba al salir.
+  std::vector<std::string> left = RemoveUploaded(true);
+  {
+    std::lock_guard lock(shared_->mutex);
+    // PC compartido: nada de lo ya subido (nombres, enlaces) se queda aquí.
+    if (shared_->config.cyberMode) shared_->CyberCleanup();
     Wipe(shared_->keys.secret);
     shared_->keys = {};
   }
-  shared_->cv.notify_all();
   SaveQueue(*shared_, true);
+  return left;
 }
 
 bool CloudUploader::Configured() const {
@@ -1572,9 +1667,10 @@ bool CloudUploader::SetKeys(const CloudKeys& keys, bool persist, std::string* er
     Wipe(shared_->keys.secret);
     shared_->keys = k;
     shared_->keysStored = stored;
-    // Con claves nuevas, lo que falló por ellas se vuelve a intentar.
+    // Con claves nuevas, lo que falló por ellas se vuelve a intentar (en el
+    // cibercafé, lo de otra sesión solo con «Reintentar»).
     for (auto& e : shared_->entries)
-      if (e.st == Entry::St::Failed) {
+      if (e.st == Entry::St::Failed && (!shared_->config.cyberMode || e.thisRun)) {
         e.st = Entry::St::Queued;
         e.error.clear();
       }
@@ -1615,7 +1711,8 @@ CloudKeys CloudUploader::Keys() const {
   return shared_->keys;
 }
 
-void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, bool deleteAfter, bool automatic) {
+void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, CloudDelete removal, bool automatic) {
+  const bool deleteAfter = removal == CloudDelete::AfterUpload, deleteAtExit = removal == CloudDelete::AtExit;
   if (path.empty()) return;
   WIN32_FILE_ATTRIBUTE_DATA fa{};
   if (!GetFileAttributesExW(Widen(path).c_str(), GetFileExInfoStandard, &fa)) {
@@ -1650,7 +1747,12 @@ void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, 
       existing->copyLink |= copyLink;
       existing->urgent |= front;
       existing->deleteAfter |= deleteAfter;
+      existing->deleteAtExit |= deleteAtExit;
+      if (deleteAtExit) existing->deleteAfter = false; // se copió para pegarlo: aguanta hasta salir
       existing->automatic &= automatic;
+      existing->thisRun = true;
+      // Pedirlo a mano lo lleva a la nube de ahora (si no había empezado en otra).
+      if (sh.config.cyberMode && existing->uploadId.empty()) existing->endpoint.clear();
       if (front && existing->id != sh.currentId) {
         Entry moved = std::move(*existing);
         sh.entries.erase(sh.At(existing));
@@ -1680,7 +1782,14 @@ void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, 
       e.copyLink = copyLink;
       e.urgent = front;
       e.deleteAfter = deleteAfter;
+      e.deleteAtExit = deleteAtExit;
       e.automatic = automatic;
+      e.thisRun = true;
+      if (sh.config.cyberMode && !Trim(sh.config.endpoint).empty()) {
+        // Modo cibercafé: a la nube de quien lo guardó, aunque luego se pegue otra.
+        e.endpoint = Trim(sh.config.endpoint);
+        e.bucket = CloudBucket(sh.config);
+      }
       // Compartir: la siguiente en subir (la que ya sube no se interrumpe).
       if (front) sh.entries.push_front(std::move(e));
       else sh.entries.push_back(std::move(e));
@@ -1724,7 +1833,7 @@ void AbortUploads(std::vector<PendingAbort> aborts, CloudKeys keys) {
       HttpResponse r;
       http.Request(t.host, t.port, L"DELETE", uri + "?" + query,
                    SignedHeaders(t, "DELETE", uri, query, Hex(Sha256("", 0))), nullptr, 0, nullptr, &r);
-      Log("Nube: subida por partes de %s cancelada en el bucket (HTTP %lu)", a.key.c_str(), r.status);
+      Log("Nube: subida por partes cancelada en el bucket (HTTP %lu)", r.status);
     }
   }).detach();
 }
@@ -1760,6 +1869,8 @@ void CloudUploader::Retry(const std::string& path) {
         e.error.clear();
         e.tries = 0;
         e.retryAt = 0;
+        e.thisRun = true;
+        if (shared_->config.cyberMode && e.uploadId.empty()) e.endpoint.clear(); // a la nube de ahora
       }
     shared_->offline = false;
     ++shared_->wake;
@@ -1821,6 +1932,7 @@ void CloudUploader::SetPaused(bool paused) {
     shared_->paused = paused;
     shared_->Changed();
   }
+  SaveQueue(*shared_, true); // sigue en pausa tras reiniciar
   shared_->cv.notify_all();
   Kick();
 }
@@ -1844,7 +1956,6 @@ CloudFileState CloudUploader::State(const std::string& path) const {
   case Entry::St::Done:
     s.phase = CloudFileState::Phase::Done;
     s.progress = 1;
-    s.link = LinkFor(*shared_, *e);
     break;
   case Entry::St::Failed:
     s.phase = CloudFileState::Phase::Failed;
