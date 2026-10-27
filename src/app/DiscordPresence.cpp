@@ -297,7 +297,7 @@ void DiscordPresence::Loop() {
               if (t >= until) break;
               Frame f;
               const Pipe::Got got = pipe.Next(&f, DWORD(until - t), wake_);
-              if (got == Pipe::Got::Woken) continue; // un estado nuevo: se manda al conectar
+              if (got == Pipe::Got::Woken) continue; // un estado nuevo (se manda al conectar) o Stop()
               if (got != Pipe::Got::Frame) break;
               const nlohmann::json j = nlohmann::json::parse(f.json, nullptr, false);
               if (f.op == kPing) {
@@ -316,8 +316,9 @@ void DiscordPresence::Loop() {
               }
             }
           }
+          if (!ready && stopping()) break; // Stop() durante el saludo
           if (ready) {
-            Log("Discord: conectado%s%s", status.user.empty() ? "" : " como ", status.user.c_str());
+            Log("Discord: conectado"); // sin el nombre: el log se comparte
             synced = false;
             reportedWaiting = false;
           } else {
@@ -337,6 +338,8 @@ void DiscordPresence::Loop() {
         SetStatus(status);
       }
       if (!pipe.IsOpen()) {
+        // El saludo pudo comerse el aviso de Stop() (el evento se reinicia solo).
+        if (stopping()) break;
         const ULONGLONG t = GetTickCount64();
         WaitForSingleObject(wake_, nextTry > t ? DWORD(nextTry - t) : 0);
         continue;

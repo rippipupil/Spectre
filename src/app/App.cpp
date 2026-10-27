@@ -1425,8 +1425,14 @@ void App::UpdatePipeline(bool forceRestart) {
 }
 
 void App::CheckGame() {
-  if (menu_.Visible()) return; // el panel tapa el juego: se mantiene lo último detectado
   ULONGLONG now = GetTickCount64();
+  // El panel tapa el juego: se mantiene lo último detectado, sin que caduque
+  // (si no, a los 15 s el clip salía como del escritorio, el replay «Solo en
+  // juegos» se paraba al cambiar algo desde el panel y la voz se apagaba).
+  if (menu_.Visible()) {
+    if (GameActive()) lastGameSeen_ = now;
+    return;
+  }
   if (auto detected = DetectFullscreenApp()) {
     game_ = detected;
     lastGameSeen_ = now;
