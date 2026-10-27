@@ -32,6 +32,10 @@ struct MediaItem {
   std::string game; // del nombre del archivo; vacío si no lo dice
   MediaKind kind = MediaKind::Clip;
   bool spectre = false; // el nombre sigue el formato de Spectre (solo esos se borran solos)
+  // De NVIDIA ShadowPlay («Juego 2026.10.16 - 05.30.12.02.DVR.mp4»): en su
+  // carpeta (se ve sin copiarlo) o ya importado a la de Spectre. Nunca se
+  // borra solo.
+  bool nvidia = false;
   bool audioOnly = false; // .m4a («Solo audio» del editor): se reproduce sin imagen
   uint64_t size = 0;
   int64_t modified = 0; // FILETIME en 100 ns, para ordenar
@@ -52,6 +56,11 @@ struct StorageInfo {
   uint64_t totalBytes = 0;
   size_t videos = 0, screenshots = 0, others = 0;
   bool valid = false;
+  // Lo de ShadowPlay que se ve desde sus carpetas (app/ShadowPlay.h): no está
+  // en la de Spectre y no cuenta arriba.
+  size_t shadowPlayFiles = 0;
+  uint64_t shadowPlayBytes = 0;
+  std::vector<std::string> shadowPlayFolders; // las carpetas en las que se buscó
   // Fecha (FILETIME UTC) y tamaño de lo que el borrado por antigüedad podría
   // quitar (de Spectre y sin estrella): Ajustes dice cuánto se iría antes de aplicar.
   std::vector<std::pair<int64_t, uint64_t>> deletable;
@@ -81,6 +90,10 @@ public:
   // juego), del más reciente al más antiguo. max = 0: todos.
   std::vector<MediaItem> Scan(const std::string& folder, size_t max = 0, bool videosOnly = false);
 
+  // Lo de NVIDIA ShadowPlay en sus carpetas (y en una subcarpeta por juego),
+  // sin lo que haya en skipFolder (la de Spectre, que ya escanea Scan).
+  std::vector<MediaItem> ScanShadowPlay(const std::vector<std::string>& folders, const std::string& skipFolder);
+
   void SetFavorite(const std::string& path, bool favorite);
   // Varios de una vez (selección de la biblioteca): library.json se escribe una sola vez.
   void SetFavorite(const std::vector<std::string>& paths, bool favorite);
@@ -97,6 +110,11 @@ public:
   void Annotate(MediaItem& item);
   // Renombra el archivo (y conserva sus metadatos). newStem sin extensión.
   bool Rename(const std::string& path, const std::string& newStem, std::string* newPath, std::string* error);
+  // El archivo se copió (keepSource) o se movió a `to`: favorito, duración y
+  // marcas van con él.
+  void CarryMeta(const std::string& from, const std::string& to, bool keepSource);
+  // Se borró por otro camino (subido a la nube en el modo cibercafé): fuera de library.json.
+  void Forget(const std::vector<std::string>& paths);
   // A la papelera de reciclaje (se puede recuperar). Si no puede ir allí
   // (memoria USB, carpeta de red, archivo más grande que la papelera),
   // Windows pregunta antes de borrarlo para siempre; si se le dice que no,
@@ -113,11 +131,12 @@ public:
   // Límite de espacio: borra del todo los clips, grabaciones y capturas más
   // antiguos con nombre de Spectre hasta caber en limitBytes. Solo cuenta lo
   // que lleva ese nombre (lo renombrado o de otros programas no es suyo).
-  // Los favoritos, lo de los últimos minutos y keepPath (la grabación en
-  // curso) cuentan, pero nunca se borran; si ellos solos ya pasan del tope,
-  // no borra nada (blocked). Antes, si maxAgeDays > 0, borra lo de Spectre
-  // con más días que eso, con las mismas excepciones.
-  LimitResult EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath,
+  // Los favoritos, lo de los últimos minutos y keepPaths (la grabación en
+  // curso, lo que espera para subirse a la nube) cuentan, pero nunca se
+  // borran; si ellos solos ya pasan del tope, no borra nada (blocked). Antes,
+  // si maxAgeDays > 0, borra lo de Spectre con más días que eso, con las
+  // mismas excepciones.
+  LimitResult EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::vector<std::string>& keepPaths,
                            int maxAgeDays = 0);
 
 private:
@@ -143,7 +162,8 @@ private:
   std::map<std::string, Meta> meta_; // clave: ruta en minúsculas
 };
 
-// Analiza un nombre de archivo de Spectre ("Clip_<juego>_<fecha>...").
+// Analiza un nombre de archivo de Spectre ("Clip_<juego>_<fecha>...") o de
+// NVIDIA ShadowPlay ("<juego> 2026.10.16 - 05.30.12.02.DVR.mp4").
 void ParseMediaName(const std::string& fileName, MediaItem* item);
 const char* MediaKindName(MediaKind kind); // "Clip", "Grabación"...
 
@@ -153,6 +173,10 @@ StorageInfo SummarizeStorage(const std::vector<MediaItem>& items, const std::str
 bool CopyFileToClipboard(HWND owner, const std::string& path);
 // Varios archivos de una vez (Discord deja pegar hasta 10).
 bool CopyFilesToClipboard(HWND owner, const std::vector<std::string>& paths);
+// Texto (un enlace). private: no entra en el historial del portapapeles de
+// Windows (Win+V) ni se sincroniza con otros PC (la configuración de la nube).
+bool CopyTextToClipboard(HWND owner, const std::string& text, bool privateText = false);
+std::string ClipboardText(HWND owner);
 // Espacio libre en el disco de una carpeta (0 si no se sabe).
 uint64_t FreeDiskBytes(const std::string& folder);
 // La unidad del archivo tiene papelera de reciclaje (las memorias USB y las

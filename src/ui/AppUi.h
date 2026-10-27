@@ -55,6 +55,9 @@ struct AppModel {
   int editPercent = -1;
   std::string editSaved, editSavedFrom; // la última copia guardada y de qué archivo salió
   std::string photoSavePath;            // captura cuya copia editada se está guardando
+  // Nube: estado de cada archivo de la biblioteca por ruta (el de la cola
+  // entera está en settings.cloud).
+  std::unordered_map<std::string, CloudFileState> cloud;
 };
 
 struct AppActions {
@@ -101,6 +104,12 @@ struct AppActions {
   std::function<void(const std::vector<std::string>&)> exportManyForDiscord;
   std::function<void(const std::vector<std::string>&)> copyManyToClipboard;
   std::function<void(const std::string&, bool)> toast;
+  // Nube: varios a la cola, compartir uno (subir y copiar el enlace), cancelar
+  // y reintentar una subida, pausar todas.
+  std::function<void(const std::vector<std::string>&)> uploadToCloud;
+  std::function<void(const std::string&)> shareLink;
+  std::function<void(const std::string&)> cancelUpload;
+  std::function<void(const std::string&)> retryUpload;
   SettingsActions settings;
 };
 
@@ -147,7 +156,8 @@ private:
   void StatusCard(AppModel& m, const AppActions& a);
   // selection: -1 sin casilla (Inicio), 0 o 1 en la biblioteca (elegido o no).
   // number: su posición, que Táctico escribe en el pie (#01).
-  bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection = -1, int number = 0);
+  bool Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection = -1, int number = 0,
+            const CloudFileState* cloud = nullptr);
   void StatsSection(const AppModel& m);
   void SaveCurrentFrame(const MediaItem& item, const AppActions& a);
   // Selección de la biblioteca: casillas, Ctrl+clic, Mayús+clic (un tramo) y «Seleccionar».
@@ -166,6 +176,9 @@ private:
   void CopySelection(AppModel& m, const AppActions& a);
   void AskDeleteSelection(AppModel& m);
   void ItemMenu(AppModel& m, const AppActions& a);
+  void CloudMenuItems(AppModel& m, const AppActions& a, const std::string& path);
+  void CloudLine(AppModel& m, const AppActions& a);
+  void OpenCloudSettings(AppModel& m);
   void Dialogs(AppModel& m, const AppActions& a);
   void Timeline(AppWindow& w, const MediaItem& item, float width);
   // Miniatura de un archivo; width = ancho en píxeles al que se va a dibujar

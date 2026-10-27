@@ -1,9 +1,11 @@
 #pragma once
 
+#include "app/Cloud.h"
 #include "app/Config.h"
 #include "app/Export.h"
 #include "app/Fullscreen.h"
 #include "app/Library.h"
+#include "app/ShadowPlay.h"
 #include "app/System.h"
 #include "app/Updater.h"
 #include "app/VideoEdit.h"
@@ -87,6 +89,25 @@ private:
   void Quit();
   // Hay una actualización descargada esperando a que acabe la grabación.
   void InstallPendingUpdate();
+  // «Salir de Spectre» con subidas a la nube a medias: se pregunta antes.
+  void QuitAsked();
+
+  // Nube (app/Cloud.h). Compartir: si ya está subido copia el enlace; si no,
+  // lo sube el primero de la cola y lo copia al acabar. Sin nube configurada
+  // solo avisa (nunca abre la ventana: puede llamarse desde el panel).
+  void ShareLink(const std::string& path);
+  CloudFileState CloudState(const std::string& path) const { return cloud_.State(path); }
+  bool CloudConfigured() const { return cloud_.Configured(); }
+  void UploadToCloud(const std::vector<std::string>& paths);
+  // Algo nuevo guardado: con la subida automática o el modo cibercafé, a la cola.
+  void AutoUpload(const std::string& path, MediaKind kind);
+  // WM_SPECTRE_CLOUD: avisos de lo que terminó y estado para la ventana.
+  void OnCloudChanged();
+  void CopyCloudLink(const std::string& path);
+  void PasteCloudSettings(bool cyber);
+  // Ajustes > Almacenamiento > ShadowPlay: copia o mueve sus clips a la carpeta de Spectre.
+  void ImportFromShadowPlay(bool move);
+  void ChooseShadowPlayFolder();
 
   // Estado
   bool WantPipeline() const;
@@ -282,6 +303,14 @@ private:
   int exportBatchTotal_ = 0;
   int exportBatchFailed_ = 0;
   std::string exportBatchError_;
+
+  // Nube y ShadowPlay
+  CloudUploader cloud_;
+  uint64_t cloudVersion_ = 0; // la de appModel_.cloud
+  std::shared_ptr<std::atomic<bool>> importCancel_;
+  std::shared_ptr<std::atomic<int>> importDone_ = std::make_shared<std::atomic<int>>(0);
+  std::shared_ptr<std::atomic<int>> importTotal_ = std::make_shared<std::atomic<int>>(0);
+  bool importing_ = false;
 };
 
 } // namespace spectre

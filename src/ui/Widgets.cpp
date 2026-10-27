@@ -336,6 +336,11 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     poly({{-0.42f, -0.06f}, {0.0f, 0.36f}, {0.42f, -0.06f}}, false);
     line(-0.80f, 0.80f, 0.80f, 0.80f);
     break;
+  case Icon::Upload:
+    line(0.0f, 0.40f, 0.0f, -0.80f);
+    poly({{-0.42f, -0.38f}, {0.0f, -0.80f}, {0.42f, -0.38f}}, false);
+    line(-0.80f, 0.80f, 0.80f, 0.80f);
+    break;
   case Icon::Info:
     dl->AddRect(P(-0.80f, -0.80f), P(0.80f, 0.80f), color, 0, 0, t);
     line(0.0f, -0.12f, 0.0f, 0.50f);
@@ -1598,6 +1603,23 @@ bool GhostButton(const char* id, const char* label, float width, Tone tone, floa
        ImVec2(bp.a.x + (bp.b.x - bp.a.x - ts.x) * 0.5f, bp.a.y + (bp.b.y - bp.a.y - ts.y) * 0.5f), C(bp.fg), label);
   PaintPress(dl, a0, b0, role, m);
   return pressed;
+}
+
+bool LinkButton(const char* id, const char* label) {
+  float ls = Px(kHint);
+  ImVec2 ts = TextSize(ImGui::GetFont(), ls, label);
+  ImVec2 q = ImGui::GetCursorScreenPos();
+  bool clicked = ImGui::InvisibleButton(id, ImVec2(ts.x, ts.y + Px(4)));
+  bool hov = ImGui::IsItemHovered();
+  Motion mo = Animate();
+  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  Text(dl, ImGui::GetFont(), ls, q, C(Mix(Colors().textMuted, Colors().text, mo.hover)), label);
+  // El subrayado crece desde la izquierda.
+  if (mo.hover > 0)
+    dl->AddRectFilled(ImVec2(q.x, q.y + ts.y + Px(1)), ImVec2(q.x + ts.x * EaseOut(mo.hover), q.y + ts.y + Px(2)),
+                      C(Colors().text));
+  return clicked;
 }
 
 bool SolidButton(const char* id, const char* label, float width, float height) {

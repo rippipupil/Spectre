@@ -51,7 +51,7 @@ std::string FormatPrecise(double seconds) {
 }
 
 std::string Title(const MediaItem& item) {
-  if (!item.spectre) return item.stem;
+  if (!item.spectre && !item.nvidia) return item.stem;
   return item.game.empty() ? std::string("Escritorio") : item.game;
 }
 
@@ -75,7 +75,24 @@ bool IsGif(const MediaItem& item) {
 std::string BadgeText(const MediaItem& item) {
   if (IsGif(item)) return "GIF";
   if (item.audioOnly) return "AUDIO";
-  return KindUpper(item.kind);
+  return item.nvidia ? KindUpper(item.kind) + " · NVIDIA" : KindUpper(item.kind);
+}
+
+const CloudFileState* CloudOf(const AppModel& m, const std::string& path) {
+  auto it = m.cloud.find(path);
+  return it == m.cloud.end() ? nullptr : &it->second;
+}
+
+// La etiqueta de la nube en la tarjeta (vacía si no tiene nada que ver con ella).
+std::string CloudTag(const CloudFileState* cloud) {
+  if (!cloud) return {};
+  switch (cloud->phase) {
+  case CloudFileState::Phase::Queued: return "EN COLA";
+  case CloudFileState::Phase::Uploading: return "SUBIENDO " + std::to_string(int(cloud->progress * 100.0f)) + " %";
+  case CloudFileState::Phase::Done: return "EN LA NUBE";
+  case CloudFileState::Phase::Failed: return "SIN SUBIR";
+  default: return {};
+  }
 }
 
 std::string KindName(const MediaItem& item) {
@@ -144,23 +161,6 @@ void DrawImage(ImDrawList* dl, const UiTexture& tex, ImVec2 a, ImVec2 b, bool co
     ImVec2 p0(a.x + (aw - w) * 0.5f, a.y + (ah - h) * 0.5f);
     AddTextureImage(dl, tex, p0, ImVec2(p0.x + w, p0.y + h), ImVec2(0, 0), ImVec2(1, 1), tint);
   }
-}
-
-bool LinkButton(const char* id, const char* label) {
-  float ls = Px(kHint);
-  ImVec2 ts = TextSize(ImGui::GetFont(), ls, label);
-  ImVec2 q = ImGui::GetCursorScreenPos();
-  bool clicked = ImGui::InvisibleButton(id, ImVec2(ts.x, ts.y + Px(4)));
-  bool hov = ImGui::IsItemHovered();
-  Motion mo = Animate();
-  if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  Text(dl, ImGui::GetFont(), ls, q, C(Mix(Colors().textMuted, Colors().text, mo.hover)), label);
-  // El subrayado crece desde la izquierda.
-  if (mo.hover > 0)
-    dl->AddRectFilled(ImVec2(q.x, q.y + ts.y + Px(1)), ImVec2(q.x + ts.x * EaseOut(mo.hover), q.y + ts.y + Px(2)),
-                      C(Colors().text));
-  return clicked;
 }
 
 // Botón pequeño con borde (marcas del visor).
@@ -497,11 +497,13 @@ std::vector<const MediaItem*> AppUi::Filtered(const AppModel& m) const {
     case 2: if (item.kind != MediaKind::Recording) continue; break;
     case 3: if (item.kind != MediaKind::Screenshot) continue; break;
     case 4: if (!item.favorite) continue; break;
+    case 5: if (!item.nvidia) continue; break;
     default: break;
     }
     if (!game_.empty() && Title(item) != game_) continue;
     if (!needle.empty() && Lower(item.stem).find(needle) == std::string::npos &&
-        Lower(item.game).find(needle) == std::string::npos)
+        Lower(item.game).find(needle) == std::string::npos &&
+        !(item.nvidia && (std::string("nvidia shadowplay").find(needle) != std::string::npos)))
       continue;
     out.push_back(&item);
   }
@@ -976,7 +978,7 @@ LibraryStats ComputeStats(const std::vector<MediaItem>& items, const std::unorde
     ++st.clips;
     ++days[day];
     ++hours[(local / kTicksPerHour) % 24];
-    if (item.spectre && !item.game.empty()) ++games[item.game];
+    if ((item.spectre || item.nvidia) && !item.game.empty()) ++games[item.game];
   }
   for (const auto& [game, n] : games)
     if (n > st.topGameCount || (n == st.topGameCount && game < st.topGame)) {
@@ -1176,7 +1178,7 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
       ImGui::PushID(i);
       bool menu = false;
       const MediaItem& item = m.items[size_t(i)];
-      if (Card(w, item, cardW, &menu, -1, i + 1)) View(m, item.path, AppPage::Home);
+      if (Card(w, item, cardW, &menu, -1, i + 1, CloudOf(m, item.path))) View(m, item.path, AppPage::Home);
       if (menu) {
         menuPath_ = item.path;
         openMenu = true;
@@ -1217,7 +1219,8 @@ void AppUi::PageHome(AppWindow& w, AppModel& m, const AppActions& a) {
 
 // ------------------------------------------------------------------ biblioteca
 
-bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection, int number) {
+bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* contextMenu, int selection, int number,
+                 const CloudFileState* cloud) {
   (void)w;
   const Palette& p = Colors();
   // Dónde van la miniatura y el pie según la tarjeta del diseño (Widgets MediaCard).
@@ -1240,6 +1243,12 @@ bool AppUi::Card(AppWindow& w, const MediaItem& item, float width, bool* context
   RequestDuration(item);
   MediaCardFront(dl, card, mo.hover, selection > 0);
   Tag(dl, ImVec2(ta.x + Px(8), ta.y + Px(8)), BadgeText(item), false);
+  if (const std::string tag = CloudTag(cloud); !tag.empty()) {
+    // Debajo del tipo; mientras sube, una línea con lo que lleva al pie de la miniatura.
+    Tag(dl, ImVec2(ta.x + Px(8), ta.y + Px(8) + Px(kLabel) + Px(10)), tag, false);
+    if (cloud->phase == CloudFileState::Phase::Uploading)
+      dl->AddRectFilled(ImVec2(ta.x, tb.y - Px(2)), ImVec2(ta.x + (tb.x - ta.x) * cloud->progress, tb.y), C(p.accent));
+  }
   if (item.Video() && item.duration > 0)
     Tag(dl, ImVec2(tb.x - Px(8), tb.y - Px(8) - Px(kLabel) - Px(6)), FormatDuration(item.duration), true);
 
@@ -1295,6 +1304,7 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   if (ImGui::MenuItem("Abrir con Windows")) a.openPath(path);
   if (ImGui::MenuItem("Mostrar en la carpeta")) a.showInFolder(path);
   if (ImGui::MenuItem("Copiar para pegar en Discord")) a.copyToClipboard(path);
+  CloudMenuItems(m, a, path);
   if (Editable(*item)) {
     if (m.exportPercent >= 0 && m.exportPath == path) {
       std::string label = "Cancelar la exportación (" + std::to_string(m.exportPercent) + " %)";
@@ -1328,6 +1338,47 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   ImGui::EndPopup();
 }
 
+// Compartir con un enlace de tu nube: subir, copiar el enlace, cancelar o reintentar.
+void AppUi::CloudMenuItems(AppModel& m, const AppActions& a, const std::string& path) {
+  const CloudFileState* cloud = CloudOf(m, path);
+  const auto phase = cloud ? cloud->phase : CloudFileState::Phase::None;
+  if (!m.settings.cloud.configured && phase == CloudFileState::Phase::None) {
+    if (ImGui::MenuItem("Compartir con un enlace...")) OpenCloudSettings(m);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Sube el vídeo a tu nube (Cloudflare R2 o Backblaze B2, gratis hasta 10 GB) y copia un "
+                        "enlace para pegarlo donde quieras. Se configura una vez en Ajustes > Nube");
+    return;
+  }
+  switch (phase) {
+  case CloudFileState::Phase::Done:
+    if (ImGui::MenuItem("Copiar enlace")) a.shareLink(path);
+    break;
+  case CloudFileState::Phase::Queued:
+  case CloudFileState::Phase::Uploading: {
+    std::string label = phase == CloudFileState::Phase::Queued
+                            ? std::string("Cancelar la subida (en cola)")
+                            : "Cancelar la subida (" + std::to_string(int(cloud->progress * 100.0f)) + " %)";
+    if (ImGui::MenuItem(label.c_str())) a.cancelUpload(path);
+    break;
+  }
+  case CloudFileState::Phase::Failed:
+    if (ImGui::MenuItem("Reintentar la subida")) a.retryUpload(path);
+    if (ImGui::IsItemHovered() && !cloud->error.empty()) ImGui::SetTooltip("%s", cloud->error.c_str());
+    break;
+  default:
+    if (ImGui::MenuItem("Subir y copiar enlace")) a.shareLink(path);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Lo sube a tu nube y copia el enlace al terminar. El enlace lleva un código aleatorio "
+                        "largo: solo lo ve quien lo tenga");
+    break;
+  }
+}
+
+void AppUi::OpenCloudSettings(AppModel& m) {
+  Navigate(m, AppPage::Settings);
+  m.settingsPage = SettingsPage::Cloud;
+}
+
 void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
   if (!ImGui::BeginPopup("selection-menu")) return;
   const auto chosen = SelectedItems(m);
@@ -1353,6 +1404,15 @@ void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
     if (ImGui::MenuItem(label.c_str())) ExportSelection(m, a);
   }
   if (n >= 2 && videos == n && ImGui::MenuItem(("Unir " + count + " vídeos").c_str())) JoinSelection(m, a);
+  if (ImGui::MenuItem(("Subir " + count + " a la nube").c_str())) {
+    if (!m.settings.cloud.configured) {
+      OpenCloudSettings(m);
+    } else {
+      std::vector<std::string> paths;
+      for (const auto* item : chosen) paths.push_back(item->path);
+      a.uploadToCloud(paths);
+    }
+  }
   ImGui::Separator();
   if (ImGui::MenuItem(("Mover " + count + " a la papelera...").c_str())) AskDeleteSelection(m);
   ImGui::Separator();
@@ -1698,14 +1758,18 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
 
   // Barra de filtros
   {
-    static const std::vector<std::pair<int, std::string>> filters = {
+    // «NVIDIA» solo si hay algo de ShadowPlay en la biblioteca.
+    const bool nvidia = std::any_of(m.items.begin(), m.items.end(), [](const MediaItem& i) { return i.nvidia; });
+    if (!nvidia && filter_ == 5) filter_ = 0;
+    std::vector<std::pair<int, std::string>> filters = {
         {0, "Todo"}, {1, "Clips"}, {2, "Grabaciones"}, {3, "Capturas"}, {4, "Favoritos"}};
+    if (nvidia) filters.push_back({5, "NVIDIA"});
     float avail = ImGui::GetContentRegionAvail().x;
     // Juego, orden, «Al azar» y sus huecos; la búsqueda se lleva lo que sobre.
     // Si le quedan menos de 160 px el filtro se estrecha, y lo que no quepa
     // (ventana pequeña o letras anchas) baja a otra línea en vez de salirse.
     const float fixedW = Px(12) + Px(170) + Px(8) + Px(150) + Px(8) + Px(84) + Px(8);
-    float segW = std::min(Px(470), avail * 0.5f);
+    float segW = std::min(Px(nvidia ? 560 : 470), avail * 0.5f);
     if (avail - segW - fixedW < Px(160)) segW = std::max(Px(400), avail - fixedW - Px(160));
     segW = std::min(segW, avail);
     const float rowRight = ImGui::GetCursorScreenPos().x + avail;
@@ -1719,7 +1783,7 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
     std::vector<std::string> games;
     for (const auto& item : m.items) {
       std::string g = Title(item);
-      if (item.spectre && std::find(games.begin(), games.end(), g) == games.end()) games.push_back(g);
+      if ((item.spectre || item.nvidia) && std::find(games.begin(), games.end(), g) == games.end()) games.push_back(g);
     }
     std::sort(games.begin(), games.end());
     ImGui::SetNextItemWidth(Px(170));
@@ -1793,6 +1857,7 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
     Bar(ImVec2(lineW, Px(2)), fraction, p.accent);
     Gap(12);
   }
+  CloudLine(m, a);
 
   if (m.items.empty()) {
     Help(m.itemsLoaded ? "La biblioteca está vacía. Los clips, grabaciones y capturas que guardes aparecerán aquí."
@@ -1840,7 +1905,7 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
         bool menu = false;
         const MediaItem& item = *list[i];
         const int selection = Selected(item.path) ? 1 : 0;
-        if (Card(w, item, cardW, &menu, selection, int(i) + 1)) {
+        if (Card(w, item, cardW, &menu, selection, int(i) + 1, CloudOf(m, item.path))) {
           // Eligiendo (o con Ctrl o Mayús), el clic elige en vez de abrir.
           if (selecting || io.KeyCtrl || io.KeyShift) clicked = int(i);
           else View(m, item.path, AppPage::Library);
@@ -1875,6 +1940,62 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
   (void)p;
   ImGui::EndChild();
   ImGui::PopStyleVar();
+}
+
+// Lo que se está subiendo a la nube, con Pausar/Seguir y Reintentar.
+void AppUi::CloudLine(AppModel& m, const AppActions& a) {
+  const Palette& p = Colors();
+  const CloudStatus& st = m.settings.cloud;
+  if (st.current.empty() && st.queued == 0 && st.failed == 0) return;
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 q = ImGui::GetCursorScreenPos();
+  const float lineW = ImGui::GetContentRegionAvail().x - Px(12);
+  std::string text;
+  if (!st.current.empty()) {
+    text = "Subiendo " + st.current + "  ·  " + std::to_string(int(st.progress * 100.0f)) + " %";
+    if (st.bytesPerSecond > 0) text += "  ·  " + FormatBytes(uint64_t(st.bytesPerSecond)) + "/s";
+  } else if (st.paused) {
+    text = "Subidas en pausa";
+  } else if (st.waitingGame) {
+    text = "Las subidas esperan a que cierres el juego";
+  } else if (st.offline) {
+    text = "Sin conexión: las subidas siguen solas al volver";
+  } else if (!st.configured && st.queued > 0) {
+    text = "Las subidas esperan a que configures la nube";
+  } else if (st.queued > 0) {
+    text = "Subidas en espera";
+  }
+  if (st.queued > 0) text += (text.empty() ? "" : "  ·  ") + Count(size_t(st.queued), "en cola", "en cola");
+  if (st.failed > 0) text += (text.empty() ? "" : "  ·  ") + Count(size_t(st.failed), "sin subir", "sin subir");
+  Text(dl, ImGui::GetFont(), Px(kSmall), q, C(st.failed > 0 && st.current.empty() ? p.danger : p.textMuted),
+       Ellipsize(ImGui::GetFont(), Px(kSmall), text, lineW - Px(170)).c_str());
+  // A la derecha: Reintentar (si algo falló) y Pausar/Seguir o Configurar.
+  float x = q.x + lineW;
+  const auto link = [&](const char* id, const char* label, const char* tip) {
+    x -= TextSize(ImGui::GetFont(), Px(kHint), label).x;
+    ImGui::SetCursorScreenPos(ImVec2(x, q.y));
+    const bool pressed = LinkButton(id, label);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    x -= Px(16);
+    return pressed;
+  };
+  if (!st.configured) {
+    if (link("cloud-setup", "Configurar", "Ajustes > Nube")) OpenCloudSettings(m);
+  } else if (st.paused) {
+    if (link("cloud-resume", "Seguir", "Sigue subiendo desde donde iba") && a.settings.pauseUploads)
+      a.settings.pauseUploads(false);
+  } else if (!st.current.empty() || st.queued > 0) {
+    if (link("cloud-pause", "Pausar", "Para las subidas hasta que pulses Seguir (también tras reiniciar Spectre)") &&
+        a.settings.pauseUploads)
+      a.settings.pauseUploads(true);
+  }
+  if (st.failed > 0 && st.configured &&
+      link("cloud-retry", "Reintentar", st.lastError.empty() ? "Vuelve a intentar las que fallaron" : st.lastError.c_str()) &&
+      a.settings.retryUploads)
+    a.settings.retryUploads();
+  ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + Px(kSmall) + Px(8)));
+  if (!st.current.empty()) Bar(ImVec2(lineW, Px(2)), st.progress, p.accent);
+  Gap(12);
 }
 
 // ------------------------------------------------------------------ visor
@@ -2023,7 +2144,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     const bool exporting = m.exportPercent >= 0;
     const bool exportingThis = exporting && m.exportPath == item.path;
     if (exportingThis) sub = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %";
-    const int actions = editable ? 8 : photoEditable ? 7 : 6;
+    const int actions = editable ? 9 : photoEditable ? 8 : 7;
     float actionsW = rowH * float(actions) + Px(4) * float(actions - 1);
     Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(exportingThis ? p.accent : p.textMuted),
          Ellipsize(ImGui::GetFont(), Px(kSmall), sub, ImGui::GetContentRegionAvail().x - rowH - actionsW - Px(30)).c_str());
@@ -2042,6 +2163,35 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     ImGui::SameLine(0, Px(4));
     if (IconButton("copy", Icon::Copy, rowH, "Copiar el archivo para pegarlo en Discord o WhatsApp"))
       a.copyToClipboard(item.path);
+    ImGui::SameLine(0, Px(4));
+    {
+      // Compartir con un enlace de tu nube (o cancelar la subida en marcha).
+      const CloudFileState* cloud = CloudOf(m, item.path);
+      const auto phase = cloud ? cloud->phase : CloudFileState::Phase::None;
+      const bool busy = phase == CloudFileState::Phase::Queued || phase == CloudFileState::Phase::Uploading;
+      std::string tip = !m.settings.cloud.configured && phase == CloudFileState::Phase::None
+                            ? "Compartir con un enlace: configura tu nube en Ajustes > Nube (R2 o Backblaze, gratis "
+                              "hasta 10 GB)"
+                        : phase == CloudFileState::Phase::Done ? "Copiar el enlace (ya está en tu nube)"
+                        : busy ? (phase == CloudFileState::Phase::Queued
+                                      ? std::string("En la cola para subirse. Clic para cancelar")
+                                      : "Subiendo: " + std::to_string(int(cloud->progress * 100.0f)) +
+                                            " %. El enlace se copia al terminar. Clic para cancelar")
+                        : phase == CloudFileState::Phase::Failed ? "No se pudo subir: " + cloud->error + ". Clic para reintentar"
+                                                                 : "Compartir con un enlace: lo sube a tu nube y copia el "
+                                                                   "enlace al terminar";
+      if (IconButton("cloud", Icon::Upload, rowH, tip.c_str(), busy || phase == CloudFileState::Phase::Done)) {
+        if (!m.settings.cloud.configured && phase == CloudFileState::Phase::None) {
+          OpenCloudSettings(m);
+          ImGui::EndChild();
+          ImGui::PopStyleVar();
+          return;
+        }
+        if (busy) a.cancelUpload(item.path);
+        else if (phase == CloudFileState::Phase::Failed) a.retryUpload(item.path);
+        else a.shareLink(item.path);
+      }
+    }
     ImGui::SameLine(0, Px(4));
     if (editable) {
       if (IconButton("edit", Icon::Sliders, rowH,

@@ -33,6 +33,7 @@ const char* SettingsPageName(SettingsPage page) {
   case SettingsPage::Camera: return "Cámara";
   case SettingsPage::Hotkeys: return "Atajos";
   case SettingsPage::Storage: return "Almacenamiento";
+  case SettingsPage::Cloud: return "Nube";
   case SettingsPage::Notifications: return "Avisos";
   case SettingsPage::General: return "General";
   case SettingsPage::Performance: return "Rendimiento";
@@ -716,6 +717,90 @@ void PageHotkeys(SettingsModel& m, const SettingsActions& a) {
 
 // ------------------------------------------------------------ almacenamiento
 
+// Clips de NVIDIA ShadowPlay (GeForce Experience o la app de NVIDIA): verlos
+// en la biblioteca desde su carpeta o traerlos a la de Spectre.
+void ShadowPlaySection(SettingsModel& m, const SettingsActions& a) {
+  const Palette& p = Colors();
+  auto& c = m.config.shadowPlay;
+  const StorageInfo& s = m.storage;
+  Heading("NVIDIA SHADOWPLAY");
+  m.dirty |= SwitchField("Ver en la biblioteca", &c.library,
+                         "Los clips, grabaciones y capturas de ShadowPlay (GeForce Experience o la app de NVIDIA) "
+                         "salen en la biblioteca con la etiqueta NVIDIA, sin copiarlos ni recodificarlos. Spectre "
+                         "nunca los borra por el límite de espacio.");
+  FieldLabel("Carpeta", "Vacía: la que tiene configurada ShadowPlay, Vídeos\\NVIDIA y Vídeos.");
+  if (ImGui::InputTextWithHint("##nvdir", "La de ShadowPlay (automática)", &c.folder)) m.dirty = true;
+  ImGui::Dummy(ImVec2(Px(kLabelColumn) - ImGui::GetStyle().ItemSpacing.x, 0));
+  ImGui::SameLine();
+  if (GhostButton("nv-choose", "Elegir carpeta...", Px(140), Tone::Normal, 28) && a.chooseShadowPlayFolder)
+    a.chooseShadowPlayFolder();
+  if (!c.folder.empty()) {
+    ImGui::SameLine(0, Px(6));
+    if (GhostButton("nv-auto", "Automática", Px(110), Tone::Normal, 28)) {
+      c.folder.clear();
+      m.dirty = true;
+    }
+  }
+  const bool sameSearch = c.folder == m.base.shadowPlay.folder;
+  if (!sameSearch) {
+    Help("Pulsa Aplicar para buscar en esa carpeta.");
+  } else if (s.shadowPlayFolders.empty()) {
+    Help("No se encuentra ninguna carpeta de ShadowPlay en este PC. Si guardas sus vídeos en otro sitio, elígelo.");
+  } else if (s.shadowPlayFiles == 0) {
+    std::string text = "No hay vídeos ni capturas de ShadowPlay en " + s.shadowPlayFolders.front();
+    if (s.shadowPlayFolders.size() > 1) text += " ni en " + std::to_string(s.shadowPlayFolders.size() - 1) + " carpetas más";
+    text += ". Spectre los reconoce por el nombre que les pone NVIDIA (Juego 2026.10.27 - 18.30.12.05.DVR.mp4).";
+    Help(text.c_str());
+  } else {
+    std::string found = std::to_string(s.shadowPlayFiles) + (s.shadowPlayFiles == 1 ? " archivo, " : " archivos, ") +
+                        FormatBytes(s.shadowPlayBytes);
+    ValueRow("Encontrados", found);
+    for (const auto& folder : s.shadowPlayFolders) ValueRow("", folder);
+  }
+
+  // Importar: copiar o mover a la carpeta de Spectre.
+  if (m.shadowPlayTotal > 0) {
+    Gap(6);
+    std::string text = "Importando de ShadowPlay: " + std::to_string(std::min(m.shadowPlayDone + 1, m.shadowPlayTotal)) +
+                       " de " + std::to_string(m.shadowPlayTotal);
+    ImGui::TextUnformatted(text.c_str());
+    Bar(ImVec2(ControlWidth(), Px(4)), float(m.shadowPlayDone) / float(m.shadowPlayTotal), p.accent);
+    Gap(6);
+    if (GhostButton("nv-cancel", "Cancelar", Px(120), Tone::Normal, 28) && a.cancelImport) a.cancelImport();
+    Help("Lo ya copiado se queda. Se puede cerrar la ventana: sigue en segundo plano.");
+    return;
+  }
+  if (s.shadowPlayFiles == 0 || !sameSearch) return;
+  Gap(6);
+  if (m.shadowPlayConfirm < 0) {
+    if (GhostButton("nv-copy", "Copiar a Spectre", Px(160), Tone::Normal, 28)) m.shadowPlayConfirm = 0;
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Copia a la carpeta de Spectre, con su nombre y su fecha. Los originales se quedan.");
+    ImGui::SameLine(0, Px(6));
+    if (GhostButton("nv-move", "Mover a Spectre", Px(160), Tone::Normal, 28)) m.shadowPlayConfirm = 1;
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Los pasa a la carpeta de Spectre y los quita de la de ShadowPlay (en el mismo disco es "
+                        "inmediato).");
+    Help("Importar no hace falta para verlos: sirve para tener todo en una carpeta. Lo que ya esté en la de Spectre "
+         "se salta.");
+    return;
+  }
+  const bool move = m.shadowPlayConfirm == 1;
+  std::string ask = std::string(move ? "¿Mover " : "¿Copiar ") + std::to_string(s.shadowPlayFiles) +
+                    (s.shadowPlayFiles == 1 ? " archivo" : " archivos") + " (" + FormatBytes(s.shadowPlayBytes) +
+                    ") a " + m.outputDir + "?";
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, Px(560)));
+  ImGui::TextWrapped("%s", ask.c_str());
+  ImGui::PopTextWrapPos();
+  if (!move && s.valid && s.shadowPlayBytes + (uint64_t(1) << 30) > s.freeBytes)
+    Warning("No hay espacio libre suficiente en ese disco para copiarlos todos.");
+  if (move) Warning("Dejarán de estar en la carpeta de ShadowPlay.");
+  Gap(4);
+  if (SolidButton("nv-yes", move ? "Mover" : "Copiar", Px(120), 28) && a.importShadowPlay) a.importShadowPlay(move);
+  ImGui::SameLine(0, Px(6));
+  if (GhostButton("nv-no", "Cancelar", Px(120), Tone::Normal, 28)) m.shadowPlayConfirm = -1;
+}
+
 void PageStorage(SettingsModel& m, const SettingsActions& a) {
   const Palette& p = Colors();
   auto& c = m.config;
@@ -836,6 +921,8 @@ void PageStorage(SettingsModel& m, const SettingsActions& a) {
       }
     }
   }
+
+  ShadowPlaySection(m, a);
 
   Heading("CAPTURAS DE PANTALLA");
   FieldLabel("Formato");
@@ -1366,6 +1453,245 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
   }
 }
 
+// Ajustes > Nube: tu bucket (R2, B2 u otro S3), las claves, la subida
+// automática, el modo cibercafé y lo que se ha subido.
+void CloudSetup(SettingsModel& m, const SettingsActions& a) {
+  const Palette& p = Colors();
+  auto& c = m.config.cloud;
+  const CloudStatus& st = m.cloud;
+  Heading("TU NUBE");
+  Help("Spectre sube a un bucket tuyo, sin servidores de por medio: Cloudflare R2 y Backblaze B2 dan 10 GB gratis "
+       "(R2 sin coste por descargar). Cada enlace lleva un código aleatorio largo: solo lo ve quien lo tenga.");
+  Gap(4);
+  FieldLabel("Servicio");
+  if (ChoiceCombo<std::string>("##provider", c.provider,
+                               {{"r2", "Cloudflare R2"}, {"b2", "Backblaze B2"}, {"s3", "Otro compatible con S3"}})) {
+    m.dirty = true;
+  }
+  const char* endpointHint = c.provider == "r2"   ? "https://<id de la cuenta>.r2.cloudflarestorage.com"
+                             : c.provider == "b2" ? "https://s3.eu-central-003.backblazeb2.com"
+                                                  : "https://s3.eu-west-1.amazonaws.com";
+  const char* endpointHelp =
+      c.provider == "r2"   ? "En Cloudflare: R2 > tu bucket > Ajustes, la dirección de «S3 API». Puede llevar el bucket "
+                             "al final."
+      : c.provider == "b2" ? "En Backblaze: Buckets, el «Endpoint» de tu bucket (s3.<región>.backblazeb2.com)."
+                           : "La dirección S3 de tu servicio.";
+  FieldLabel("Dirección (endpoint)", endpointHelp);
+  if (ImGui::InputTextWithHint("##endpoint", endpointHint, &c.endpoint)) m.dirty = true;
+  FieldLabel("Bucket", "El nombre del bucket donde se guardan los vídeos.");
+  const std::string fromEndpoint = c.bucket.empty() ? CloudBucket(c) : std::string();
+  if (ImGui::InputTextWithHint("##bucket", fromEndpoint.empty() ? "spectre-clips" : fromEndpoint.c_str(), &c.bucket))
+    m.dirty = true;
+  if (c.provider == "s3") {
+    FieldLabel("Región", "Vacía si la dirección ya la lleva (s3.<región>.amazonaws.com).");
+    if (ImGui::InputTextWithHint("##region", "us-east-1", &c.region)) m.dirty = true;
+  }
+  FieldLabel("Dirección pública (opcional)",
+             "La dirección pública del bucket: en R2, el subdominio r2.dev o tu dominio; en B2, la de un bucket "
+             "público. Con ella los enlaces no caducan.");
+  if (ImGui::InputTextWithHint("##public", "https://pub-....r2.dev", &c.publicUrl)) m.dirty = true;
+  if (c.publicUrl.empty()) {
+    FieldLabel("Los enlaces valen", "Sin dirección pública, el enlace va firmado y caduca. Al copiarlo otra vez se "
+                                    "firma de nuevo.");
+    m.dirty |= ChoiceCombo<int>("##days", c.linkDays, {{1, "1 día"}, {2, "2 días"}, {3, "3 días"}, {7, "7 días (lo máximo)"}});
+  }
+
+  Heading("CLAVES");
+  if (st.hasKeys && !m.cloudEditKeys) {
+    ValueRow("Access Key ID", st.keyIdHint);
+    ValueRow("", st.keysStored ? "Guardadas en este PC, cifradas con tu usuario de Windows"
+                               : "Solo en memoria: se olvidan al salir de Spectre");
+    Gap(4);
+    ImGui::Dummy(ImVec2(Px(kLabelColumn) - ImGui::GetStyle().ItemSpacing.x, 0));
+    ImGui::SameLine();
+    if (GhostButton("keys-change", "Cambiar", Px(110), Tone::Normal, 28)) m.cloudEditKeys = true;
+    ImGui::SameLine(0, Px(6));
+    if (GhostButton("keys-forget", "Olvidar", Px(110), Tone::Danger, 28) && a.forgetCloudKeys) a.forgetCloudKeys();
+  } else {
+    FieldLabel("Access Key ID", "En R2: «Administrar tokens de API de R2» > Crear token, con permiso de lectura y "
+                                "escritura de objetos. En B2: Application Keys > Add a New Application Key.");
+    ImGui::InputText("##keyid", &m.cloudKeyId);
+    FieldLabel("Secret Access Key", "Se ve una sola vez al crear la clave.");
+    ImGui::InputText("##secret", &m.cloudSecret, ImGuiInputTextFlags_Password);
+    Help(c.cyberMode ? "En el modo cibercafé las claves solo están en memoria: se olvidan al salir de Spectre."
+                     : "Se guardan cifradas con tu usuario de Windows: otro usuario de este PC no puede leerlas.");
+    if (st.hasKeys) {
+      Gap(2);
+      if (LinkButton("keys-keep", "Seguir con las que hay")) {
+        m.cloudEditKeys = false;
+        SecureZeroMemory(m.cloudSecret.data(), m.cloudSecret.size());
+        m.cloudSecret.clear();
+        m.cloudKeyId.clear();
+      }
+    }
+  }
+  Gap(6);
+  const bool typed = !m.cloudKeyId.empty() && !m.cloudSecret.empty();
+  const bool canSave = !c.endpoint.empty() && (typed || st.hasKeys);
+  ImGui::BeginDisabled(!canSave || st.test == CloudStatus::Test::Running);
+  if (SolidButton("cloud-save", "Guardar y probar", Px(170), 30) && a.saveCloudKeys) a.saveCloudKeys();
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip(canSave ? "Guarda la nube y las claves y sube un archivo pequeño de prueba (se borra al momento)"
+                              : "Escribe la dirección y las dos claves");
+  if (!m.cloudMessage.empty()) {
+    Gap(4);
+    UpdateStatusLine(m.cloudMessageError ? p.danger : p.accent, false, m.cloudMessage);
+  }
+  switch (st.test) {
+  case CloudStatus::Test::Running:
+    Gap(4);
+    UpdateStatusLine(p.textMuted, true, "Probando: sube un archivo pequeño, abre su enlace y lo borra...");
+    break;
+  case CloudStatus::Test::Ok: Gap(4); UpdateStatusLine(p.accent, false, st.testMessage); break;
+  case CloudStatus::Test::Warning: Gap(4); UpdateStatusLine(p.warning, false, st.testMessage); break;
+  case CloudStatus::Test::Failed: Gap(4); UpdateStatusLine(p.danger, false, st.testMessage); break;
+  default: break;
+  }
+  Gap(6);
+  if (LinkButton("help-r2", "Cómo crear un bucket en Cloudflare R2") && a.openPath)
+    a.openPath("https://developers.cloudflare.com/r2/get-started/");
+  ImGui::SameLine(0, Px(18));
+  if (LinkButton("help-b2", "En Backblaze B2") && a.openPath)
+    a.openPath("https://www.backblaze.com/docs/cloud-storage-s3-compatible-api");
+}
+
+void CloudAuto(SettingsModel& m) {
+  auto& c = m.config.cloud;
+  Heading("SUBIR SOLO");
+  if (c.cyberMode) {
+    Help("En el modo cibercafé se sube todo lo que guardes y se borra de este PC al terminar de subirse.");
+  } else {
+    m.dirty |= SwitchField("Subir lo que guarde", &c.autoUpload,
+                           "Al guardar, se pone en la cola y se sube sin pulsar nada. Si no hay conexión, sigue al "
+                           "volver; si cierras Spectre, sigue la próxima vez desde donde iba.");
+    ImGui::BeginDisabled(!c.autoUpload);
+    m.dirty |= SwitchField("Clips", &c.uploadClips);
+    m.dirty |= SwitchField("Grabaciones", &c.uploadRecordings, "Pueden ser varios GB: tardan en subir.");
+    m.dirty |= SwitchField("Capturas", &c.uploadScreenshots);
+    m.dirty |= SwitchField("Copiar el enlace al subirse", &c.copyLink,
+                           "El enlace del último que se suba queda en el portapapeles, listo para pegar.");
+    m.dirty |= SwitchField("Borrarlo del PC al subirse", &c.deleteAfterUpload,
+                           "Para siempre, sin pasar por la papelera, en cuanto la nube confirma que está entero. Los "
+                           "favoritos también.");
+    ImGui::EndDisabled();
+    if (c.autoUpload && c.deleteAfterUpload)
+      Warning("Lo que se suba solo se borra de este PC: quedará únicamente en tu nube.");
+  }
+  FieldLabel("Con un juego abierto", "Mientras juegas o grabas, la subida va en segundo plano y con este límite para "
+                                     "no subirte el ping. Compartir un enlace a mano sube igualmente, a 1 MB/s.");
+  m.dirty |= ChoiceCombo<int>("##gamelimit", c.gameLimitKBps,
+                              {{0, "Esperar a que lo cierre"},
+                               {256, "Subir a 0,25 MB/s"},
+                               {512, "Subir a 0,5 MB/s"},
+                               {1024, "Subir a 1 MB/s"},
+                               {2048, "Subir a 2 MB/s"},
+                               {5120, "Subir a 5 MB/s"},
+                               {-1, "Sin límite"}});
+}
+
+void CloudCyber(SettingsModel& m, const SettingsActions& a) {
+  auto& c = m.config.cloud;
+  const CloudStatus& st = m.cloud;
+  Heading("MODO CIBERCAFÉ");
+  m.dirty |= SwitchField("Modo cibercafé", &c.cyberMode,
+                         "Para un PC que no es tuyo: todo lo que guardes se sube solo a tu nube y se borra de este "
+                         "PC al subirse. Las claves no tocan el disco y al salir de Spectre se olvidan, igual que la "
+                         "lista de subidas.");
+  if (c.cyberMode != m.base.cloud.cyberMode)
+    Warning(c.cyberMode ? "Al aplicar, las claves se borran del disco de este PC (siguen en memoria hasta salir) y lo "
+                          "que guardes se sube y se borra de aquí."
+                        : "Al aplicar, las claves se guardan cifradas en este PC y lo que guardes se queda en él.");
+  Help("En tu PC pulsa «Copiar configuración» y guárdala donde solo la veas tú. En el del cibercafé, abre Spectre, "
+       "Ajustes > Nube, y pulsa «Pegar en modo cibercafé»: no hace falta escribir las claves.");
+  Gap(4);
+  ImGui::BeginDisabled(!st.configured);
+  if (GhostButton("cloud-copy", "Copiar configuración", Px(190), Tone::Normal, 28) && a.copyCloudSettings)
+    a.copyCloudSettings();
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip(st.configured ? "Un texto con la nube y las claves. No lo compartas: con él se puede subir y "
+                                      "borrar en tu bucket"
+                                    : "Primero guarda la nube y sus claves");
+  ImGui::SameLine(0, Px(6));
+  if (GhostButton("cloud-paste", "Pegar en este PC", Px(160), Tone::Normal, 28) && a.pasteCloudSettings)
+    a.pasteCloudSettings(false);
+  ImGui::SameLine(0, Px(6));
+  if (SolidButton("cloud-paste-cyber", "Pegar en modo cibercafé", Px(210), 28) && a.pasteCloudSettings)
+    a.pasteCloudSettings(true);
+}
+
+void CloudUploads(SettingsModel& m, const SettingsActions& a) {
+  const Palette& p = Colors();
+  const CloudStatus& st = m.cloud;
+  Heading("SUBIDAS");
+  if (!st.current.empty()) {
+    std::string text = "Subiendo " + st.current + "  ·  " + std::to_string(int(st.progress * 100.0f)) + " %";
+    if (st.bytesPerSecond > 0) text += "  ·  " + FormatBytes(uint64_t(st.bytesPerSecond)) + "/s";
+    UpdateStatusLine(p.accent, true, text);
+    Bar(ImVec2(ControlWidth(), Px(4)), st.progress, p.accent);
+    Gap(4);
+  } else if (st.paused && st.queued > 0) {
+    UpdateStatusLine(p.textMuted, false, "En pausa");
+  } else if (st.waitingGame && st.queued > 0) {
+    UpdateStatusLine(p.textMuted, false, "Esperando a que cierres el juego");
+  } else if (st.offline && st.queued > 0) {
+    UpdateStatusLine(p.warning, false, "Sin conexión: sigue sola al volver");
+  } else if (st.queued == 0) {
+    UpdateStatusLine(p.textMuted, false, st.doneCount > 0 ? "Todo subido" : "Nada en la cola");
+  }
+  if (st.queued > 0) ValueRow("En cola", std::to_string(st.queued));
+  if (st.failed > 0) ValueRow("Sin subir", std::to_string(st.failed));
+  if (!st.lastError.empty() && (st.failed > 0 || st.offline)) {
+    Gap(2);
+    ErrorText(st.lastError.c_str());
+  }
+  if (!st.current.empty() || st.queued > 0 || st.paused) {
+    Gap(4);
+    if (GhostButton("cloud-pause", st.paused ? "Seguir" : "Pausar", Px(110), Tone::Normal, 28) && a.pauseUploads)
+      a.pauseUploads(!st.paused);
+    if (st.failed > 0) ImGui::SameLine(0, Px(6));
+  }
+  if (st.failed > 0) {
+    if (st.current.empty() && st.queued == 0 && !st.paused) Gap(4);
+    if (GhostButton("cloud-retry", "Reintentar", Px(110), Tone::Normal, 28) && a.retryUploads) a.retryUploads();
+  }
+
+  if (st.recent.empty()) return;
+  Heading("LO ÚLTIMO SUBIDO");
+  // Nombre y fecha a la izquierda, «Copiar enlace» a la derecha.
+  const float rowW = std::min(ImGui::GetContentRegionAvail().x, Px(620));
+  for (size_t i = 0; i < st.recent.size(); ++i) {
+    const auto& r = st.recent[i];
+    ImGui::PushID(int(i));
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    const float rowH = Px(30);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float btnW = Px(130);
+    std::string line = r.name;
+    std::string sub = r.when + (r.local ? std::string() : std::string("  ·  ya no está en este PC"));
+    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x, q.y + Px(2)), C(p.text),
+         Ellipsize(ImGui::GetFont(), Px(kSmall), line, rowW - btnW - Px(16)).c_str());
+    Text(dl, ImGui::GetFont(), Px(kHint), ImVec2(q.x, q.y + Px(kSmall) + Px(5)), C(p.textFaint), sub.c_str());
+    ImGui::SetCursorScreenPos(ImVec2(q.x + rowW - btnW, q.y + (rowH - Px(26)) * 0.5f + Px(2)));
+    if (GhostButton("link", "Copiar enlace", btnW, Tone::Normal, 26) && a.copyLink) a.copyLink(r.path);
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(8)));
+    dl->AddRectFilled(ImVec2(q.x, q.y + rowH + Px(4)), ImVec2(q.x + rowW, q.y + rowH + Px(4) + Px(1)), C(p.line));
+    ImGui::Dummy(ImVec2(rowW, 0));
+    ImGui::PopID();
+  }
+  Gap(4);
+  if (LinkButton("cloud-clear", "Vaciar la lista") && a.clearCloudHistory) a.clearCloudHistory();
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Solo la lista de este PC: no borra nada de tu nube");
+}
+
+void PageCloud(SettingsModel& m, const SettingsActions& a) {
+  CloudSetup(m, a);
+  CloudAuto(m);
+  CloudCyber(m, a);
+  CloudUploads(m, a);
+}
+
 void PageGeneral(SettingsModel& m, const SettingsActions& a) {
   auto& c = m.config;
   AppearanceSection(m);
@@ -1466,6 +1792,7 @@ void DrawSettingsPage(SettingsPage page, SettingsModel& m, const SettingsActions
   case SettingsPage::Camera: PageCamera(m); break;
   case SettingsPage::Hotkeys: PageHotkeys(m, a); break;
   case SettingsPage::Storage: PageStorage(m, a); break;
+  case SettingsPage::Cloud: PageCloud(m, a); break;
   case SettingsPage::Notifications: PageNotifications(m, a); break;
   case SettingsPage::General: PageGeneral(m, a); break;
   case SettingsPage::Projects: PageProjects(a); break;
