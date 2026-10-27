@@ -22,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #ifndef SPECTRE_VERSION
@@ -117,6 +118,32 @@ bool AnyMouseButtonDown() {
   return false;
 }
 
+// Diálogo de Windows para elegir una carpeta; vacío si se cancela (o si no
+// se pudo abrir: *failed).
+std::string PickFolder(HWND owner, const wchar_t* title, const std::wstring& start, bool* failed) {
+  using Microsoft::WRL::ComPtr;
+  *failed = false;
+  ComPtr<IFileOpenDialog> dialog;
+  if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+    *failed = true;
+    return {};
+  }
+  DWORD options = 0;
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+  dialog->SetTitle(title);
+  ComPtr<IShellItem> folder;
+  if (!start.empty() && SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, IID_PPV_ARGS(&folder))))
+    dialog->SetFolder(folder.Get());
+  if (dialog->Show(owner) != S_OK) return {}; // cancelado
+  ComPtr<IShellItem> item;
+  PWSTR path = nullptr;
+  if (FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) return {};
+  std::string out = Narrow(path);
+  CoTaskMemFree(path);
+  return out;
+}
+
 bool SameCaptureSettings(const Config& a, const Config& b) {
   return a.captureMode == b.captureMode && a.monitorIndex == b.monitorIndex && a.captureApi == b.captureApi &&
          a.captureCursor == b.captureCursor && a.fps == b.fps && a.outputHeight == b.outputHeight &&
@@ -132,6 +159,23 @@ bool SameCaptureSettings(const Config& a, const Config& b) {
 bool SameCameraSettings(const Config& a, const Config& b) {
   return a.cameraEnabled == b.cameraEnabled && a.cameraId == b.cameraId && a.cameraCorner == b.cameraCorner &&
          a.cameraSizePercent == b.cameraSizePercent;
+}
+
+// Modo cibercafé: la nube del cliente (dirección, bucket, dirección pública)
+// no se queda en config.json para el siguiente. Devuelve si cambió algo.
+bool ForgetCyberCloud(CloudConfig& c) {
+  const bool had = !c.endpoint.empty() || !c.bucket.empty() || !c.region.empty() || !c.publicUrl.empty();
+  c.endpoint.clear();
+  c.bucket.clear();
+  c.region.clear();
+  c.publicUrl.clear();
+  return had;
+}
+
+std::string LowerText(const std::string& s) {
+  std::wstring w = Widen(s);
+  if (!w.empty()) CharLowerBuffW(w.data(), DWORD(w.size()));
+  return Narrow(w);
 }
 
 // Navegadores y reproductores a pantalla completa: no son juegos.
@@ -194,6 +238,19 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   if (!hwnd_) return 1;
   taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
   AddTrayIcon();
+  // Lo que quedó por subir a la nube sigue ahora (con un juego, despacio). En
+  // el modo cibercafé, lo del cliente anterior no (Spectre pudo cerrarse a la
+  // fuerza, sin pasar por la limpieza de salir).
+  if (config_.cloud.cyberMode && ForgetCyberCloud(config_.cloud)) {
+    SaveConfig(config_);
+    SyncModels();
+  }
+  cloud_.Start(hwnd_, config_.cloud);
+  if (config_.cloud.cyberMode) {
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    cyberSince_ = (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+  }
 
   menu_.Init(instance, OverlayWindow::Kind::Menu);
   toast_.Init(instance, OverlayWindow::Kind::Toast);
@@ -255,9 +312,26 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   // Compartir desde el panel: el panel sigue abierto y el juego, delante.
   menuActions_.copyFile = [this](const std::string& path) {
     Defer([this, path] {
-      if (CopyFileToClipboard(hwnd_, path)) Toast("Copiado. Pégalo con Ctrl+V en Discord, WhatsApp o una carpeta");
-      else Toast("No se pudo copiar el archivo al portapapeles", true);
+      if (CopyFileToClipboard(hwnd_, path)) {
+        KeepForPaste({path}); // en el modo cibercafé no se borra al subirse: Ctrl+V lo sigue pegando
+        Toast("Copiado. Pégalo con Ctrl+V en Discord, WhatsApp o una carpeta");
+      } else {
+        Toast("No se pudo copiar el archivo al portapapeles", true);
+      }
     });
+  };
+  // Enlace de la nube desde el panel: lo sube si hace falta y copia el enlace.
+  menuActions_.shareLink = [this](const std::string& path) { Defer([this, path] { ShareLink(path); }); };
+  menuActions_.linkState = [this](const std::string& path) {
+    using Phase = CloudFileState::Phase;
+    const CloudFileState st = cloud_.State(path); // no firma nada: se puede pedir cada frame
+    PanelLinkState link;
+    link.configured = cloud_.Configured();
+    link.busy = st.phase == Phase::Queued || st.phase == Phase::Uploading;
+    link.progress = st.progress;
+    link.ready = st.phase == Phase::Done;
+    if (st.phase == Phase::Failed) link.error = st.error;
+    return link;
   };
   menuActions_.exportForDiscord = [this](const std::string& path) { Defer([this, path] { ExportForDiscord(path); }); };
   menuActions_.cancelExport = [this] {
@@ -295,9 +369,10 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   };
   appActions_.copyToClipboard = [this](const std::string& path) {
     Defer([this, path] {
-      if (CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, path))
+      if (CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, path)) {
+        KeepForPaste({path});
         Toast("Copiado. Pégalo con Ctrl+V en Discord, WhatsApp o una carpeta");
-      else
+      } else
         Toast("No se pudo copiar el archivo al portapapeles", true);
     });
   };
@@ -336,6 +411,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   appActions_.rename = [this](const std::string& path, const std::string& stem, std::string* newPath,
                               std::string* error) {
     if (!library_->Rename(path, stem, newPath, error)) return false;
+    cloud_.Renamed(path, *newPath);
     RescanLibrary();
     return true;
   };
@@ -344,9 +420,10 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
       std::string error;
       bool cancelled = false;
       bool bin = HasRecycleBin(path);
-      if (library_->Recycle(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, path, &error, &cancelled))
+      if (library_->Recycle(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, path, &error, &cancelled)) {
+        cloud_.Removed({path});
         Toast((bin ? "Movido a la papelera: " : "Borrado: ") + FileNameOf(path));
-      else if (!cancelled)
+      } else if (!cancelled)
         Toast(error, true);
       RescanLibrary();
     });
@@ -365,27 +442,108 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   };
   appActions_.copyManyToClipboard = [this](const std::vector<std::string>& paths) {
     Defer([this, paths] {
-      if (CopyFilesToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, paths))
+      if (CopyFilesToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, paths)) {
+        KeepForPaste(paths);
         Toast(CountText(paths.size(), "archivo copiado", "archivos copiados") +
                   (paths.size() > 10 ? ": pégalos con Ctrl+V en una carpeta (Discord acepta 10 por mensaje)"
                                      : ": pégalos con Ctrl+V en Discord, WhatsApp o una carpeta"),
               false, NoticeKind::Copied);
-      else
+      } else
         Toast("No se pudieron copiar los archivos al portapapeles", true);
     });
   };
   appActions_.toast = [this](const std::string& text, bool error) { Toast(text, error); };
+  appActions_.uploadToCloud = [this](const std::vector<std::string>& paths) {
+    Defer([this, paths] { UploadToCloud(paths); });
+  };
+  appActions_.shareLink = [this](const std::string& path) { Defer([this, path] { ShareLink(path); }); };
+  appActions_.cancelUpload = [this](const std::string& path) {
+    // En el modo cibercafé el barrido de la carpeta no la vuelve a poner en la cola.
+    if (config_.cloud.cyberMode) cyberCancelled_.insert(LowerText(path));
+    cloud_.Cancel(path);
+  };
+  appActions_.retryUpload = [this](const std::string& path) { cloud_.Retry(path); };
   SettingsActions& settings = appActions_.settings;
   settings.checkUpdates = [this] { updater_.Check(); };
   settings.installUpdate = [this] { updater_.Download(hwnd_); };
   settings.cancelUpdate = [this] { updater_.Cancel(); };
-  settings.quit = [this] { Defer([this] { Quit(); }); };
+  settings.quit = [this] { Defer([this] { QuitAsked(); }); };
   settings.openPath = appActions_.openPath;
   settings.suspendHotkeys = [this](bool suspend) { SuspendHotkeys(suspend); };
   settings.chooseFolder = [this] { Defer([this] { ChooseOutputFolder(); }); };
   settings.refreshStorage = appActions_.rescan;
   settings.playSound = [](const std::string& style) { PlayCue(Cue::Saved, style); };
   settings.previewNotice = [this] { Defer([this] { PreviewToast(); }); };
+  settings.saveCloudKeys = [this] {
+    Defer([this] {
+      SettingsModel& s = appModel_.settings;
+      // Guardar aplica también lo de la nube que se cambió en la página (no
+      // el resto de Ajustes) y prueba la conexión.
+      Config next = config_;
+      next.cloud = s.config.cloud;
+      if (!SameConfig(next, config_)) ApplyConfig(next, true);
+      s.base.cloud = config_.cloud;
+      std::string error;
+      if (!s.cloudKeyId.empty() || !s.cloudSecret.empty()) {
+        if (!cloud_.SetKeys({s.cloudKeyId, s.cloudSecret}, !config_.cloud.cyberMode, &error)) {
+          s.cloudMessage = error;
+          s.cloudMessageError = true;
+          return;
+        }
+        SecureZeroMemory(s.cloudSecret.data(), s.cloudSecret.size());
+        s.cloudSecret.clear();
+        s.cloudKeyId.clear();
+        s.cloudEditKeys = false;
+      }
+      s.cloudMessage.clear();
+      s.cloudMessageError = false;
+      cloud_.Test(config_.cloud, {});
+    });
+  };
+  settings.forgetCloudKeys = [this] {
+    cloud_.ForgetKeys();
+    appModel_.settings.cloudMessage = "Claves olvidadas: Spectre ya no puede subir nada hasta que pongas otras.";
+    appModel_.settings.cloudMessageError = false;
+  };
+  settings.testCloud = [this] {
+    SettingsModel& s = appModel_.settings;
+    cloud_.Test(s.config.cloud, {s.cloudKeyId, s.cloudSecret});
+  };
+  settings.copyCloudSettings = [this] {
+    Defer([this] {
+      SettingsModel& s = appModel_.settings;
+      if (config_.cloud.cyberMode) {
+        // En un PC compartido, el siguiente se llevaría tus claves con un clic.
+        s.cloudMessage = "En el modo cibercafé no se copia la configuración: cópiala desde tu PC.";
+        s.cloudMessageError = true;
+        return;
+      }
+      CloudKeys keys = cloud_.Keys();
+      if (keys.Empty() || !cloud_.Configured()) {
+        s.cloudMessage = "Primero guarda la nube y sus claves en este PC.";
+        s.cloudMessageError = true;
+        return;
+      }
+      std::string text = ExportCloudSettings(config_.cloud, keys);
+      const bool ok = CopyTextToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, text, true);
+      SecureZeroMemory(text.data(), text.size());
+      SecureZeroMemory(keys.secret.data(), keys.secret.size());
+      s.cloudMessage = ok ? "Copiado. Guárdalo donde solo lo veas tú (un mensaje a ti mismo, una nota del móvil): "
+                            "lleva tus claves. En el otro PC pulsa «Pegar»."
+                          : "No se pudo copiar al portapapeles.";
+      s.cloudMessageError = !ok;
+    });
+  };
+  settings.pasteCloudSettings = [this](bool cyber) { Defer([this, cyber] { PasteCloudSettings(cyber); }); };
+  settings.copyLink = [this](const std::string& path) { Defer([this, path] { CopyCloudLink(path); }); };
+  settings.pauseUploads = [this](bool paused) { cloud_.SetPaused(paused); };
+  settings.retryUploads = [this] { cloud_.Retry(); };
+  settings.clearCloudHistory = [this] { cloud_.ClearHistory(); };
+  settings.importShadowPlay = [this](bool move) { Defer([this, move] { ImportFromShadowPlay(move); }); };
+  settings.cancelImport = [this] {
+    if (importCancel_) importCancel_->store(true);
+  };
+  settings.chooseShadowPlayFolder = [this] { Defer([this] { ChooseShadowPlayFolder(); }); };
 
   if (!RegisterHotkeys()) Toast(hotkeyError_, true);
   SetTimer(hwnd_, kTimerGame, 2000, nullptr);
@@ -453,6 +611,11 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   CloseApp();
   menu_.Hide();
   toast_.Hide();
+  // La subida en curso sigue la próxima vez (cada parte ya enviada queda apuntada).
+  // Lo subido que tocaba borrar se borra ahora; lo que no se pueda, se enseña al final.
+  std::vector<std::string> undeleted = cloud_.Stop();
+  if (config_.cloud.cyberMode && ForgetCyberCloud(config_.cloud)) SaveConfig(config_);
+  if (importCancel_) importCancel_->store(true);
   exporter_.Stop(); // una exportación a medias se cancela y se borra
   editWorker_.Stop(); // y lo mismo una edición
   discord_.Stop();    // Discord quita el estado al cerrarse la tubería
@@ -464,6 +627,20 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   UnregisterHotkeys();
   RemoveTrayIcon();
   if (hwnd_) DestroyWindow(hwnd_);
+  // Ya sin nada de Spectre abierto (la vista previa, el editor): otro intento.
+  undeleted.erase(std::remove_if(undeleted.begin(), undeleted.end(),
+                                 [](const std::string& p) {
+                                   return DeleteFileW(Widen(p).c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+                                 }),
+                  undeleted.end());
+  if (!undeleted.empty() && config_.cloud.cyberMode) {
+    // En el cibercafé no se puede dejar nada sin decirlo: el siguiente lo vería.
+    std::wstring text = L"Ya están en tu nube, pero no se pudieron borrar de este PC porque otro programa los tiene "
+                        L"abiertos. Ciérralo y bórralos a mano:\n";
+    for (size_t i = 0; i < undeleted.size() && i < 8; ++i) text += L"\n" + Widen(undeleted[i]);
+    if (undeleted.size() > 8) text += L"\n... y " + std::to_wstring(undeleted.size() - 8) + L" más";
+    MessageBoxW(nullptr, text.c_str(), L"Spectre", MB_OK | MB_ICONWARNING);
+  }
   // Spectre ya soltó la captura y terminó de escribir: el instalador puede
   // reemplazar los archivos y vuelve a abrir la app al acabar.
   // Con "Salir de Spectre" se instala igualmente, pero sin volver a abrir la app.
@@ -558,6 +735,7 @@ void App::OnRecordingStopped(const std::string& path, int64_t stoppedAt) {
   }
   recordMarkers_.clear();
   recordStartQpc_ = 0;
+  if (!path.empty()) AutoUpload(path, MediaKind::Recording);
   if (appWindow_.Visible()) RescanLibrary();
   if (menu_.Visible()) RefreshPanelClips();
   EnforceStorageLimit();
@@ -1100,6 +1278,7 @@ void App::EndExportBatch() {
   const size_t done = outputs.size();
   // Todas las copias al portapapeles: se pegan juntas en Discord.
   const bool copied = done > 0 && CopyFilesToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, outputs);
+  if (copied) KeepForPaste(outputs);
   if (done > 0) {
     if (menu_.Visible()) RefreshPanelClips();
     if (appWindow_.Visible()) RescanLibrary();
@@ -1160,6 +1339,7 @@ void App::RecycleMany(std::vector<std::string> paths) {
   } else if (!cancelled) {
     Toast(error, true);
   }
+  if (!gone.empty()) cloud_.Removed(gone);
   RescanLibrary();
 }
 
@@ -1195,6 +1375,7 @@ void App::FinishExport() {
   Log("Exportado para Discord: %s, %s (%s)", r.output.c_str(), FormatBytes(r.bytes).c_str(),
       r.alreadyFits ? "ya cabía, sin recodificar" : r.encoder.c_str());
   const bool copied = CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, r.output);
+  if (copied) KeepForPaste({r.output});
   const std::string size = FormatBytes(r.bytes);
   if (r.alreadyFits) {
     Toast(copied ? "Ya cabe en Discord (" + size + "): copiado, pégalo con Ctrl+V"
@@ -1373,7 +1554,32 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   if (pipeline_.Running()) pipeline_.SetCameraEditable(config_.cameraEditable);
   UpdateVoice();
 
-  const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
+  if (old.cloud.cyberMode != config_.cloud.cyberMode) {
+    Log("Nube: modo cibercafé %s", config_.cloud.cyberMode ? "activado" : "desactivado");
+    if (config_.cloud.cyberMode) {
+      // Las claves salen del disco: quedan en memoria hasta salir.
+      cloud_.PersistKeys(false);
+      FILETIME now;
+      GetSystemTimeAsFileTime(&now);
+      cyberSince_ = (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    } else {
+      // Quien lo apaga puede ser el siguiente cliente: nada de la sesión se
+      // guarda. En tu PC basta con volver a pegar tu configuración.
+      cloud_.EndCyberSession();
+      const CloudConfig& o = old.cloud;
+      CloudConfig& c = config_.cloud;
+      if (c.endpoint == o.endpoint && c.bucket == o.bucket && c.publicUrl == o.publicUrl && ForgetCyberCloud(c)) {
+        SaveConfig(config_);
+        SyncModels();
+      }
+      cyberSince_ = 0;
+      cyberCancelled_.clear();
+    }
+  }
+  if (old.cloud != config_.cloud) cloud_.Configure(config_.cloud);
+  const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame ||
+                             old.shadowPlay.library != config_.shadowPlay.library ||
+                             old.shadowPlay.folder != config_.shadowPlay.folder;
   if (folderChanged && appWindow_.Visible()) RescanLibrary();
   if (old.storageLimitGB != config_.storageLimitGB || old.deleteAfterDays != config_.deleteAfterDays ||
       old.outputDir != config_.outputDir)
@@ -1550,6 +1756,8 @@ void App::SuspendHotkeys(bool suspend) {
 }
 
 void App::EnforceStorageLimit() {
+  // Se llama cada vez que hay algo nuevo en la carpeta.
+  CyberSweep();
   if (config_.storageLimitGB <= 0) limitWarned_.clear();
   if (config_.storageLimitGB <= 0 && config_.deleteAfterDays <= 0) return;
   // Una pasada cada vez: el hilo escanea la carpeta y borra lo más antiguo.
@@ -1558,14 +1766,15 @@ void App::EnforceStorageLimit() {
   std::string folder = ResolveOutputDir(config_);
   uint64_t limit = uint64_t(std::max(config_.storageLimitGB, 0)) << 30;
   int days = config_.deleteAfterDays;
-  // La grabación en curso cuenta, pero no se toca.
-  std::string recording = pipeline_.Recording() ? pipeline_.Stats().recordPath : std::string();
+  // La grabación en curso y lo que espera para subirse a la nube cuentan, pero no se tocan.
+  std::vector<std::string> keep = cloud_.PendingPaths();
+  if (pipeline_.Recording()) keep.push_back(pipeline_.Stats().recordPath);
   std::shared_ptr<Library> library = library_;
   HWND hwnd = hwnd_;
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que acabe
-  std::thread([folder, limit, days, recording, library, hwnd, pending] {
+  std::thread([folder, limit, days, keep, library, hwnd, pending] {
     InstallThreadCrashHandler();
-    auto result = std::make_unique<LimitResult>(library->EnforceLimit(folder, limit, recording, days));
+    auto result = std::make_unique<LimitResult>(library->EnforceLimit(folder, limit, keep, days));
     if (result->deleted > 0)
       Log("Límite de espacio: %d archivos borrados (%d por antigüedad), %s liberados", result->deleted,
           result->agedDeleted, FormatBytes(result->freedBytes).c_str());
@@ -2139,13 +2348,17 @@ void App::CloseApp() {
   appModel_.items.clear();
   appModel_.items.shrink_to_fit();
   appModel_.itemsLoaded = false;
+  appModel_.cloud.clear();
+  cloudVersion_ = 0;
   appModel_.settings = SettingsModel{};
   appModel_.page = AppPage::Home;
 }
 
 void App::AppCloseRequested() {
-  if (!config_.closeToTray) {
-    Quit();
+  // En el modo cibercafé cerrar es salir: Spectre no se queda en la bandeja de
+  // un PC compartido con tus claves en memoria.
+  if (!config_.closeToTray || config_.cloud.cyberMode) {
+    QuitAsked();
     return;
   }
   const bool discarded = appModel_.settings.dirty;
@@ -2234,6 +2447,13 @@ void App::RefreshAppModel() {
   s.hotkeyError = hotkeyError_;
   s.voice = voice_.Status();
   s.voiceWaiting = config_.voice.enabled && !voice_.Running();
+  if (const uint64_t v = cloud_.Version(); v != cloudVersion_) {
+    cloudVersion_ = v;
+    appModel_.cloud = cloud_.Snapshot();
+    s.cloud = cloud_.Status();
+  }
+  s.shadowPlayTotal = importing_ ? importTotal_->load() : 0;
+  s.shadowPlayDone = importDone_->load();
   ULONGLONG now = GetTickCount64();
   if (appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Performance &&
       now - lastAppUsage_ >= 1000) {
@@ -2264,6 +2484,25 @@ void App::RescanLibrary() {
                 items.end());
   }
   StorageInfo storage = SummarizeStorage(items, dir);
+  // Lo de ShadowPlay desde sus carpetas, sin copiarlo. Lo que ya se importó a
+  // la de Spectre (mismo nombre y tamaño) no sale dos veces.
+  storage.shadowPlayFolders = ShadowPlayFolders(config_.shadowPlay.folder);
+  std::vector<MediaItem> nvidia = library_->ScanShadowPlay(storage.shadowPlayFolders, dir);
+  if (!nvidia.empty()) {
+    std::unordered_set<std::string> imported;
+    for (const auto& item : items)
+      if (item.nvidia) imported.insert(item.name + "|" + std::to_string(item.size));
+    nvidia.erase(std::remove_if(nvidia.begin(), nvidia.end(),
+                                [&](const MediaItem& i) { return imported.count(i.name + "|" + std::to_string(i.size)); }),
+                 nvidia.end());
+    for (const auto& item : nvidia) storage.shadowPlayBytes += item.size;
+    storage.shadowPlayFiles = nvidia.size();
+    if (config_.shadowPlay.library) {
+      items.insert(items.end(), std::make_move_iterator(nvidia.begin()), std::make_move_iterator(nvidia.end()));
+      std::stable_sort(items.begin(), items.end(),
+                       [](const MediaItem& a, const MediaItem& b) { return a.modified > b.modified; });
+    }
+  }
   appModel_.items = std::move(items);
   appModel_.itemsLoaded = true;
   appModel_.outputDir = dir;
@@ -2306,30 +2545,293 @@ void App::LoadDevices() {
 }
 
 void App::ChooseOutputFolder() {
-  using Microsoft::WRL::ComPtr;
-  ComPtr<IFileOpenDialog> dialog;
-  if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
-    Toast("No se pudo abrir el selector de carpetas", true);
-    return;
-  }
-  DWORD options = 0;
-  dialog->GetOptions(&options);
-  dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-  dialog->SetTitle(L"Carpeta de los clips, grabaciones y capturas");
   SettingsModel& s = appModel_.settings;
   std::wstring current = Widen(s.config.outputDir.empty() ? ResolveOutputDir(config_) : s.config.outputDir);
-  ComPtr<IShellItem> start;
-  if (SUCCEEDED(SHCreateItemFromParsingName(current.c_str(), nullptr, IID_PPV_ARGS(&start))))
-    dialog->SetFolder(start.Get());
-  if (dialog->Show(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_) != S_OK) return; // cancelado
-  ComPtr<IShellItem> item;
-  PWSTR path = nullptr;
-  if (FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) return;
-  s.config.outputDir = Narrow(path);
-  CoTaskMemFree(path);
+  bool failed = false;
+  std::string path = PickFolder(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_,
+                                L"Carpeta de los clips, grabaciones y capturas", current, &failed);
+  if (failed) Toast("No se pudo abrir el selector de carpetas", true);
+  if (path.empty()) return;
+  s.config.outputDir = path;
   appModel_.page = AppPage::Settings;
   appModel_.settingsPage = SettingsPage::Storage;
   appWindow_.Invalidate();
+}
+
+void App::ChooseShadowPlayFolder() {
+  SettingsModel& s = appModel_.settings;
+  std::wstring current = Widen(s.config.shadowPlay.folder);
+  if (current.empty() && !s.storage.shadowPlayFolders.empty()) current = Widen(s.storage.shadowPlayFolders.front());
+  bool failed = false;
+  std::string path = PickFolder(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_,
+                                L"Carpeta donde guarda los vídeos NVIDIA ShadowPlay", current, &failed);
+  if (failed) Toast("No se pudo abrir el selector de carpetas", true);
+  if (path.empty()) return;
+  s.config.shadowPlay.folder = path;
+  appModel_.page = AppPage::Settings;
+  appModel_.settingsPage = SettingsPage::Storage;
+  appWindow_.Invalidate();
+}
+
+// ------------------------------------------------------------------- nube
+
+void App::QuitAsked() {
+  // Sin nube configurada (fuera del modo cibercafé) la cola espera igual: no se pregunta cada vez.
+  if (cloud_.Busy() && (cloud_.Configured() || config_.cloud.cyberMode)) {
+    const CloudStatus st = cloud_.Status();
+    const int left = std::max(1, st.queued + (st.current.empty() ? 0 : 1));
+    std::wstring text = left == 1 ? std::wstring(L"Queda 1 archivo por subir a la nube.\n\n")
+                                  : L"Quedan " + std::to_wstring(left) + L" archivos por subir a la nube.\n\n";
+    text += config_.cloud.cyberMode
+                ? L"Estás en el modo cibercafé: si sales, lo que no se haya subido se queda en este PC, y para "
+                  L"subirlo tendrás que volver a pegar tu configuración y pulsar «Reintentar».\n\n¿Salir "
+                  L"igualmente?"
+                : L"Si sales, seguirán desde donde iban la próxima vez que abras Spectre.\n\n¿Salir igualmente?";
+    if (MessageBoxW(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, text.c_str(), L"Spectre",
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+      return;
+  }
+  Quit();
+}
+
+void App::ShareLink(const std::string& path) {
+  if (!cloud_.Configured()) {
+    Toast("Para compartir con un enlace, configura tu nube en Ajustes > Nube (Cloudflare R2 o Backblaze B2 son "
+          "gratis hasta 10 GB)",
+          true);
+    return;
+  }
+  // Si ya está subido llega enseguida el aviso con el enlace (WM_SPECTRE_CLOUD).
+  const bool uploaded = cloud_.State(path).phase == CloudFileState::Phase::Done;
+  cloud_.Enqueue(path, true, true, ManualRemoval(path), false);
+  if (!uploaded)
+    Notify({NoticeKind::Working, "Subiendo a la nube", FileNameOf(path) + ". El enlace se copia al terminar"});
+}
+
+void App::UploadToCloud(const std::vector<std::string>& paths) {
+  if (paths.empty()) return;
+  if (paths.size() == 1) {
+    ShareLink(paths[0]);
+    return;
+  }
+  if (!cloud_.Configured()) {
+    Toast("Para subir a la nube, configúrala en Ajustes > Nube", true);
+    return;
+  }
+  for (const auto& path : paths) cloud_.Enqueue(path, false, false, ManualRemoval(path), false);
+  Notify({NoticeKind::Working, "Subiendo a la nube",
+          CountText(paths.size(), "archivo en la cola", "archivos en la cola") +
+              ". Los enlaces se copian desde la biblioteca o Ajustes > Nube"});
+}
+
+void App::AutoUpload(const std::string& path, MediaKind kind, bool forPaste) {
+  const CloudConfig& c = config_.cloud;
+  if (!c.cyberMode && !c.autoUpload) return;
+  const bool wanted = c.cyberMode || (kind == MediaKind::Recording    ? c.uploadRecordings
+                                      : kind == MediaKind::Screenshot ? c.uploadScreenshots
+                                                                      : c.uploadClips);
+  if (!wanted) return;
+  // Sin claves todavía (cibercafé recién abierto) también se pone en la cola:
+  // sube en cuanto se peguen. En el cibercafé, lo copiado para pegarlo no se
+  // lleva el enlace al portapapeles ni se borra hasta salir: Ctrl+V debe pegar el clip.
+  const bool paste = c.cyberMode && forPaste;
+  const CloudDelete removal = paste                              ? CloudDelete::AtExit
+                              : c.cyberMode || c.deleteAfterUpload ? CloudDelete::AfterUpload
+                                                                   : CloudDelete::Keep;
+  cloud_.Enqueue(path, false, c.copyLink && !paste, removal, true);
+}
+
+bool App::CyberOwned(const std::string& path) const {
+  if (!config_.cloud.cyberMode || !cyberSince_) return false;
+  WIN32_FILE_ATTRIBUTE_DATA fa{};
+  if (!GetFileAttributesExW(Widen(path).c_str(), GetFileExInfoStandard, &fa)) return false;
+  const uint64_t written = (uint64_t(fa.ftLastWriteTime.dwHighDateTime) << 32) | fa.ftLastWriteTime.dwLowDateTime;
+  return written >= cyberSince_;
+}
+
+CloudDelete App::ManualRemoval(const std::string& path) const {
+  // Compartir en el cibercafé borra lo tuyo al subirse; lo que ya estaba en el
+  // PC antes de activarlo no es tuyo y no se toca.
+  if (config_.cloud.cyberMode) return CyberOwned(path) ? CloudDelete::AfterUpload : CloudDelete::Keep;
+  return CloudDelete::Keep;
+}
+
+void App::KeepForPaste(const std::vector<std::string>& paths) {
+  if (!config_.cloud.cyberMode) return;
+  for (const auto& path : paths)
+    if (CyberOwned(path) && cloud_.State(path).phase != CloudFileState::Phase::Done)
+      cloud_.Enqueue(path, false, false, CloudDelete::AtExit, true);
+}
+
+void App::CyberSweep() {
+  if (!config_.cloud.cyberMode || !cyberSince_) return;
+  // La carpeta y, con «Una carpeta por juego», un nivel de subcarpetas. En el
+  // cibercafé tiene poco: lo subido se borra.
+  std::wstring root = Widen(ResolveOutputDir(config_));
+  while (!root.empty() && (root.back() == L'\\' || root.back() == L'/')) root.pop_back();
+  // Lo que aún se va a usar: la grabación en curso (sube al pararla), la copia
+  // intermedia de «Editar» para Discord y los vídeos para Discord de varios,
+  // que se copian juntos al portapapeles al acabar.
+  std::vector<std::wstring> busy;
+  if (pipeline_.Recording()) busy.push_back(Widen(pipeline_.Stats().recordPath));
+  if (!discordAfterEdit_.empty()) busy.push_back(Widen(discordAfterEdit_));
+  for (const auto& p : exportBatchOutputs_) busy.push_back(Widen(p));
+  std::vector<std::string> found;
+  std::vector<std::wstring> folders{root};
+  for (size_t i = 0; i < folders.size(); ++i) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW((folders[i] + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
+                                FIND_FIRST_EX_LARGE_FETCH);
+    if (h == INVALID_HANDLE_VALUE) continue;
+    do {
+      const std::wstring name = fd.cFileName;
+      if (name == L"." || name == L"..") continue;
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        // Como la biblioteca: sin carpetas ocultas ni de sistema (ni enlaces a otra parte).
+        if (i == 0 && !(fd.dwFileAttributes &
+                        (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_REPARSE_POINT)))
+          folders.push_back(root + L"\\" + name);
+        continue;
+      }
+      const uint64_t written = (uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime;
+      if (written < cyberSince_) continue;
+      std::wstring ext = std::filesystem::path(name).extension().wstring();
+      CharLowerBuffW(ext.data(), DWORD(ext.size()));
+      static const wchar_t* kMedia[] = {L".mp4", L".mkv", L".mov", L".m4a", L".png", L".jpg", L".jpeg", L".gif"};
+      if (std::none_of(std::begin(kMedia), std::end(kMedia), [&](const wchar_t* m) { return ext == m; })) continue;
+      const std::wstring path = folders[i] + L"\\" + name;
+      const auto same = [&](const std::wstring& b) { return _wcsicmp(path.c_str(), b.c_str()) == 0; };
+      if (std::none_of(busy.begin(), busy.end(), same)) found.push_back(Narrow(path));
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  for (const auto& path : found) {
+    // Lo que no está en la cola (lo que se está escribiendo espera solo a que
+    // lo suelten), salvo lo que se canceló a mano.
+    if (cloud_.State(path).phase == CloudFileState::Phase::None && !cyberCancelled_.count(LowerText(path)))
+      cloud_.Enqueue(path, false, config_.cloud.copyLink, CloudDelete::AfterUpload, true);
+  }
+}
+
+void App::OnCloudChanged() {
+  bool removed = false;
+  const HWND owner = appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_;
+  for (const CloudEvent& ev : cloud_.TakeEvents()) {
+    if (ev.deleted) {
+      library_->Forget({ev.path});
+      removed = true;
+    }
+    if (!ev.ok) {
+      Toast("No se pudo subir " + ev.name + ": " + ev.error, true);
+      continue;
+    }
+    std::string detail = ev.name;
+    bool copied = false;
+    if (ev.copyLink) {
+      copied = !ev.link.empty() && CopyTextToClipboard(owner, ev.link);
+      detail += copied ? ". Enlace copiado: pégalo con Ctrl+V" : ". No se pudo copiar el enlace";
+    }
+    if (ev.deleted) detail += ". Ya no está en este PC";
+    Notify({copied ? NoticeKind::Copied : NoticeKind::Saved, copied ? "Enlace listo" : "Subido a la nube", detail,
+            ev.copyLink && !copied});
+  }
+  if (removed) {
+    if (appWindow_.Visible()) RescanLibrary();
+    if (menu_.Visible()) RefreshPanelClips();
+  }
+  if (menu_.Visible()) RefreshMenuModel();
+  if (appWindow_.Visible()) appWindow_.Invalidate();
+}
+
+void App::CopyCloudLink(const std::string& path) {
+  const std::string link = cloud_.Link(path);
+  if (link.empty()) {
+    Toast("No se pudo crear el enlace: faltan las claves de la nube (Ajustes > Nube)", true);
+    return;
+  }
+  if (CopyTextToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, link))
+    Notify({NoticeKind::Copied, "Enlace copiado", FileNameOf(path) + ". Pégalo con Ctrl+V"});
+  else
+    Toast("No se pudo copiar el enlace al portapapeles", true);
+}
+
+void App::PasteCloudSettings(bool cyber) {
+  SettingsModel& s = appModel_.settings;
+  const HWND owner = appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_;
+  std::string text = ClipboardText(owner);
+  CloudConfig cloud = config_.cloud;
+  CloudKeys keys;
+  const bool ok = ImportCloudSettings(text, &cloud, &keys);
+  SecureZeroMemory(text.data(), text.size());
+  if (!ok) {
+    s.cloudMessage = "El portapapeles no tiene una configuración de Spectre. Cópiala en tu PC con «Copiar "
+                     "configuración» (empieza por spectre-nube:) y pégala aquí.";
+    s.cloudMessageError = true;
+    return;
+  }
+  if (cyber) cloud.cyberMode = true;
+  // Otro cliente pega su nube con la sesión del anterior abierta: esa sesión
+  // se cierra antes (sus subidas, sus copias para pegar, lo que no se subió).
+  if (config_.cloud.cyberMode && cloud_.Status().hasKeys &&
+      (cloud.endpoint != config_.cloud.endpoint || CloudBucket(cloud) != CloudBucket(config_.cloud))) {
+    cloud_.EndCyberSession();
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    cyberSince_ = (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    cyberCancelled_.clear();
+    Log("Nube: otra configuración en el modo cibercafé, la sesión anterior se cierra");
+  }
+  Config next = config_;
+  next.cloud = cloud;
+  ApplyConfig(next, true); // primero el modo: en un cibercafé las claves no tocan el disco
+  std::string error;
+  cloud_.SetKeys(keys, !config_.cloud.cyberMode, &error);
+  SecureZeroMemory(keys.secret.data(), keys.secret.size());
+  // El texto lleva las claves: en un PC compartido no se queda en el portapapeles.
+  if (config_.cloud.cyberMode && OpenClipboard(owner)) {
+    EmptyClipboard();
+    CloseClipboard();
+  }
+  s.config.cloud = s.base.cloud = config_.cloud;
+  s.cloudEditKeys = false;
+  s.cloudMessage = !error.empty()                ? error
+                   : config_.cloud.cyberMode     ? "Listo, en modo cibercafé: lo que guardes se sube solo y se borra "
+                                                   "de este PC. Cierra Spectre antes de irte: mientras siga abierto, "
+                                                   "quien use el PC después puede subir a tu nube."
+                                                 : "Listo: tu nube está configurada en este PC.";
+  s.cloudMessageError = !error.empty();
+  cloud_.Test(config_.cloud, {});
+}
+
+void App::ImportFromShadowPlay(bool move) {
+  if (importing_) return;
+  const std::string out = ResolveOutputDir(config_);
+  std::vector<MediaItem> items = library_->ScanShadowPlay(ShadowPlayFolders(config_.shadowPlay.folder), out);
+  appModel_.settings.shadowPlayConfirm = -1;
+  if (items.empty()) {
+    Toast("No hay clips de ShadowPlay que importar");
+    return;
+  }
+  importing_ = true;
+  importCancel_ = std::make_shared<std::atomic<bool>>(false);
+  importDone_->store(0);
+  importTotal_->store(int(items.size()));
+  Notify({NoticeKind::Working, move ? "Moviendo de ShadowPlay" : "Copiando de ShadowPlay",
+          CountText(items.size(), "archivo", "archivos") + " a la carpeta de Spectre"});
+  auto pending = std::make_shared<PendingWrite>(); // al salir se espera a la copia en curso
+  std::thread([hwnd = hwnd_, library = library_, items = std::move(items), out, perGame = config_.folderPerGame, move,
+               cancel = importCancel_, done = importDone_, total = importTotal_, pending] {
+    InstallThreadCrashHandler();
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    BackgroundMode background; // copiar GB no debe quitarle disco al juego
+    auto r = std::make_unique<ShadowPlayImport>(
+        ImportShadowPlay(*library, items, out, perGame, move, *cancel, [&](int d, int t) {
+          done->store(d);
+          total->store(t);
+          PostMessageW(hwnd, WM_SPECTRE_IMPORT, 1, 0);
+        }));
+    if (PostMessageW(hwnd, WM_SPECTRE_IMPORT, 0, reinterpret_cast<LPARAM>(r.get()))) r.release();
+  }).detach();
 }
 
 // ---------------------------------------------------------------- bandeja
@@ -2422,9 +2924,9 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   }
   case WM_TIMER:
-    // Un juego que se abre o una grabación que empieza frenan la edición o la
-    // exportación que ya va.
-    UpdateLiveLoad();
+    // Un juego que se abre o una grabación que empieza frenan la edición, la
+    // exportación y las subidas a la nube que ya van.
+    cloud_.SetGameActive(UpdateLiveLoad());
     // La grabación pudo acabar sola (disco lento o con errores): ni los ajustes ni la actualización pendientes se
     // quedan colgados.
     if (wp == kTimerHealth && restartPending_ && !pipeline_.Recording())
@@ -2508,6 +3010,15 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                    StartsWith(message, "Dividido en dos"))) {
       if (config_.soundOnSave && (StartsWith(message, "Clip") || StartsWith(message, "Captura")))
         PlayCue(Cue::Saved, config_.saveSound);
+      // Recién guardado: a la nube si toca (subida automática o modo cibercafé).
+      for (const auto& [prefix, kind] : {std::pair<const char*, MediaKind>{"Clip guardado: ", MediaKind::Clip},
+                                         std::pair<const char*, MediaKind>{"Captura guardada: ", MediaKind::Screenshot}}) {
+        if (!StartsWith(message, prefix)) continue;
+        const std::string name = message.substr(strlen(prefix));
+        auto it = std::find_if(recentNames_.rbegin(), recentNames_.rend(),
+                               [&](const std::string& p) { return FileNameOf(p) == name; });
+        if (it != recentNames_.rend()) AutoUpload(*it, kind, kind == MediaKind::Clip && config_.copyClipOnSave);
+      }
       if (StartsWith(message, "Clip guardado: ")) {
         UpdatePresence(1); // el estado en Discord los cuenta
         const std::string name = message.substr(strlen("Clip guardado: "));
@@ -2563,6 +3074,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     const std::string note = LowDiskNote();
     if (r->discord) {
       const bool copied = CopyFileToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, r->output);
+      if (copied) KeepForPaste({r->output});
       Toast(copied ? "Imagen para Discord copiada: pégala con Ctrl+V" + note
                    : "Imagen guardada: " + FileNameOf(r->output) + ". No se pudo copiar al portapapeles",
             !copied || !note.empty());
@@ -2572,6 +3084,28 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (menu_.Visible()) RefreshPanelClips();
     if (appWindow_.Visible()) RescanLibrary();
     EnforceStorageLimit(); // algo nuevo en la carpeta
+    return 0;
+  }
+  case WM_SPECTRE_CLOUD:
+    OnCloudChanged();
+    return 0;
+  case WM_SPECTRE_IMPORT: {
+    if (wp == 1) { // progreso
+      if (appWindow_.Visible()) appWindow_.Invalidate();
+      return 0;
+    }
+    std::unique_ptr<ShadowPlayImport> r(reinterpret_cast<ShadowPlayImport*>(lp));
+    importing_ = false;
+    importTotal_->store(0);
+    if (r) {
+      std::string text = r->copied > 0 ? "ShadowPlay: " + CountText(size_t(r->copied), "archivo importado", "archivos importados") +
+                                             " (" + FormatBytes(r->bytes) + ")"
+                                       : std::string("ShadowPlay: nada nuevo que importar");
+      if (r->skipped > 0) text += ". " + CountText(size_t(r->skipped), "ya estaba", "ya estaban");
+      if (r->failed > 0) text += ". " + r->error;
+      Toast(text, r->failed > 0, NoticeKind::Saved);
+    }
+    if (appWindow_.Visible()) RescanLibrary();
     return 0;
   }
   case WM_SPECTRE_LIBRARY: {
@@ -2649,7 +3183,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kCmdScreenshot: CaptureScreenshot(); break;
     case kCmdReplay: ToggleReplay(); break;
     case kCmdFolder: OpenPath(ResolveOutputDir(config_)); break;
-    case kCmdQuit: Quit(); break;
+    case kCmdQuit: QuitAsked(); break;
     default: break;
     }
     return 0;
@@ -2665,6 +3199,8 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       editWorker_.Stop();
       pipeline_.Stop();
       WaitForPendingWrites(3000);
+      // Windows puede cerrar el proceso al volver de aquí: la cola y los borrados, ya.
+      cloud_.Stop();
       Quit();
     }
     return 0;

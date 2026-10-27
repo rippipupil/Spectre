@@ -19,6 +19,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(VoiceConfig, enabled, wakeWord, 
                                                 sound, saveClip, shortClip, startRecording, stopRecording, screenshot,
                                                 marker)
 
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(CloudConfig, provider, endpoint, region, bucket, publicUrl, linkDays,
+                                                autoUpload, uploadClips, uploadRecordings, uploadScreenshots, copyLink,
+                                                deleteAfterUpload, gameLimitKBps, cyberMode)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ShadowPlayConfig, library, folder)
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSeconds, onlyInGames, folderPerGame,
                                                 shortClipSeconds, recordLimitMinutes,
                                                 captureMode, monitorIndex, captureApi, captureCursor, fps,
@@ -31,7 +37,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 notifyGame, notifyUpdates, soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
                                                 theme, themeStyle, themeMotion, themeBackdrop, panelLayout, panelLateralX, panelCompactX,
-                                                panelCompactY, hotkeys, discordPresence, voice)
+                                                panelCompactY, hotkeys, discordPresence, voice, cloud, shadowPlay)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 
@@ -61,6 +67,10 @@ static void Sanitize(Config& c) {
     *f = !(*f >= 0.0f) ? 0.0f : std::min(*f, 1.0f);
   if (c.screenshotFormat != "png" && c.screenshotFormat != "jpg") c.screenshotFormat = "png";
   c.storageLimitGB = std::clamp(c.storageLimitGB, 0, 100000);
+  if (c.cloud.provider != "r2" && c.cloud.provider != "b2" && c.cloud.provider != "s3") c.cloud.provider = "r2";
+  c.cloud.linkDays = std::clamp(c.cloud.linkDays, 1, 7);
+  if (c.cloud.gameLimitKBps < -1) c.cloud.gameLimitKBps = -1;
+  c.cloud.gameLimitKBps = std::min(c.cloud.gameLimitKBps, 1 << 20);
   if (c.toastPosition != "top-right" && c.toastPosition != "top-left" && c.toastPosition != "bottom-right" &&
       c.toastPosition != "bottom-left")
     c.toastPosition = "top-right";

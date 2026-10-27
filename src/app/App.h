@@ -1,10 +1,12 @@
 #pragma once
 
+#include "app/Cloud.h"
 #include "app/Config.h"
 #include "app/DiscordPresence.h"
 #include "app/Export.h"
 #include "app/Fullscreen.h"
 #include "app/Library.h"
+#include "app/ShadowPlay.h"
 #include "app/System.h"
 #include "app/Updater.h"
 #include "app/VideoEdit.h"
@@ -26,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -95,6 +98,35 @@ private:
   void Quit();
   // Hay una actualización descargada esperando a que acabe la grabación.
   void InstallPendingUpdate();
+  // «Salir de Spectre» con subidas a la nube a medias: se pregunta antes.
+  void QuitAsked();
+
+  // Nube (app/Cloud.h). Compartir: si ya está subido copia el enlace; si no,
+  // lo sube el primero de la cola y lo copia al acabar. Sin nube configurada
+  // solo avisa (nunca abre la ventana: puede llamarse desde el panel).
+  void ShareLink(const std::string& path);
+  CloudFileState CloudState(const std::string& path) const { return cloud_.State(path); }
+  bool CloudConfigured() const { return cloud_.Configured(); }
+  void UploadToCloud(const std::vector<std::string>& paths);
+  // Algo nuevo guardado: con la subida automática o el modo cibercafé, a la cola.
+  // forPaste: además se copió al portapapeles (en el cibercafé se borra al salir, no al subirse).
+  void AutoUpload(const std::string& path, MediaKind kind, bool forPaste = false);
+  // Modo cibercafé: lo nuevo de la carpeta que aún no va a la nube (recortes,
+  // uniones, lo del editor, copias para Discord...) se pone en la cola.
+  void CyberSweep();
+  // Modo cibercafé: se copió al portapapeles para pegarlo; se sube y se borra al salir.
+  void KeepForPaste(const std::vector<std::string>& paths);
+  // Modo cibercafé: guardado después de activarlo (lo de antes no es de este cliente).
+  bool CyberOwned(const std::string& path) const;
+  // Qué hacer con el archivo del PC al subirlo a mano.
+  CloudDelete ManualRemoval(const std::string& path) const;
+  // WM_SPECTRE_CLOUD: avisos de lo que terminó y estado para la ventana.
+  void OnCloudChanged();
+  void CopyCloudLink(const std::string& path);
+  void PasteCloudSettings(bool cyber);
+  // Ajustes > Almacenamiento > ShadowPlay: copia o mueve sus clips a la carpeta de Spectre.
+  void ImportFromShadowPlay(bool move);
+  void ChooseShadowPlayFolder();
 
   // Estado
   bool WantPipeline() const;
@@ -304,6 +336,16 @@ private:
   int64_t presenceSince_ = 0;       // segundos UNIX: desde cuándo se juega
   bool presenceRecording_ = false;
   int64_t presenceRecordSince_ = 0; // segundos UNIX: desde cuándo se graba
+
+  // Nube y ShadowPlay
+  CloudUploader cloud_;
+  uint64_t cloudVersion_ = 0; // la de appModel_.cloud
+  uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
+  std::unordered_set<std::string> cyberCancelled_; // en minúsculas: canceladas a mano en esta sesión
+  std::shared_ptr<std::atomic<bool>> importCancel_;
+  std::shared_ptr<std::atomic<int>> importDone_ = std::make_shared<std::atomic<int>>(0);
+  std::shared_ptr<std::atomic<int>> importTotal_ = std::make_shared<std::atomic<int>>(0);
+  bool importing_ = false;
 };
 
 } // namespace spectre

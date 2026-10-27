@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 #include <utility>
 
 namespace spectre {
@@ -77,6 +78,63 @@ void FillDates(MediaItem& item) {
 
 std::filesystem::path LibraryPath() { return AppDataDir() / L"library.json"; }
 
+bool DigitsAt(const std::string& s, size_t p, size_t n) {
+  if (p + n > s.size()) return false;
+  for (size_t i = 0; i < n; ++i)
+    if (!isdigit((unsigned char)s[p + i])) return false;
+  return true;
+}
+
+// Fecha de ShadowPlay que acaba en `end`: "2026.10.16" (o "10.16.2026" en
+// las versiones antiguas de GeForce Experience). Devuelve dónde empieza.
+size_t ShadowPlayDateBefore(const std::string& s, size_t end) {
+  if (end < 10) return std::string::npos;
+  size_t p = end - 10;
+  if (DigitsAt(s, p, 4) && s[p + 4] == '.' && DigitsAt(s, p + 5, 2) && s[p + 7] == '.' && DigitsAt(s, p + 8, 2))
+    return p;
+  if (DigitsAt(s, p, 2) && s[p + 2] == '.' && DigitsAt(s, p + 3, 2) && s[p + 5] == '.' && DigitsAt(s, p + 6, 4))
+    return p;
+  return std::string::npos;
+}
+
+// Hora de ShadowPlay desde p hasta el final: "05.30.12" con centésimas o sin ellas.
+bool ShadowPlayTimeAt(const std::string& s, size_t p) {
+  if (!DigitsAt(s, p, 2) || p + 8 > s.size() || s[p + 2] != '.' || !DigitsAt(s, p + 3, 2) || s[p + 5] != '.' ||
+      !DigitsAt(s, p + 6, 2))
+    return false;
+  p += 8;
+  if (p == s.size()) return true;
+  return s[p] == '.' && p + 1 < s.size() && s.size() - p - 1 <= 3 && DigitsAt(s, p + 1, s.size() - p - 1);
+}
+
+bool EndsWithNoCase(const std::string& s, const char* suffix) {
+  size_t n = strlen(suffix);
+  if (s.size() < n) return false;
+  for (size_t i = 0; i < n; ++i)
+    if (tolower((unsigned char)s[s.size() - n + i]) != tolower((unsigned char)suffix[i])) return false;
+  return true;
+}
+
+// "<juego> 2026.10.16 - 05.30.12.02[.DVR]" (vídeo; .DVR = Instant Replay) o
+// "<juego> Screenshot 2026.10.16 - 05.30.12.02" (captura).
+bool ParseShadowPlayName(std::string stem, bool image, MediaItem* item) {
+  const bool replay = !image && EndsWithNoCase(stem, ".DVR");
+  if (replay) stem.resize(stem.size() - 4);
+  size_t dash = stem.rfind(" - ");
+  if (dash == std::string::npos || !ShadowPlayTimeAt(stem, dash + 3)) return false;
+  size_t date = ShadowPlayDateBefore(stem, dash);
+  if (date == std::string::npos || date == 0 || stem[date - 1] != ' ') return false;
+  std::string game = stem.substr(0, date - 1);
+  if (image && EndsWithNoCase(game, " Screenshot")) game.resize(game.size() - 11);
+  while (!game.empty() && game.back() == ' ') game.pop_back();
+  // Lo del escritorio: "Desktop" en inglés (y "Escritorio" en otros idiomas).
+  if (game == "Desktop" || game == "Escritorio") game.clear();
+  item->game = game;
+  item->kind = image ? MediaKind::Screenshot : replay ? MediaKind::Clip : MediaKind::Recording;
+  item->nvidia = true;
+  return true;
+}
+
 // "..._discord" o "..._discord_2" (ver ExportPathFor).
 bool IsExportStem(const std::string& stem) {
   size_t at = stem.rfind("_discord");
@@ -98,6 +156,7 @@ void ParseMediaName(const std::string& fileName, MediaItem* item) {
   item->stem = stem;
   item->game.clear();
   item->spectre = false;
+  item->nvidia = false;
   const std::wstring ext = LowerExt(Widen(fileName));
   bool image = ClassifyExtension(Widen(fileName)) == 2;
   item->kind = image ? MediaKind::Screenshot : MediaKind::Clip;
@@ -136,6 +195,8 @@ void ParseMediaName(const std::string& fileName, MediaItem* item) {
   // Las imágenes se abren siempre como imagen, aunque el nombre empiece por Clip_.
   if (image) item->kind = MediaKind::Screenshot;
   if (item->game == "Escritorio") item->game.clear();
+  // Un .m4a o un .gif no salen de ShadowPlay.
+  if (!item->spectre && !item->audioOnly && ext != L".gif") ParseShadowPlayName(stem, image, item);
 }
 
 const char* MediaKindName(MediaKind kind) {
@@ -266,6 +327,62 @@ std::vector<MediaItem> Library::Scan(const std::string& folder, size_t max, bool
   return items;
 }
 
+std::vector<MediaItem> Library::ScanShadowPlay(const std::vector<std::string>& folders, const std::string& skipFolder) {
+  std::vector<MediaItem> items;
+  // Vídeos\NVIDIA sale dos veces (sola y como subcarpeta de Vídeos): cada archivo, una.
+  std::unordered_set<std::string> seen;
+  const std::string skip = skipFolder.empty() ? std::string() : Key(skipFolder);
+  // La carpeta de Spectre o una de dentro (Vídeos\Spectre cuando ShadowPlay usa Vídeos).
+  auto skipped = [&](const std::wstring& dir) {
+    if (skip.empty()) return false;
+    std::string key = Key(Narrow(dir));
+    return key == skip || (key.size() > skip.size() && key.compare(0, skip.size(), skip) == 0 &&
+                           (key[skip.size()] == '\\' || key[skip.size()] == '/'));
+  };
+  for (const auto& folder : folders) {
+    std::vector<std::wstring> dirs = {Widen(folder)};
+    if (skipped(dirs[0])) continue;
+    for (size_t d = 0; d < dirs.size(); ++d) {
+      WIN32_FIND_DATAW fd;
+      std::wstring pattern = dirs[d] + L"\\*";
+      HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
+                                     FIND_FIRST_EX_LARGE_FETCH);
+      if (find == INVALID_HANDLE_VALUE) continue;
+      do {
+        if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == 0 || (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0)))
+          continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+          // ShadowPlay guarda una subcarpeta por juego; no se baja más.
+          std::wstring sub = dirs[0] + L"\\" + fd.cFileName;
+          if (d == 0 && !(fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) && !skipped(sub))
+            dirs.push_back(std::move(sub));
+          continue;
+        }
+        if (ClassifyExtension(fd.cFileName) == 0) continue;
+        MediaItem item;
+        item.name = Narrow(fd.cFileName);
+        ParseMediaName(item.name, &item);
+        // Solo lo que lleva el nombre de ShadowPlay: Vídeos puede tener de todo.
+        if (!item.nvidia) continue;
+        item.path = Narrow(dirs[d] + L"\\" + fd.cFileName);
+        if (!seen.insert(Key(item.path)).second) continue;
+        item.size = (uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        item.modified = int64_t((uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime);
+        items.push_back(std::move(item));
+      } while (FindNextFileW(find, &fd));
+      FindClose(find);
+    }
+  }
+  std::sort(items.begin(), items.end(), [](const MediaItem& a, const MediaItem& b) { return a.modified > b.modified; });
+  std::lock_guard lock(mutex_);
+  Load();
+  for (auto& item : items) {
+    FillDates(item);
+    Apply(item);
+  }
+  return items;
+}
+
 void Library::SetFavorite(const std::string& path, bool favorite) {
   std::lock_guard lock(mutex_);
   Load();
@@ -353,6 +470,25 @@ bool Library::Rename(const std::string& path, const std::string& newStem, std::s
   return true;
 }
 
+void Library::CarryMeta(const std::string& from, const std::string& to, bool keepSource) {
+  std::lock_guard lock(mutex_);
+  Load();
+  auto it = meta_.find(Key(from));
+  if (it == meta_.end()) return;
+  Meta m = it->second;
+  if (!keepSource) meta_.erase(it);
+  meta_[Key(to)] = std::move(m);
+  Save();
+}
+
+void Library::Forget(const std::vector<std::string>& paths) {
+  std::lock_guard lock(mutex_);
+  Load();
+  bool changed = false;
+  for (const auto& path : paths) changed = meta_.erase(Key(path)) > 0 || changed;
+  if (changed) Save();
+}
+
 bool Library::Recycle(HWND owner, const std::string& path, std::string* error, bool* cancelled) {
   return !Recycle(owner, std::vector<std::string>{path}, error, cancelled).empty();
 }
@@ -406,8 +542,8 @@ std::vector<std::string> Library::Recycle(HWND owner, const std::vector<std::str
   return gone;
 }
 
-LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes, const std::string& keepPath,
-                                  int maxAgeDays) {
+LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes,
+                                  const std::vector<std::string>& keepPaths, int maxAgeDays) {
   LimitResult r;
   r.limitBytes = limitBytes;
   r.maxAgeDays = maxAgeDays;
@@ -418,9 +554,12 @@ LimitResult Library::EnforceLimit(const std::string& folder, uint64_t limitBytes
   GetSystemTimeAsFileTime(&nowFt);
   int64_t now = int64_t((uint64_t(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime);
   const int64_t recent = int64_t(2) * 60 * 10000000;
-  const std::string keep = keepPath.empty() ? std::string() : Key(keepPath);
+  std::vector<std::string> keep;
+  for (const auto& path : keepPaths)
+    if (!path.empty()) keep.push_back(Key(path));
   auto kept = [&](const MediaItem& item) {
-    return item.favorite || now - item.modified < recent || (!keep.empty() && Key(item.path) == keep);
+    return item.favorite || now - item.modified < recent ||
+           (!keep.empty() && std::find(keep.begin(), keep.end(), Key(item.path)) != keep.end());
   };
   auto remove = [&](const MediaItem& item, const char* why) {
     if (!DeleteFileW(Widen(item.path).c_str())) return false; // abierto en otro programa
@@ -517,6 +656,44 @@ bool CopyFilesToClipboard(HWND owner, const std::vector<std::string>& paths) {
   if (effect && !SetClipboardData(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT), effect)) GlobalFree(effect);
   CloseClipboard();
   return ok;
+}
+
+bool CopyTextToClipboard(HWND owner, const std::string& text, bool privateText) {
+  std::wstring w = Widen(text);
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (w.size() + 1) * sizeof(wchar_t));
+  if (!mem) return false;
+  memcpy(GlobalLock(mem), w.c_str(), (w.size() + 1) * sizeof(wchar_t));
+  GlobalUnlock(mem);
+  if (!OpenClipboard(owner)) {
+    GlobalFree(mem);
+    return false;
+  }
+  EmptyClipboard();
+  bool ok = SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+  if (!ok) GlobalFree(mem);
+  if (ok && privateText) {
+    // Formatos que el historial y la sincronización del portapapeles respetan.
+    for (const wchar_t* format : {L"ExcludeClipboardContentFromMonitorProcessing", L"CanIncludeInClipboardHistory",
+                                  L"CanUploadToCloudClipboard"}) {
+      HGLOBAL zero = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DWORD));
+      if (zero && !SetClipboardData(RegisterClipboardFormatW(format), zero)) GlobalFree(zero);
+    }
+  }
+  CloseClipboard();
+  return ok;
+}
+
+std::string ClipboardText(HWND owner) {
+  std::string out;
+  if (!OpenClipboard(owner)) return out;
+  if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+    if (const auto* text = static_cast<const wchar_t*>(GlobalLock(data))) {
+      out = Narrow(text);
+      GlobalUnlock(data);
+    }
+  }
+  CloseClipboard();
+  return out;
 }
 
 StorageInfo SummarizeStorage(const std::vector<MediaItem>& items, const std::string& folder) {

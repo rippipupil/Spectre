@@ -88,7 +88,7 @@ target_compile_options(spectre PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /
 # SemiCondensed...) de Bahnschrift, que es una fuente variable.
 target_link_libraries(spectre PRIVATE imgui freetype nlohmann_json::nlohmann_json ffmpeg
   d3d11 dxgi dcomp windowsapp mfplat mfreadwrite mf mfuuid ole32 uuid
-  avrt shell32 shcore user32 gdi32 dwmapi advapi32 mmdevapi winhttp bcrypt delayimp
+  avrt shell32 shcore user32 gdi32 dwmapi advapi32 mmdevapi winhttp bcrypt crypt32 delayimp
   windowscodecs oleaut32 winmm sapi)
 # El manifiesto va en el .rc; evitamos que el linker genere otro.
 # Media Foundation (solo la webcam) se carga en diferido: en las ediciones N de

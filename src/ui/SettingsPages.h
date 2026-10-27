@@ -3,6 +3,7 @@
 // Páginas de Ajustes de la ventana de Spectre. Se editan sobre una copia de
 // la configuración (model.config) que App aplica al pulsar Aplicar.
 
+#include "app/Cloud.h"
 #include "app/Config.h"
 #include "app/DiscordPresence.h"
 #include "app/Library.h"
@@ -22,7 +23,7 @@
 namespace spectre {
 
 enum class SettingsPage {
-  Replay, Video, Audio, Camera, Hotkeys, Voice, Storage, Notifications, General, Performance, Projects, Count
+  Replay, Video, Audio, Camera, Hotkeys, Voice, Storage, Cloud, Notifications, General, Performance, Projects, Count
 };
 const char* SettingsPageName(SettingsPage page);
 
@@ -55,6 +56,17 @@ struct SettingsModel {
   VoiceStatus voice;
   bool voiceWaiting = false;
   std::vector<VoiceRecognizer> recognizers;
+  // Nube: estado de la cola y de «Probar», y las claves que se están
+  // escribiendo (no van en config: se guardan cifradas al pulsar Guardar).
+  CloudStatus cloud;
+  std::string cloudKeyId, cloudSecret;
+  bool cloudEditKeys = false; // con claves ya guardadas: «Cambiar» abre los campos
+  std::string cloudMessage;   // resultado de Guardar o Pegar
+  bool cloudMessageError = false;
+  // ShadowPlay: importar copiando o moviendo (esperando confirmación: 0 copiar,
+  // 1 mover; -1 nada) y cuántos van mientras se importa (total 0 = nada en marcha).
+  int shadowPlayConfirm = -1;
+  int shadowPlayDone = 0, shadowPlayTotal = 0;
 };
 
 struct SettingsActions {
@@ -70,6 +82,20 @@ struct SettingsActions {
   std::function<void()> refreshStorage;
   std::function<void(const std::string&)> playSound; // escuchar un sonido de guardar
   std::function<void()> previewNotice; // un aviso de clip de prueba con el tema actual
+  // Nube
+  std::function<void()> saveCloudKeys;   // las de model.cloudKeyId/cloudSecret
+  std::function<void()> forgetCloudKeys;
+  std::function<void()> testCloud;       // con model.config.cloud y las claves escritas (o las guardadas)
+  std::function<void()> copyCloudSettings;
+  std::function<void(bool)> pasteCloudSettings; // true: en el modo cibercafé
+  std::function<void(const std::string&)> copyLink;
+  std::function<void(bool)> pauseUploads;
+  std::function<void()> retryUploads;
+  std::function<void()> clearCloudHistory;
+  // ShadowPlay
+  std::function<void(bool)> importShadowPlay; // true: mover en vez de copiar
+  std::function<void()> cancelImport;
+  std::function<void()> chooseShadowPlayFolder;
 };
 
 // Dibuja el contenido de la página (sin título ni pie: los pone la ventana).

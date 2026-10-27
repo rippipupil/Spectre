@@ -77,7 +77,7 @@ std::string FormatClipLength(int seconds);  // 30 s, 2 min
 enum class Icon {
   Replay, Mic, Camera, Close, Back, Play, Pause, Folder, Trash, Star, StarFilled, Scissors, Copy, Pencil,
   Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share, Sliders, Undo, Redo,
-  Check, Alert, Download, Info, Gamepad, Record, Home, Grid, Gear
+  Check, Alert, Download, Info, Gamepad, Record, Home, Grid, Gear, Upload
 };
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float radius, ImU32 color);
 // Una raya en diagonal encima de un icono: apagado (micrófono, cámara, replay).
@@ -247,6 +247,8 @@ bool IconButton(const char* id, Icon icon, float size, const char* tooltip, bool
 bool GhostButton(const char* id, const char* label, float width, Tone tone = Tone::Normal, float height = 32);
 // Botón relleno con el acento (la acción principal de un formulario).
 bool SolidButton(const char* id, const char* label, float width, float height = 32);
+// Texto pequeño que se subraya al pasar el ratón (acciones de una línea de estado).
+bool LinkButton(const char* id, const char* label);
 // Barra fina de progreso o de uso (0..1).
 void Bar(ImVec2 size, float fraction, ImU32 color);
 

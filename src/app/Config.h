@@ -33,6 +33,44 @@ struct VoiceConfig {
   std::string marker = "marca, pon una marca";
 };
 
+// Nube propia (app/Cloud.h): un bucket compatible con S3, normalmente
+// Cloudflare R2 o Backblaze B2 (las dos tienen capa gratuita). Las claves no
+// están aquí: van cifradas con DPAPI en %APPDATA%\Spectre\cloud-keys.bin (o
+// solo en memoria en el modo cibercafé).
+struct CloudConfig {
+  std::string provider = "r2";  // "r2" | "b2" | "s3" (otro compatible con S3)
+  std::string endpoint;         // https://<cuenta>.r2.cloudflarestorage.com, https://s3.<región>.backblazeb2.com
+  std::string region;           // vacío = la del endpoint ("auto" en R2)
+  std::string bucket;
+  // Dirección pública del bucket (r2.dev, un dominio propio, la de B2): los
+  // enlaces no caducan. Vacía: enlaces firmados que valen linkDays días.
+  std::string publicUrl;
+  int linkDays = 7;             // 1..7 (el máximo de una URL firmada)
+  bool autoUpload = false;      // sube solo lo nuevo que se guarde
+  bool uploadClips = true;      // ...los clips (también los cortos)
+  bool uploadRecordings = false;
+  bool uploadScreenshots = true;
+  bool copyLink = false;        // al acabar una subida automática, el enlace va al portapapeles
+  bool deleteAfterUpload = false; // borra la copia del PC al subirla (para siempre, sin papelera)
+  // Con un juego abierto: KB/s como mucho; 0 = esperar a cerrarlo, -1 = sin límite.
+  int gameLimitKBps = 1024;
+  // Modo cibercafé (PC compartido): todo se sube solo y se borra del PC al
+  // subirse (sin papelera, también los favoritos), las claves solo viven en
+  // memoria y al salir se olvidan la lista de enlaces y las claves.
+  bool cyberMode = false;
+
+  bool operator==(const CloudConfig&) const = default;
+};
+
+// Clips de NVIDIA ShadowPlay (GeForce Experience o la app de NVIDIA) en la
+// biblioteca, sin copiarlos (app/ShadowPlay.h).
+struct ShadowPlayConfig {
+  bool library = true;  // se ven en la biblioteca
+  std::string folder;   // vacío = las de NVIDIA (su ajuste, Vídeos\NVIDIA y Vídeos)
+
+  bool operator==(const ShadowPlayConfig&) const = default;
+};
+
 // Duraciones del clip que ofrecen el panel, Inicio y Ajustes (segundos). Las
 // largas solo caben si la RAM da para ellas con la calidad elegida: la
 // interfaz lo avisa (PipelineStats::replayFitSeconds).
@@ -123,6 +161,8 @@ struct Config {
 
   HotkeyConfig hotkeys;
   VoiceConfig voice;
+  CloudConfig cloud;
+  ShadowPlayConfig shadowPlay;
 };
 
 Config LoadConfig();
