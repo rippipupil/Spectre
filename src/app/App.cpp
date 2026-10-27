@@ -328,6 +328,8 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     PanelLinkState link;
     link.configured = cloud_.Configured();
     link.busy = st.phase == Phase::Queued || st.phase == Phase::Uploading;
+    link.queued = st.phase == Phase::Queued;
+    link.copies = st.copyLink;
     link.progress = st.progress;
     link.ready = st.phase == Phase::Done;
     if (st.phase == Phase::Failed) link.error = st.error;
@@ -2604,7 +2606,11 @@ void App::ShareLink(const std::string& path) {
   // Si ya está subido llega enseguida el aviso con el enlace (WM_SPECTRE_CLOUD).
   const bool uploaded = cloud_.State(path).phase == CloudFileState::Phase::Done;
   cloud_.Enqueue(path, true, true, ManualRemoval(path), false);
-  if (!uploaded)
+  if (uploaded) return;
+  if (cloud_.Status().paused) // la pausa a mano para también lo compartido
+    Notify({NoticeKind::Working, "Subidas en pausa",
+            FileNameOf(path) + " se sube al reanudarlas (Biblioteca > Seguir) y entonces se copia el enlace"});
+  else
     Notify({NoticeKind::Working, "Subiendo a la nube", FileNameOf(path) + ". El enlace se copia al terminar"});
 }
 

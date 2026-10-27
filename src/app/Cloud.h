@@ -34,6 +34,7 @@ struct CloudFileState {
   Phase phase = Phase::None;
   float progress = 0; // 0..1 mientras sube
   std::string error;  // Failed: en lenguaje claro
+  bool copyLink = false; // en la cola o subiendo: al acabar se copia el enlace (se pidió compartir)
   // Sin enlace: firmarlo cuesta; para eso está Link().
 };
 
