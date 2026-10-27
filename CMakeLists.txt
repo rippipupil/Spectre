@@ -71,7 +71,7 @@ endif()
 # Aplicación de Discord del estado en Discord (Rich Presence): su «Application
 # ID» del portal de desarrolladores, que no es secreto. Da el nombre que sale
 # en el perfil («Jugando a Spectre») y el icono. Vacío: sin estado en Discord.
-set(SPECTRE_DISCORD_APP_ID "" CACHE STRING "Application ID de la aplicación de Discord (Rich Presence)")
+set(SPECTRE_DISCORD_APP_ID "1564603344742514708" CACHE STRING "Application ID de la aplicación de Discord (Rich Presence)")
 if(SPECTRE_DISCORD_APP_ID AND NOT SPECTRE_DISCORD_APP_ID MATCHES "^[0-9]+$")
   message(FATAL_ERROR "SPECTRE_DISCORD_APP_ID no válido: '${SPECTRE_DISCORD_APP_ID}'")
 endif()
