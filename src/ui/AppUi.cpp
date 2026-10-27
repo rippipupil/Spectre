@@ -1769,7 +1769,7 @@ void AppUi::PageLibrary(AppWindow& w, AppModel& m, const AppActions& a) {
     // Si le quedan menos de 160 px el filtro se estrecha, y lo que no quepa
     // (ventana pequeña o letras anchas) baja a otra línea en vez de salirse.
     const float fixedW = Px(12) + Px(170) + Px(8) + Px(150) + Px(8) + Px(84) + Px(8);
-    float segW = std::min(Px(nvidia ? 560 : 470), avail * 0.5f);
+    float segW = std::min(nvidia ? Px(560) : Px(470), avail * 0.5f);
     if (avail - segW - fixedW < Px(160)) segW = std::max(Px(400), avail - fixedW - Px(160));
     segW = std::min(segW, avail);
     const float rowRight = ImGui::GetCursorScreenPos().x + avail;
