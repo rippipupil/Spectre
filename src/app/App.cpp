@@ -2589,6 +2589,17 @@ void App::PasteCloudSettings(bool cyber) {
     return;
   }
   if (cyber) cloud.cyberMode = true;
+  // Otro cliente pega su nube con la sesión del anterior abierta: esa sesión
+  // se cierra antes (sus subidas, sus copias para pegar, lo que no se subió).
+  if (config_.cloud.cyberMode && cloud_.Status().hasKeys &&
+      (cloud.endpoint != config_.cloud.endpoint || CloudBucket(cloud) != CloudBucket(config_.cloud))) {
+    cloud_.EndCyberSession();
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    cyberSince_ = (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    cyberCancelled_.clear();
+    Log("Nube: otra configuración en el modo cibercafé, la sesión anterior se cierra");
+  }
   Config next = config_;
   next.cloud = cloud;
   ApplyConfig(next, true); // primero el modo: en un cibercafé las claves no tocan el disco

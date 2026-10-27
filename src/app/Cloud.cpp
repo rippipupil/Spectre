@@ -1167,7 +1167,8 @@ void StoreProgress(Shared& sh, const Job& job, bool force) {
   {
     std::lock_guard lock(sh.mutex);
     Entry* e = sh.Find(job.id);
-    if (!e) return;
+    // Con otra clave ya no es esta subida (se la cambió Disown mientras subía).
+    if (!e || e->key != job.key) return;
     e->size = job.size;
     e->mtime = job.mtime;
     e->uploadId = job.uploadId;
@@ -1456,6 +1457,12 @@ void Worker(std::shared_ptr<Shared> sh) {
     switch (o) {
     case Outcome::Done: {
       e->st = Entry::St::Done;
+      // Lo que se usó de verdad: mientras subía pudo cambiarse el destino o la
+      // clave de la entrada («Reintentar», compartir, dejar el modo cibercafé).
+      e->key = job.key;
+      e->endpoint = target.endpoint;
+      e->bucket = target.bucket;
+      e->region = target.region;
       e->uploadId.clear();
       e->etags.clear();
       e->partSize = 0;
