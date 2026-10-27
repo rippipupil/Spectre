@@ -14,6 +14,25 @@ struct HotkeyConfig {
   std::string shortClip = "Alt+F11"; // clip corto: solo los últimos Config::shortClipSeconds
 };
 
+// Comandos de voz (Ajustes > Voz). Usa el reconocimiento de voz de Windows sin
+// conexión, con una lista cerrada de frases: no se envía nada a internet y
+// solo se escucha mientras están activados. Cada orden admite varias frases
+// separadas por comas; se dicen después de la palabra de activación.
+struct VoiceConfig {
+  bool enabled = false;
+  std::string wakeWord = "Spectre";      // vacío = las frases solas
+  std::string recognizer;                // id del reconocedor de Windows; vacío = el de español si lo hay
+  std::string sensitivity = "normal";    // "estricta" | "normal" | "permisiva"
+  bool onlyInGames = false;              // escucha solo con un juego a pantalla completa (o grabando)
+  bool sound = true;                     // pitido corto al reconocer una orden
+  std::string saveClip = "clip, guarda el clip";
+  std::string shortClip = "clip corto";
+  std::string startRecording = "graba, empieza a grabar";
+  std::string stopRecording = "para, para de grabar";
+  std::string screenshot = "captura, haz una captura";
+  std::string marker = "marca, pon una marca";
+};
+
 // Duraciones del clip que ofrecen el panel, Inicio y Ajustes (segundos). Las
 // largas solo caben si la RAM da para ellas con la calidad elegida: la
 // interfaz lo avisa (PipelineStats::replayFitSeconds).
@@ -103,6 +122,7 @@ struct Config {
   bool discordPresence = true;
 
   HotkeyConfig hotkeys;
+  VoiceConfig voice;
 };
 
 Config LoadConfig();
@@ -112,6 +132,7 @@ bool SaveConfig(const Config& config);
 // mientras tanto por otro lado (un atajo, el panel Alt+Z) no se pisa.
 Config MergeEdits(const Config& current, const Config& base, const Config& edited);
 bool SameConfig(const Config& a, const Config& b);
+bool SameVoiceConfig(const VoiceConfig& a, const VoiceConfig& b);
 std::string ResolveOutputDir(const Config& config);
 
 } // namespace spectre

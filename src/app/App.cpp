@@ -392,6 +392,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   SetTimer(hwnd_, kTimerHealth, 1000, nullptr);
   CheckGame();
   UpdatePipeline();
+  UpdateVoice();
   EnforceStorageLimit();
   if (config_.discordPresence) discord_.Start(hwnd_, WM_SPECTRE_DISCORD);
   UpdatePresence();
@@ -456,6 +457,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   editWorker_.Stop(); // y lo mismo una edición
   discord_.Stop();    // Discord quita el estado al cerrarse la tubería
   pipeline_.Stop();
+  voice_.Stop();
   // Clips o recortes que se están escribiendo. Antes de actualizar se espera
   // lo que haga falta: el instalador no debe encontrar un MP4 a medias.
   WaitForPendingWrites(installerPath_.empty() ? 5000 : 10 * 60 * 1000);
@@ -517,7 +519,7 @@ std::string App::LowDiskNote() {
   return ". Queda poco espacio en el disco (" + FormatBytes(free) + ")";
 }
 
-void App::SaveClip(bool shortClip) {
+void App::SaveClip(bool shortClip, int64_t endQpc) {
   if (!pipeline_.Running() || !config_.replayEnabled) {
     Toast("El replay no está activo", true);
     return;
@@ -525,8 +527,10 @@ void App::SaveClip(bool shortClip) {
   // El clip corto no puede pasar de lo que guarda el replay.
   const int seconds = shortClip ? std::min(config_.shortClipSeconds, config_.clipSeconds) : config_.clipSeconds;
   std::string path = OutputName("Clip");
-  // Las marcas de los últimos segundos van con el clip, que acaba justo ahora.
+  // Las marcas de los últimos segundos van con el clip, que acaba justo ahora
+  // (o donde se empezó a decir la orden de voz).
   int64_t now = QpcNow();
+  if (endQpc > 0 && endQpc < now) now = endQpc;
   std::vector<double> tail;
   for (int64_t at : markers_) {
     double ago = QpcToSeconds(now - at);
@@ -538,7 +542,7 @@ void App::SaveClip(bool shortClip) {
   // (WM_SPECTRE_NOTIFY, siempre después) lo cambia por «Clip guardado» en la
   // misma tarjeta.
   pendingClips_[FileNameOf(path)] = {seconds, shortClip};
-  pipeline_.SaveClip(path, double(seconds));
+  pipeline_.SaveClip(path, double(seconds), endQpc);
   Notify({NoticeKind::ClipSaving, shortClip ? "Guardando clip corto" : "Guardando clip",
           "Los últimos " + ui::FormatClipLength(seconds)});
 }
@@ -589,6 +593,8 @@ void App::ToggleRecording() {
     const std::string& key = config_.hotkeys.toggleRecording;
     Notice notice{NoticeKind::Recording, "Grabando",
                   key.empty() ? "Detenla desde el panel (Alt+Z)" : "Pulsa " + key + " para detener"};
+    std::vector<std::string> stop = SplitPhrases(config_.voice.stopRecording);
+    if (voice_.Running() && !stop.empty()) notice.detail += " o di «" + SpokenPhrase(config_.voice, stop.front()) + "»";
     std::string note = LowDiskNote();
     if (!note.empty()) {
       notice.detail += note;
@@ -701,18 +707,58 @@ void App::CaptureScreenshot() {
   });
 }
 
-void App::AddMarker() {
+void App::AddMarker(int64_t at) {
   if (!pipeline_.Running()) {
     Toast("No se está capturando nada: la marca no iría a ningún clip", true);
     return;
   }
   int64_t now = QpcNow();
-  markers_.push_back(now);
+  const int64_t when = at > 0 && at < now ? at : now;
+  markers_.push_back(when);
   while (!markers_.empty() && QpcToSeconds(now - markers_.front()) > kMaxMarkerAge) markers_.pop_front();
-  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(now);
+  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(std::max(when, recordStartQpc_));
   if (config_.soundOnSave) PlayCue(Cue::Marker, config_.saveSound);
   Notify({NoticeKind::Marker, "Marca añadida",
           pipeline_.Recording() ? "En la grabación y en el replay" : "Saldrá en el próximo clip"});
+}
+
+void App::UpdateVoice() {
+  const VoiceConfig& v = config_.voice;
+  // «Solo con un juego abierto»: fuera de los juegos (y sin grabar) no se abre el micrófono.
+  const bool want = v.enabled && (!v.onlyInGames || GameActive() || pipeline_.Recording());
+  if (!want) {
+    if (voice_.Running()) {
+      voice_.Stop(500);
+      Log("Voz: deja de escuchar");
+    }
+    return;
+  }
+  // El pitido lo pone App: cambiarlo no hace falta reabrir el micrófono.
+  VoiceConfig running = voice_.Settings();
+  running.sound = v.sound;
+  if (voice_.Running() && SameVoiceConfig(running, v) && voice_.MicDeviceId() == config_.micDeviceId) return;
+  voice_.Start(v, config_.micDeviceId, hwnd_);
+}
+
+void App::OnVoiceCommand(const VoiceEvent& event) {
+  // Una orden que llega justo después de apagar la voz en Ajustes no cuenta.
+  if (!config_.voice.enabled || !voice_.Running()) return;
+  if (config_.voice.sound) PlayCue(Cue::Voice);
+  switch (event.command) {
+  case VoiceCommand::SaveClip: SaveClip(false, event.spokenQpc); break;
+  case VoiceCommand::ShortClip: SaveClip(true, event.spokenQpc); break;
+  case VoiceCommand::StartRecording:
+    if (pipeline_.Recording()) Toast("Ya se está grabando");
+    else ToggleRecording();
+    break;
+  case VoiceCommand::StopRecording:
+    if (pipeline_.Recording()) ToggleRecording();
+    else Toast("No hay ninguna grabación en marcha");
+    break;
+  case VoiceCommand::Screenshot: CaptureScreenshot(); break;
+  case VoiceCommand::Marker: AddMarker(event.spokenQpc); break;
+  default: break;
+  }
 }
 
 void App::TrimClip(const std::string& path, double start, double end) {
@@ -1325,6 +1371,7 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   if (!SameCameraSettings(old, config_) && pipeline_.Running()) pipeline_.SetCamera(BuildSettings());
   UpdatePipeline();
   if (pipeline_.Running()) pipeline_.SetCameraEditable(config_.cameraEditable);
+  UpdateVoice();
 
   const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame;
   if (folderChanged && appWindow_.Visible()) RescanLibrary();
@@ -2185,6 +2232,8 @@ void App::RefreshAppModel() {
   SettingsModel& s = appModel_.settings;
   s.stats = appModel_.stats;
   s.hotkeyError = hotkeyError_;
+  s.voice = voice_.Status();
+  s.voiceWaiting = config_.voice.enabled && !voice_.Running();
   ULONGLONG now = GetTickCount64();
   if (appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Performance &&
       now - lastAppUsage_ >= 1000) {
@@ -2252,6 +2301,7 @@ void App::LoadDevices() {
   s.inputs = EnumerateAudioDevices(true);
   s.cameras = EnumerateCameras();
   s.encoders = CandidateEncoders(s.config.codec);
+  s.recognizers = InstalledRecognizers();
   s.devicesLoaded = true;
 }
 
@@ -2406,6 +2456,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (wp == kTimerGame) {
       CheckGame();
+      UpdateVoice(); // «Solo con un juego abierto»: el juego se abrió o se cerró
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
       KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
       bool wasRecording = pipeline_.Recording();
@@ -2421,6 +2472,18 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       UpdatePipeline();
       InstallPendingUpdate();
+    }
+    return 0;
+  case WM_SPECTRE_VOICE: {
+    std::unique_ptr<VoiceEvent> event(reinterpret_cast<VoiceEvent*>(lp));
+    KeyboardHook::Pause pause(keyboard_); // como un atajo: guardar o grabar pueden tardar
+    OnVoiceCommand(*event);
+    return 0;
+  }
+  case WM_SPECTRE_VOICE_STATUS:
+    if (appWindow_.Visible() && appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Voice) {
+      appModel_.settings.voice = voice_.Status();
+      appWindow_.Invalidate();
     }
     return 0;
   case WM_SPECTRE_NOTIFY: {

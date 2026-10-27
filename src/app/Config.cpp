@@ -15,6 +15,10 @@ namespace spectre {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HotkeyConfig, overlay, saveClip, toggleRecording, toggleReplay,
                                                 screenshot, marker, shortClip)
 
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(VoiceConfig, enabled, wakeWord, recognizer, sensitivity, onlyInGames,
+                                                sound, saveClip, shortClip, startRecording, stopRecording, screenshot,
+                                                marker)
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSeconds, onlyInGames, folderPerGame,
                                                 shortClipSeconds, recordLimitMinutes,
                                                 captureMode, monitorIndex, captureApi, captureCursor, fps,
@@ -27,7 +31,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 notifyGame, notifyUpdates, soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
                                                 theme, themeStyle, themeMotion, themeBackdrop, panelLayout, panelLateralX, panelCompactX,
-                                                panelCompactY, hotkeys, discordPresence)
+                                                panelCompactY, hotkeys, discordPresence, voice)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 
@@ -60,6 +64,8 @@ static void Sanitize(Config& c) {
   if (c.toastPosition != "top-right" && c.toastPosition != "top-left" && c.toastPosition != "bottom-right" &&
       c.toastPosition != "bottom-left")
     c.toastPosition = "top-right";
+  auto& v = c.voice;
+  if (v.sensitivity != "estricta" && v.sensitivity != "normal" && v.sensitivity != "permisiva") v.sensitivity = "normal";
 }
 
 Config LoadConfig() {
@@ -114,6 +120,8 @@ Config MergeEdits(const Config& current, const Config& base, const Config& edite
 }
 
 bool SameConfig(const Config& a, const Config& b) { return nlohmann::json(a) == nlohmann::json(b); }
+
+bool SameVoiceConfig(const VoiceConfig& a, const VoiceConfig& b) { return nlohmann::json(a) == nlohmann::json(b); }
 
 std::string ResolveOutputDir(const Config& config) {
   std::filesystem::path dir = config.outputDir.empty() ? DefaultOutputDir() : std::filesystem::path(Widen(config.outputDir));

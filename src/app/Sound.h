@@ -8,7 +8,8 @@ namespace spectre {
 
 // Sonidos cortos de confirmación (Ajustes > Avisos). Se generan en memoria al
 // primer uso (unos pocos KB) y se reproducen con PlaySound, sin hilos propios.
-enum class Cue { Saved, Marker };
+// Voice: orden de voz entendida (Ajustes > Voz), más grave que el de guardar.
+enum class Cue { Saved, Marker, Voice };
 // style: el sonido de guardar elegido en Ajustes (Config::saveSound).
 void PlayCue(Cue cue, const std::string& style = "clasico");
 
