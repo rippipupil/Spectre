@@ -396,6 +396,10 @@ Outcome VoiceListener::Shared::Session(const VoiceConfig& config, const std::str
   if (FAILED(hr)) return Fail("No se pudo abrir el reconocimiento de voz de Windows", hr);
   hr = recognizer->SetRecognizer(chosen->token.Get());
   if (FAILED(hr)) return Fail("No se pudo cargar el reconocedor «" + chosen->info.name + "»", hr);
+  // Sin adaptar el modelo a lo que oye (en una partida, el juego y Discord):
+  // con una lista cerrada no hace falta y trabajaría de fondo. Solo esta
+  // sesión; el ajuste guardado de Windows no cambia. Si no lo admite, da igual.
+  recognizer->SetPropertyNum(L"AdaptationOn", 0);
 
   // Micrófono: el de Ajustes > Audio o, si no se eligió (o no está), el
   // predeterminado de Windows. En modo compartido: lo puede usar a la vez la
@@ -467,6 +471,7 @@ Outcome VoiceListener::Shared::Session(const VoiceConfig& config, const std::str
   ComPtr<IMMDeviceEnumerator> devices;
   if (wave < 0) CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&devices));
   const std::wstring defaultMic = DefaultMicId(devices.Get());
+  ULONGLONG micCheckedAt = GetTickCount64();
   Outcome outcome = Outcome::Stopped;
   HANDLE handles[] = {stop, events};
   for (;;) {
@@ -478,12 +483,14 @@ Outcome VoiceListener::Shared::Session(const VoiceConfig& config, const std::str
         outcome = Outcome::Restart;
         break;
       }
-      continue;
-    }
-    if (w != WAIT_TIMEOUT) {
+    } else if (w != WAIT_TIMEOUT) {
       outcome = Fail("El reconocimiento de voz dejó de responder", HRESULT_FROM_WIN32(GetLastError()));
       break;
     }
+    // Cada 3 s, también con charla continua (cada frase despierta el bucle).
+    const ULONGLONG now = GetTickCount64();
+    if (now - micCheckedAt < 3000) continue;
+    micCheckedAt = now;
     if (devices && DefaultMicId(devices.Get()) != defaultMic) {
       Log("Voz: cambió el micrófono predeterminado de Windows, se vuelve a abrir");
       outcome = Outcome::Restart;

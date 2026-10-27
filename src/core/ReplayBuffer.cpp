@@ -84,12 +84,18 @@ void ReplayBuffer::Trim() {
   }
 }
 
-std::vector<std::pair<SharedPacket, int>> ReplayBuffer::Snapshot(double seconds, double end) {
+std::vector<std::pair<SharedPacket, int>> ReplayBuffer::Snapshot(double seconds, double end, double latest) {
   std::vector<Entry> picked;
   {
     std::lock_guard lock(mutex_);
     if (entries_.empty()) return {};
     end = std::min(end, lastVideoTime_);
+    // El anillo guarda la duración más un margen y empieza en un keyframe: un
+    // clip que acaba unos segundos antes de pedirlo (orden de voz) puede no
+    // caber entero. Entonces acaba algo después, como mucho en `latest`, y
+    // dura lo pedido. Con un atajo (latest = end) no cambia nada.
+    const double fullEnd = entries_.front().time + seconds;
+    if (latest > end && fullEnd > end) end = std::min({fullEnd, latest, lastVideoTime_});
     double start = end - seconds;
     // Último keyframe de vídeo con tiempo <= start (o el primero disponible).
     size_t first = entries_.size();

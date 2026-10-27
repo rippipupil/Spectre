@@ -532,6 +532,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc)
   const int64_t now = QpcNow();
   if (endQpc <= startQpc_ || endQpc > now) endQpc = now;
   double end = QpcToSeconds(endQpc - startQpc_);
+  const double requested = QpcToSeconds(now - startQpc_); // hasta aquí llega el audio tras la espera
   double age;
   {
     std::lock_guard lock(statsMutex_);
@@ -543,7 +544,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc)
   double latency = streams_.size() > 1 ? audio_.LatencySeconds() : 0.0;
   DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, notify, path, seconds, end, pending, waitMs] {
+  std::thread([buffer, notify, path, seconds, end, requested, pending, waitMs] {
     InstallThreadCrashHandler();
     Sleep(waitMs);
     bool ok = false;
@@ -553,7 +554,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc)
       // no con la baja de la escritura, para que el juego no pueda dejarlo sin
       // turno con el lock cogido. Son referencias, ~1 ms con 5 min de replay.
       int64_t t0 = QpcNow();
-      auto packets = buffer->Snapshot(seconds, end);
+      auto packets = buffer->Snapshot(seconds, end, requested);
       auto streams = buffer->Streams(); // con las del fondo de la cámara añadidas por el camino
       double copyMs = QpcToSeconds(QpcNow() - t0) * 1000.0;
       // Escribir sí puede esperar: prioridad baja y, dentro de WriteClip, E/S

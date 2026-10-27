@@ -785,6 +785,21 @@ void PageVoice(SettingsModel& m) {
   FieldLabel("Palabra de activación");
   m.dirty |= ImGui::InputTextWithHint("##wake", "Ninguna: basta con la frase", &v.wakeWord);
   Help("Se dice antes de cada orden. Así una conversación con tus amigos no guarda clips sin querer.");
+  if (v.wakeWord.find_first_not_of(" \t") == std::string::npos) {
+    // Sin palabra, una frase de una sola palabra («para», «marca») salta al hablar.
+    std::string loose;
+    int count = 0;
+    for (int i = 0; i < kVoiceCommandCount; ++i)
+      for (const std::string& phrase : SplitPhrases(VoicePhrases(v, VoiceCommand(i))))
+        if (phrase.find(' ') == std::string::npos && count < 3) {
+          loose += std::string(count++ ? ", " : "") + "«" + phrase + "»";
+        }
+    if (count) {
+      std::string text = "Sin palabra de activación, " + loose +
+                         " saltan al decirlas hablando con tus amigos: usa frases de dos o tres palabras.";
+      Warning(text.c_str());
+    }
+  }
   std::vector<std::pair<std::string, const char*>> recognizers = {{"", "Automático (el de español)"}};
   for (const auto& r : m.recognizers) recognizers.emplace_back(r.id, r.name.c_str());
   FieldLabel("Reconocedor");
@@ -833,14 +848,16 @@ void PageVoice(SettingsModel& m) {
       VoicePhrases(v, VoiceCommand(i)) = VoicePhrases(defaults, VoiceCommand(i));
     m.dirty = true;
   }
-  Help("El clip acaba donde empezaste a decir la orden, no después: la frase no sale al final. Las marcas, igual.");
+  Help("El clip acaba donde empezaste a decir la orden, no después: la frase no sale al final. Las marcas, igual. "
+       "Al detener una grabación por voz, la frase sí queda al final de la grabación.");
 
   Heading("CONSUMO Y MICRÓFONO");
-  Help("El reconocedor solo compara lo que oye con estas frases: entre frase y frase apenas usa CPU y no carga "
-       "ningún modelo en memoria. Escucha el micrófono de Ajustes > Audio (o el predeterminado de Windows) aunque "
-       "no lo grabes en los clips, y lo comparte con Discord y el juego.");
+  Help("El reconocedor solo compara lo que oye con estas frases: entre frase y frase apenas usa CPU, y el de "
+       "Windows ocupa algo de memoria mientras escucha. Escucha el micrófono de Ajustes > Audio (o el predeterminado "
+       "de Windows) aunque no lo grabes en los clips, y lo comparte con Discord y el juego.");
   Help("Con auriculares Bluetooth, abrir el micrófono hace que Windows pase los cascos a manos libres y el sonido "
-       "pierde calidad. Si te pasa, usa otro micrófono o activa «Solo con un juego abierto».");
+       "pierde calidad. Si te pasa, usa un micrófono con cable o deja la voz apagada; con «Solo con un juego "
+       "abierto», al menos fuera de los juegos los cascos suenan bien.");
   Help("Para tener el reconocedor de español: Configuración > Hora e idioma > Idioma y región > Agregar un idioma > "
        "Español (España), y en sus opciones de idioma instala «Reconocimiento de voz». Windows lo trae para español "
        "de España, inglés, francés, alemán, japonés y chino.");
