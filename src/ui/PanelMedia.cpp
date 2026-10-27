@@ -31,9 +31,9 @@ void PanelMedia::End() {
   if (running_) worker_.Stop(false);
   running_ = false;
   for (auto& [path, t] : thumbs_) {
-    t.small.pending = false;
+    t.row.pending = false;
     // La grande solo sirve con el clip abierto.
-    t.large = Slot{};
+    t.view = Slot{};
   }
 }
 
@@ -41,8 +41,8 @@ void PanelMedia::Release() {
   ClosePreview();
   drawn_.clear();
   for (auto& [path, t] : thumbs_) {
-    t.small.texture.reset();
-    t.large.texture.reset();
+    t.row.texture.reset();
+    t.view.texture.reset();
   }
 }
 
@@ -55,7 +55,7 @@ void PanelMedia::TakeResults() {
     if (it == thumbs_.end()) continue;
     // De cada vídeo se pide solo una a la vez (el hilo descarta las repetidas
     // del mismo archivo), así que es la que esté pendiente.
-    Slot& slot = it->second.large.pending ? it->second.large : it->second.small;
+    Slot& slot = it->second.view.pending ? it->second.view : it->second.row;
     if (!slot.pending) continue;
     slot.pending = false;
     slot.failed = !r.ok;
@@ -95,10 +95,10 @@ UiTexture* PanelMedia::Thumbnail(OverlayWindow& window, const MediaItem& item, i
     t.modified = item.modified;
   }
   t.lastUse = GetTickCount64();
-  if (width < kLargeFrom) return Use(window, item.path, t.small, width, height, !t.large.pending);
-  if (UiTexture* big = Use(window, item.path, t.large, width, height, !t.small.pending)) return big;
+  if (width < kLargeFrom) return Use(window, item.path, t.row, width, height, !t.view.pending);
+  if (UiTexture* big = Use(window, item.path, t.view, width, height, !t.row.pending)) return big;
   // Hasta que llega la grande, la pequeña ampliada (sin pedirla otra vez).
-  return Use(window, item.path, t.small, 0, 0, false);
+  return Use(window, item.path, t.row, 0, 0, false);
 }
 
 Player* PanelMedia::Preview(OverlayWindow& window, const MediaItem& item, int frameWidth, int frameHeight) {

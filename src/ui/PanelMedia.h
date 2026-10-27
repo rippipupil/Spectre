@@ -72,7 +72,7 @@ private:
   struct Thumb {
     int64_t modified = 0;
     unsigned long long lastUse = 0;
-    Slot small, large;
+    Slot row, view;
   };
   // Pide la miniatura si hace falta (y mayRequest) y la sube a la GPU del panel.
   UiTexture* Use(OverlayWindow& window, const std::string& path, Slot& slot, int width, int height, bool mayRequest);
