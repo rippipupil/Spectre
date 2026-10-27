@@ -68,5 +68,7 @@ constexpr WPARAM kExportDone = 1000;
 constexpr UINT WM_SPECTRE_EDIT = WM_APP + 20;           // wParam = % de la edición que se guarda, o kEditDone
 constexpr WPARAM kEditDone = 1000;
 constexpr UINT WM_SPECTRE_PHOTO = WM_APP + 21;          // lParam = new PhotoSaved* (copia editada de una captura)
+constexpr UINT WM_SPECTRE_PANEL_MEDIA = WM_APP + 23;    // miniaturas listas para el panel Alt+Z
+constexpr UINT WM_SPECTRE_DISCORD = WM_APP + 24;        // cambió la conexión con Discord (estado en Discord)
 
 } // namespace spectre
