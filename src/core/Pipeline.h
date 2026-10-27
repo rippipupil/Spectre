@@ -92,8 +92,9 @@ public:
   }
   HWND TargetWindow() const { return settings_.target.window; }
 
-  // Guarda los últimos `seconds` segundos en `path` (asíncrono).
-  void SaveClip(const std::string& path, double seconds);
+  // Guarda los últimos `seconds` segundos en `path` (asíncrono). endQpc: dónde
+  // acaba el clip (una orden de voz acaba donde se empezó a decir); 0 = ahora.
+  void SaveClip(const std::string& path, double seconds, int64_t endQpc = 0);
   bool StartRecording(const std::string& path);
   void StopRecording();
   bool Recording() const { return recorder_ && recorder_->Active(); }

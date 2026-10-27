@@ -35,7 +35,9 @@ public:
   // recodificar. Vídeo y audio se cortan en el mismo `end`. Bajo el lock solo
   // se copian referencias (~1 ms con 5 min de replay); ordenar va fuera,
   // porque los hilos de vídeo y audio esperan a ese lock en cada paquete.
-  std::vector<std::pair<SharedPacket, int>> Snapshot(double seconds, double end);
+  // latest: hasta dónde se puede alargar si el anillo ya no llega a
+  // `end - seconds` (una orden de voz acaba antes de pedirse); 0 = no se alarga.
+  std::vector<std::pair<SharedPacket, int>> Snapshot(double seconds, double end, double latest = 0);
 
   // Envía a `live` los paquetes desde el último keyframe y, a partir de ese
   // momento, cada paquete nuevo (todo bajo el mismo lock: no se pierde nada).

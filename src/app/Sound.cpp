@@ -110,9 +110,10 @@ void PlayCue(Cue cue, const std::string& style) {
   // llama desde el hilo de la interfaz.
   static std::map<std::string, std::vector<uint8_t>> saved;
   static const std::vector<uint8_t> marker = MakeWave({{1046.5f, 0.06f}}, Wave::Sine, 0.18f);
+  static const std::vector<uint8_t> voice = MakeWave({{587.33f, 0.05f}, {783.99f, 0.07f}}, Wave::Soft, 0.16f);
   const std::string id = IsKnownSaveSound(style) ? style : "clasico";
   if (cue == Cue::Saved && !saved.count(id)) saved[id] = SavedWave(id);
-  const std::vector<uint8_t>& wav = cue == Cue::Saved ? saved[id] : marker;
+  const std::vector<uint8_t>& wav = cue == Cue::Saved ? saved[id] : cue == Cue::Voice ? voice : marker;
   PlaySoundW(reinterpret_cast<LPCWSTR>(wav.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 
