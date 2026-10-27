@@ -54,6 +54,8 @@ struct MenuModel {
 struct PanelLinkState {
   bool configured = false; // hay nube en Ajustes; si no, el botón lo explica
   bool busy = false;       // en la cola o subiendo
+  bool queued = false;     // en la cola, todavía sin subir
+  bool copies = false;     // al acabar se copia el enlace (ya se pidió compartir)
   float progress = 0;      // 0..1 mientras sube
   bool ready = false;      // ya subido: el botón copia el enlace al momento
   std::string error;       // la última subida falló

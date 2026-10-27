@@ -328,6 +328,8 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     PanelLinkState link;
     link.configured = cloud_.Configured();
     link.busy = st.phase == Phase::Queued || st.phase == Phase::Uploading;
+    link.queued = st.phase == Phase::Queued;
+    link.copies = st.copyLink;
     link.progress = st.progress;
     link.ready = st.phase == Phase::Done;
     if (st.phase == Phase::Failed) link.error = st.error;

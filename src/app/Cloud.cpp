@@ -1122,7 +1122,7 @@ public:
         rateBytes_ = 0;
       }
       sh.Changed(true);
-      limit = sh.LimitKBps(urgent);
+      limit = sh.LimitKBps(urgent || e->urgent); // compartida a mitad de subida: ya va con prisa
     }
     if (limit != limit_ || now - windowAt_ > 3000) {
       // Límite nuevo (o una pausa larga): la cuenta empieza de cero, sin ráfaga.
@@ -1849,7 +1849,9 @@ void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, 
       if (deleteAtExit) existing->deleteAfter = false; // se copió para pegarlo: aguanta hasta salir
       existing->automatic &= automatic;
       // Pedirlo otra vez lo lleva a la nube de ahora, aunque fuera de otra.
-      if (sh.config.cyberMode && (existing->uploadId.empty() || sh.OtherCloud(*existing)))
+      // La que está subiendo ya va a la de ahora: se deja como está.
+      if (sh.config.cyberMode && existing->id != sh.currentId &&
+          (existing->uploadId.empty() || sh.OtherCloud(*existing)))
         Shared::ForgetTarget(*existing);
       existing->thisRun = true;
       existing->foreign = false;
@@ -2049,26 +2051,31 @@ void CloudUploader::SetGameActive(bool active) {
   Kick();
 }
 
-CloudFileState CloudUploader::State(const std::string& path) const {
+// Con el mutex tomado.
+static CloudFileState FileState(const Shared& sh, const Entry& e) {
   CloudFileState s;
-  std::lock_guard lock(shared_->mutex);
-  const Entry* e = shared_->FindPath(path);
-  if (!e) return s;
-  switch (e->st) {
+  switch (e.st) {
   case Entry::St::Done:
     s.phase = CloudFileState::Phase::Done;
     s.progress = 1;
     break;
   case Entry::St::Failed:
     s.phase = CloudFileState::Phase::Failed;
-    s.error = e->error;
+    s.error = e.error;
     break;
   case Entry::St::Queued:
-    s.phase = e->id == shared_->currentId ? CloudFileState::Phase::Uploading : CloudFileState::Phase::Queued;
-    s.progress = e->progress;
+    s.phase = e.id == sh.currentId ? CloudFileState::Phase::Uploading : CloudFileState::Phase::Queued;
+    s.progress = e.progress;
+    s.copyLink = e.copyLink;
     break;
   }
   return s;
+}
+
+CloudFileState CloudUploader::State(const std::string& path) const {
+  std::lock_guard lock(shared_->mutex);
+  const Entry* e = shared_->FindPath(path);
+  return e ? FileState(*shared_, *e) : CloudFileState{};
 }
 
 std::string CloudUploader::Link(const std::string& path) const {
@@ -2117,22 +2124,7 @@ std::unordered_map<std::string, CloudFileState> CloudUploader::Snapshot() const 
   std::lock_guard lock(shared_->mutex);
   for (const auto& e : shared_->entries) {
     if (!e.local && e.st == Entry::St::Done) continue;
-    CloudFileState s;
-    switch (e.st) {
-    case Entry::St::Done:
-      s.phase = CloudFileState::Phase::Done;
-      s.progress = 1;
-      break;
-    case Entry::St::Failed:
-      s.phase = CloudFileState::Phase::Failed;
-      s.error = e.error;
-      break;
-    case Entry::St::Queued:
-      s.phase = e.id == shared_->currentId ? CloudFileState::Phase::Uploading : CloudFileState::Phase::Queued;
-      s.progress = e.progress;
-      break;
-    }
-    out[e.path] = std::move(s); // la última de un mismo archivo gana
+    out[e.path] = FileState(*shared_, e); // la última de un mismo archivo gana
   }
   return out;
 }

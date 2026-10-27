@@ -1361,6 +1361,10 @@ void AppUi::CloudMenuItems(AppModel& m, const AppActions& a, const std::string& 
     std::string label = phase == CloudFileState::Phase::Queued
                             ? std::string("Cancelar la subida (en cola)")
                             : "Cancelar la subida (" + std::to_string(int(cloud->progress * 100.0f)) + " %)";
+    if (!cloud->copyLink) {
+      // Subida automática: el enlace no se copia solo. Pedirlo la sube ya.
+      if (ImGui::MenuItem("Copiar el enlace al terminar")) a.shareLink(path);
+    }
     if (ImGui::MenuItem(label.c_str())) a.cancelUpload(path);
     break;
   }
@@ -2178,8 +2182,9 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
                         : phase == CloudFileState::Phase::Done ? "Copiar el enlace (ya está en tu nube)"
                         : busy ? (phase == CloudFileState::Phase::Queued
                                       ? std::string("En la cola para subirse. Clic para cancelar")
-                                      : "Subiendo: " + std::to_string(int(cloud->progress * 100.0f)) +
-                                            " %. El enlace se copia al terminar. Clic para cancelar")
+                                      : "Subiendo: " + std::to_string(int(cloud->progress * 100.0f)) + " %." +
+                                            (cloud->copyLink ? " El enlace se copia al terminar." : "") +
+                                            " Clic para cancelar")
                         : phase == CloudFileState::Phase::Failed ? "No se pudo subir: " + cloud->error + ". Clic para reintentar"
                                                                  : "Compartir con un enlace: lo sube a tu nube y copia el "
                                                                    "enlace al terminar";

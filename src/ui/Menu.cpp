@@ -330,10 +330,16 @@ void DrawClipView(OverlayWindow& w, MenuModel& m, const MenuActions& a, PanelMed
       detail = "sin nube";
       tip = "Configura tu nube en Spectre (Ajustes > Nube) para compartir con un enlace";
     } else if (link.busy) {
-      detail = "subiendo " + std::to_string(int(std::clamp(link.progress, 0.0f, 1.0f) * 100.0f + 0.5f)) + " %";
+      // Puede ser una subida automática: entonces el enlace no se copia solo
+      // hasta que se pulse (y pulsar la sube ya, aunque haya un juego abierto).
+      detail = link.queued ? std::string("en la cola")
+                           : "subiendo " + std::to_string(int(std::clamp(link.progress, 0.0f, 1.0f) * 100.0f + 0.5f)) +
+                                 " %";
       color = p.accent;
-      progress = link.progress;
-      tip = "Al acabar se copia el enlace solo";
+      if (!link.queued) progress = link.progress;
+      tip = link.copies   ? "Al acabar se copia el enlace solo"
+            : link.queued ? "Está en la cola de subida. Pulsa para subirlo ya y copiar el enlace al acabar"
+                          : "Se está subiendo solo. Pulsa para copiar el enlace al acabar";
     } else if (link.ready) {
       detail = "subido";
       color = p.accent;
@@ -345,7 +351,7 @@ void DrawClipView(OverlayWindow& w, MenuModel& m, const MenuActions& a, PanelMed
     }
     if (ShareRow("link", Icon::External, link.ready ? "Copiar el enlace" : "Copiar enlace", detail, color, progress,
                  tip) &&
-        !link.busy)
+        !(link.busy && link.copies))
       a.shareLink(item.path);
   }
 
