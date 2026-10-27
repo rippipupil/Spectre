@@ -159,6 +159,23 @@ bool SameCameraSettings(const Config& a, const Config& b) {
   return a.cameraEnabled == b.cameraEnabled && a.cameraId == b.cameraId && a.cameraCorner == b.cameraCorner &&
          a.cameraSizePercent == b.cameraSizePercent;
 }
+
+// Modo cibercafé: la nube del cliente (dirección, bucket, dirección pública)
+// no se queda en config.json para el siguiente. Devuelve si cambió algo.
+bool ForgetCyberCloud(CloudConfig& c) {
+  const bool had = !c.endpoint.empty() || !c.bucket.empty() || !c.region.empty() || !c.publicUrl.empty();
+  c.endpoint.clear();
+  c.bucket.clear();
+  c.region.clear();
+  c.publicUrl.clear();
+  return had;
+}
+
+std::string LowerText(const std::string& s) {
+  std::wstring w = Widen(s);
+  if (!w.empty()) CharLowerBuffW(w.data(), DWORD(w.size()));
+  return Narrow(w);
+}
 } // namespace
 
 int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
@@ -181,7 +198,13 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   if (!hwnd_) return 1;
   taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
   AddTrayIcon();
-  // Lo que quedó por subir a la nube sigue ahora (con un juego, despacio).
+  // Lo que quedó por subir a la nube sigue ahora (con un juego, despacio). En
+  // el modo cibercafé, lo del cliente anterior no (Spectre pudo cerrarse a la
+  // fuerza, sin pasar por la limpieza de salir).
+  if (config_.cloud.cyberMode && ForgetCyberCloud(config_.cloud)) {
+    SaveConfig(config_);
+    SyncModels();
+  }
   cloud_.Start(hwnd_, config_.cloud);
   if (config_.cloud.cyberMode) {
     FILETIME now;
@@ -357,7 +380,11 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     Defer([this, paths] { UploadToCloud(paths); });
   };
   appActions_.shareLink = [this](const std::string& path) { Defer([this, path] { ShareLink(path); }); };
-  appActions_.cancelUpload = [this](const std::string& path) { cloud_.Cancel(path); };
+  appActions_.cancelUpload = [this](const std::string& path) {
+    // En el modo cibercafé el barrido de la carpeta no la vuelve a poner en la cola.
+    if (config_.cloud.cyberMode) cyberCancelled_.insert(LowerText(path));
+    cloud_.Cancel(path);
+  };
   appActions_.retryUpload = [this](const std::string& path) { cloud_.Retry(path); };
   SettingsActions& settings = appActions_.settings;
   settings.checkUpdates = [this] { updater_.Check(); };
@@ -507,6 +534,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   // La subida en curso sigue la próxima vez (cada parte ya enviada queda apuntada).
   // Lo subido que tocaba borrar se borra ahora; lo que no se pueda, se enseña al final.
   std::vector<std::string> undeleted = cloud_.Stop();
+  if (config_.cloud.cyberMode && ForgetCyberCloud(config_.cloud)) SaveConfig(config_);
   if (importCancel_) importCancel_->store(true);
   exporter_.Stop(); // una exportación a medias se cancela y se borra
   editWorker_.Stop(); // y lo mismo una edición
@@ -1392,13 +1420,26 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   if (pipeline_.Running()) pipeline_.SetCameraEditable(config_.cameraEditable);
 
   if (old.cloud.cyberMode != config_.cloud.cyberMode) {
-    // Al entrar en el modo cibercafé las claves salen del disco (quedan en
-    // memoria hasta salir); al dejarlo, este PC es tuyo y se guardan.
-    cloud_.PersistKeys(!config_.cloud.cyberMode);
     Log("Nube: modo cibercafé %s", config_.cloud.cyberMode ? "activado" : "desactivado");
-    FILETIME now;
-    GetSystemTimeAsFileTime(&now);
-    cyberSince_ = config_.cloud.cyberMode ? (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime : 0;
+    if (config_.cloud.cyberMode) {
+      // Las claves salen del disco: quedan en memoria hasta salir.
+      cloud_.PersistKeys(false);
+      FILETIME now;
+      GetSystemTimeAsFileTime(&now);
+      cyberSince_ = (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    } else {
+      // Quien lo apaga puede ser el siguiente cliente: nada de la sesión se
+      // guarda. En tu PC basta con volver a pegar tu configuración.
+      cloud_.EndCyberSession();
+      const CloudConfig& o = old.cloud;
+      CloudConfig& c = config_.cloud;
+      if (c.endpoint == o.endpoint && c.bucket == o.bucket && c.publicUrl == o.publicUrl && ForgetCyberCloud(c)) {
+        SaveConfig(config_);
+        SyncModels();
+      }
+      cyberSince_ = 0;
+      cyberCancelled_.clear();
+    }
   }
   if (old.cloud != config_.cloud) cloud_.Configure(config_.cloud);
   const bool folderChanged = old.outputDir != config_.outputDir || old.folderPerGame != config_.folderPerGame ||
@@ -2484,8 +2525,9 @@ void App::CyberSweep() {
     FindClose(h);
   }
   for (const auto& path : found) {
-    // Lo que no está en la cola (lo que se está escribiendo espera solo a que lo suelten).
-    if (cloud_.State(path).phase == CloudFileState::Phase::None)
+    // Lo que no está en la cola (lo que se está escribiendo espera solo a que
+    // lo suelten), salvo lo que se canceló a mano.
+    if (cloud_.State(path).phase == CloudFileState::Phase::None && !cyberCancelled_.count(LowerText(path)))
       cloud_.Enqueue(path, false, config_.cloud.copyLink, CloudDelete::AfterUpload, true);
   }
 }
@@ -2562,7 +2604,8 @@ void App::PasteCloudSettings(bool cyber) {
   s.cloudEditKeys = false;
   s.cloudMessage = !error.empty()                ? error
                    : config_.cloud.cyberMode     ? "Listo, en modo cibercafé: lo que guardes se sube solo y se borra "
-                                                   "de este PC. Las claves se olvidan al salir de Spectre."
+                                                   "de este PC. Cierra Spectre antes de irte: mientras siga abierto, "
+                                                   "quien use el PC después puede subir a tu nube."
                                                  : "Listo: tu nube está configurada en este PC.";
   s.cloudMessageError = !error.empty();
   cloud_.Test(config_.cloud, {});

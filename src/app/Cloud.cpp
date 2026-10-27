@@ -710,6 +710,16 @@ std::string Extension(const std::string& name) {
   return LowerAscii(Narrow(std::filesystem::path(Widen(name)).extension().wstring()));
 }
 
+// spectre/<id>-<código>.<ext>: el identificador sale de la fecha y el código
+// son 24 caracteres aleatorios. Vacío si Windows no da números aleatorios.
+std::string NewKey(const std::string& path) {
+  const std::string code = RandomCode(24);
+  if (code.empty()) return {};
+  std::string ext = Extension(path);
+  if (ext.size() > 8 || ext.find_first_not_of(".abcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos) ext.clear();
+  return std::string(kKeyPrefix) + Base36(UnixMillis()) + "-" + code + ext;
+}
+
 std::string ContentType(const std::string& name) {
   std::string ext = Extension(name);
   if (ext == ".mp4") return "video/mp4";
@@ -789,7 +799,9 @@ struct Entry {
   bool urgent = false;        // compartir ahora: no espera a que se cierre el juego
   bool local = true;          // sigue en el PC
   bool deletePending = false; // subido, pero no se pudo borrar del PC todavía
+  bool foreign = false;       // quedó de una sesión del modo cibercafé: solo sube con «Reintentar»
   // Solo en memoria
+  bool otherCloud = false; // modo cibercafé: es de la nube de antes (fallada hasta «Reintentar» o hasta que vuelva)
   bool thisRun = false; // se puso en la cola (o se reintentó) desde que se abrió Spectre
   float progress = 0;
   int tries = 0;
@@ -881,6 +893,48 @@ struct CloudUploader::Shared {
                                  [](const Entry& e) { return e.st == Entry::St::Done && !e.deletePending; }),
                   entries.end());
   }
+  // Lo que no llegó a subirse en una sesión del modo cibercafé ya no es de
+  // nadie de ahora: no se sube solo a la nube de quien pegue la suya.
+  void Disown() {
+    for (auto& e : entries) {
+      if (e.st == Entry::St::Done) continue;
+      e.st = Entry::St::Failed;
+      e.foreign = true;
+      e.otherCloud = false;
+      e.error = "Quedó de una sesión del modo cibercafé y no se sube sola. «Reintentar» la sube a la nube que esté "
+                "configurada ahora.";
+      ForgetTarget(e);
+      // Un código nuevo: el de antes pudo quedar en un cloud.json de esa sesión.
+      if (std::string key = NewKey(e.path); !key.empty()) e.key = std::move(key);
+    }
+  }
+  static void ForgetTarget(Entry& e) {
+    e.endpoint.clear();
+    e.bucket.clear();
+    e.region.clear();
+    e.uploadId.clear();
+    e.etags.clear();
+    e.partSize = 0;
+  }
+  // Modo cibercafé, al cambiar la nube: lo fijado a otra queda fallado (se ve
+  // y entra en «Reintentar»), y vuelve a la cola si vuelve su nube.
+  void SortOtherClouds() {
+    if (!config.cyberMode) return;
+    for (auto& e : entries) {
+      if (e.st == Entry::St::Queued && OtherCloud(e)) {
+        e.st = Entry::St::Failed;
+        e.otherCloud = true;
+        e.error = "Es de otra nube: la que estaba configurada al guardarlo. «Reintentar» la sube a la de ahora.";
+        e.tries = 0;
+        e.retryAt = 0;
+        e.progress = 0;
+      } else if (e.st == Entry::St::Failed && e.otherCloud && !OtherCloud(e)) {
+        e.st = Entry::St::Queued;
+        e.otherCloud = false;
+        e.error.clear();
+      }
+    }
+  }
   // Hay algo que subir ahora o tras la espera de un reintento.
   bool HasWork() const {
     if (!HaveTarget() || paused || stop) return false;
@@ -911,9 +965,24 @@ struct CloudUploader::Shared {
   nlohmann::json ToJson() const {
     nlohmann::json items = nlohmann::json::array();
     for (const auto& e : entries) {
-      nlohmann::json v = {{"path", e.path},     {"name", e.name},   {"size", e.size},         {"mtime", e.mtime},
-                          {"key", e.key},       {"endpoint", e.endpoint}, {"bucket", e.bucket}, {"region", e.region},
-                          {"state", StateName(e.st)}, {"at", e.at}, {"when", e.when},         {"local", e.local}};
+      // Modo cibercafé: de lo subido solo lo que falta borrar del PC, y ninguna
+      // clave (con la dirección pública rehace el enlace; lo que no se subió
+      // recibe otra al cargarse). Spectre puede acabar sin Stop: el programa
+      // del cibercafé lo cierra a la fuerza.
+      const bool done = e.st == Entry::St::Done;
+      if (config.cyberMode && done && !(e.local && (e.deletePending || e.deleteAtExit))) continue;
+      nlohmann::json v = {{"path", e.path},
+                          {"name", e.name},
+                          {"size", e.size},
+                          {"mtime", e.mtime},
+                          {"key", config.cyberMode ? std::string() : e.key},
+                          {"endpoint", e.endpoint},
+                          {"bucket", e.bucket},
+                          {"region", e.region},
+                          {"state", StateName(e.st)},
+                          {"at", e.at},
+                          {"when", e.when},
+                          {"local", e.local}};
       if (!e.uploadId.empty()) {
         v["uploadId"] = e.uploadId;
         v["partSize"] = e.partSize;
@@ -926,6 +995,7 @@ struct CloudUploader::Shared {
       if (e.automatic) v["auto"] = true;
       if (e.urgent) v["urgent"] = true;
       if (e.deletePending) v["deletePending"] = true;
+      if (e.foreign) v["foreign"] = true;
       items.push_back(std::move(v));
     }
     return {{"version", 1}, {"paused", paused}, {"items", std::move(items)}};
@@ -964,7 +1034,16 @@ struct CloudUploader::Shared {
         e.automatic = v.value("auto", false);
         e.urgent = v.value("urgent", false);
         e.deletePending = v.value("deletePending", false);
-        if (e.path.empty() || e.key.empty()) continue;
+        e.foreign = v.value("foreign", false);
+        // En el modo cibercafé se guarda sin clave: lo subido solo sirve para
+        // borrarlo, y lo demás se subirá con un código nuevo.
+        if (e.key.empty() && e.st != Entry::St::Done) {
+          e.key = NewKey(e.path);
+          e.uploadId.clear();
+          e.etags.clear();
+          e.partSize = 0;
+        }
+        if (e.path.empty() || (e.key.empty() && e.st != Entry::St::Done)) continue;
         entries.push_back(std::move(e));
       }
     } catch (const std::exception& ex) {
@@ -996,6 +1075,7 @@ void SaveQueue(Shared& sh, bool force) {
 
 // Enlace de algo subido: la dirección pública si es el mismo bucket; si no, firmado ahora.
 std::string LinkFor(const Shared& sh, const Entry& e) {
+  if (e.key.empty()) return {};
   const CloudConfig& c = sh.config;
   if (!Trim(c.publicUrl).empty() && Trim(c.endpoint) == e.endpoint && CloudBucket(c) == e.bucket)
     return PublicLink(c.publicUrl, e.key);
@@ -1554,8 +1634,10 @@ void CloudUploader::Start(HWND notify, const CloudConfig& config) {
     if (config.cyberMode) DeleteKeysFile(); // en un PC compartido nunca quedan en disco
     shared_->Changed();
   }
-  // Subidas terminadas que no se pudieron borrar del PC (estaba abierto en otro programa).
-  RemoveUploaded(false);
+  // Subidas terminadas que no se pudieron borrar del PC (estaba abierto en otro
+  // programa) y lo que se borraba al salir: si se está arrancando, esa salida
+  // ya pasó (quizá a la fuerza, sin Stop).
+  RemoveUploaded(true);
   {
     std::lock_guard lock(shared_->mutex);
     Shared& sh = *shared_;
@@ -1565,18 +1647,7 @@ void CloudUploader::Start(HWND notify, const CloudConfig& config) {
       // no llegó a subirse no va solo a la nube de quien pegue ahora la suya.
       sh.CyberCleanup();
       sh.paused = false; // la pausa era del cliente anterior
-      for (auto& e : sh.entries) {
-        if (e.st == Entry::St::Done) continue;
-        e.st = Entry::St::Failed;
-        e.error = "Quedó de otra sesión del modo cibercafé y no se sube sola. «Reintentar» la sube a la nube que "
-                  "esté configurada ahora.";
-        e.endpoint.clear();
-        e.bucket.clear();
-        e.region.clear();
-        e.uploadId.clear();
-        e.etags.clear();
-        e.partSize = 0;
-      }
+      sh.Disown();
       sh.Changed();
     }
   }
@@ -1615,9 +1686,11 @@ void CloudUploader::Configure(const CloudConfig& config) {
   {
     std::lock_guard lock(shared_->mutex);
     shared_->config = config;
+    shared_->SortOtherClouds();
     ++shared_->wake;
     shared_->Changed();
   }
+  SaveQueue(*shared_, true);
   shared_->cv.notify_all();
   Kick();
 }
@@ -1670,7 +1743,7 @@ bool CloudUploader::SetKeys(const CloudKeys& keys, bool persist, std::string* er
     // Con claves nuevas, lo que falló por ellas se vuelve a intentar (en el
     // cibercafé, lo de otra sesión solo con «Reintentar»).
     for (auto& e : shared_->entries)
-      if (e.st == Entry::St::Failed && (!shared_->config.cyberMode || e.thisRun)) {
+      if (e.st == Entry::St::Failed && !e.foreign && !e.otherCloud) {
         e.st = Entry::St::Queued;
         e.error.clear();
       }
@@ -1704,6 +1777,24 @@ void CloudUploader::ForgetKeys() {
   shared_->keys = {};
   shared_->keysStored = false;
   shared_->Changed();
+}
+
+void CloudUploader::EndCyberSession() {
+  RemoveUploaded(true); // lo copiado para pegarlo: la sesión acabó
+  DeleteKeysFile();
+  {
+    std::lock_guard lock(shared_->mutex);
+    Shared& sh = *shared_;
+    Wipe(sh.keys.secret);
+    sh.keys = {};
+    sh.keysStored = false;
+    sh.CyberCleanup();
+    sh.Disown();
+    ++sh.wake;
+    sh.Changed();
+  }
+  SaveQueue(*shared_, true);
+  shared_->cv.notify_all();
 }
 
 CloudKeys CloudUploader::Keys() const {
@@ -1750,9 +1841,12 @@ void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, 
       existing->deleteAtExit |= deleteAtExit;
       if (deleteAtExit) existing->deleteAfter = false; // se copió para pegarlo: aguanta hasta salir
       existing->automatic &= automatic;
+      // Pedirlo otra vez lo lleva a la nube de ahora, aunque fuera de otra.
+      if (sh.config.cyberMode && (existing->uploadId.empty() || sh.OtherCloud(*existing)))
+        Shared::ForgetTarget(*existing);
       existing->thisRun = true;
-      // Pedirlo a mano lo lleva a la nube de ahora (si no había empezado en otra).
-      if (sh.config.cyberMode && existing->uploadId.empty()) existing->endpoint.clear();
+      existing->foreign = false;
+      existing->otherCloud = false;
       if (front && existing->id != sh.currentId) {
         Entry moved = std::move(*existing);
         sh.entries.erase(sh.At(existing));
@@ -1770,23 +1864,21 @@ void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, 
       e.name = Narrow(std::filesystem::path(Widen(path)).filename().wstring());
       e.size = size;
       e.mtime = mtime;
-      const std::string code = RandomCode(24);
-      std::string ext = Extension(path);
-      if (ext.size() > 8 || ext.find_first_not_of(".abcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos)
-        ext.clear();
-      if (code.empty()) {
+      e.key = NewKey(path);
+      if (e.key.empty()) {
         e.st = Entry::St::Failed;
         e.error = "Windows no pudo generar el código del enlace.";
       }
-      e.key = std::string(kKeyPrefix) + Base36(UnixMillis()) + "-" + code + ext;
       e.copyLink = copyLink;
       e.urgent = front;
       e.deleteAfter = deleteAfter;
       e.deleteAtExit = deleteAtExit;
       e.automatic = automatic;
       e.thisRun = true;
-      if (sh.config.cyberMode && !Trim(sh.config.endpoint).empty()) {
-        // Modo cibercafé: a la nube de quien lo guardó, aunque luego se pegue otra.
+      if (sh.config.cyberMode && sh.HaveTarget()) {
+        // Modo cibercafé: a la nube de quien lo guardó, aunque luego se pegue
+        // otra. Sin claves en esta sesión todavía no es de nadie: va a la
+        // primera que se pegue.
         e.endpoint = Trim(sh.config.endpoint);
         e.bucket = CloudBucket(sh.config);
       }
@@ -1865,12 +1957,15 @@ void CloudUploader::Retry(const std::string& path) {
     for (auto& e : shared_->entries)
       if ((e.st == Entry::St::Failed || (e.st == Entry::St::Queued && e.retryAt)) &&
           (lower.empty() || e.lower == lower)) {
+        // A la nube de ahora (la subida por partes empezada en esta, se retoma).
+        if (shared_->config.cyberMode && (e.uploadId.empty() || shared_->OtherCloud(e))) Shared::ForgetTarget(e);
         e.st = Entry::St::Queued;
         e.error.clear();
         e.tries = 0;
         e.retryAt = 0;
         e.thisRun = true;
-        if (shared_->config.cyberMode && e.uploadId.empty()) e.endpoint.clear(); // a la nube de ahora
+        e.foreign = false;
+        e.otherCloud = false;
       }
     shared_->offline = false;
     ++shared_->wake;
@@ -2001,7 +2096,7 @@ CloudStatus CloudUploader::Status() const {
       }
     } else {
       ++s.doneCount;
-      if (s.recent.size() < 20) s.recent.push_back({e.path, e.name, e.when, e.local});
+      if (s.recent.size() < 20 && !e.key.empty()) s.recent.push_back({e.path, e.name, e.when, e.local});
     }
   }
   s.test = sh.test;

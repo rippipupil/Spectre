@@ -1604,7 +1604,8 @@ void CloudCyber(SettingsModel& m, const SettingsActions& a) {
   if (c.cyberMode != m.base.cloud.cyberMode)
     Warning(c.cyberMode ? "Al aplicar, las claves se borran del disco de este PC (siguen en memoria hasta salir) y lo "
                           "que guardes se sube y se borra de aquí."
-                        : "Al aplicar, las claves se guardan cifradas en este PC y lo que guardes se queda en él.");
+                        : "Al aplicar, se olvidan las claves y la nube de este PC, y lo que guardes se queda en él. "
+                          "Para usar tu nube aquí, pega tu configuración con «Pegar en este PC».");
   Help("En tu PC pulsa «Copiar configuración» y guárdala donde solo la veas tú. En el del cibercafé, abre Spectre, "
        "Ajustes > Nube, y pulsa «Pegar en modo cibercafé»: no hace falta escribir las claves.");
   Gap(4);

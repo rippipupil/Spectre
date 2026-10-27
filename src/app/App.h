@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -318,6 +319,7 @@ private:
   CloudUploader cloud_;
   uint64_t cloudVersion_ = 0; // la de appModel_.cloud
   uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
+  std::unordered_set<std::string> cyberCancelled_; // en minúsculas: canceladas a mano en esta sesión
   std::shared_ptr<std::atomic<bool>> importCancel_;
   std::shared_ptr<std::atomic<int>> importDone_ = std::make_shared<std::atomic<int>>(0);
   std::shared_ptr<std::atomic<int>> importTotal_ = std::make_shared<std::atomic<int>>(0);

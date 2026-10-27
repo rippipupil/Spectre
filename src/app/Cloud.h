@@ -111,6 +111,10 @@ public:
   // Pasa las claves de memoria a disco o al revés (al cambiar el modo cibercafé).
   void PersistKeys(bool persist);
   void ForgetKeys();
+  // Al dejar el modo cibercafé: quien lo apaga puede ser el siguiente cliente.
+  // Olvida las claves y lo subido, borra lo copiado para pegarlo y lo que no
+  // llegó a subirse ya no se sube solo (solo con «Reintentar»).
+  void EndCyberSession();
   CloudKeys Keys() const;
 
   // A la cola. front: la primera (compartir ahora). Si ya está subido, solo
