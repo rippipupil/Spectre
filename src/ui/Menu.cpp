@@ -634,19 +634,19 @@ void DrawPanel(OverlayWindow& w, MenuModel& m, const MenuActions& a, PanelMedia&
         const char* text = "Fuente graba a la resolución nativa y a los Hz del monitor, con el bitrate más alto "
                            "que da tu gráfica. Gasta mucha más RAM, GPU y disco: si el juego va a tirones, vuelve "
                            "a Alta.";
-        const float w = ImGui::GetContentRegionAvail().x;
+        const float boxW = ImGui::GetContentRegionAvail().x;
         const float pad = Px(10), bar = Px(3), fs = Px(kSmall);
-        const float wrap = w - bar - pad * 2;
+        const float wrap = boxW - bar - pad * 2;
         ImVec2 q = ImGui::GetCursorScreenPos();
         ImFont* font = Sized(ImGui::GetFont(), fs);
         ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrap, text);
-        ImVec2 end(q.x + w, q.y + ts.y + pad * 2);
+        ImVec2 end(q.x + boxW, q.y + ts.y + pad * 2);
         // Una caja del diseño con una barra a la izquierda.
         CardFrame(dl, q, end, p.warning);
         dl->AddText(font, fs, ImVec2(q.x + bar + pad, q.y + pad), C(p.text), text, nullptr, wrap);
-        ImGui::Dummy(ImVec2(w, end.y - q.y));
+        ImGui::Dummy(ImVec2(boxW, end.y - q.y));
         Gap(6);
-        float half = (w - Px(8)) * 0.5f;
+        float half = (boxW - Px(8)) * 0.5f;
         if (GhostButton("source-cancel", "Cancelar", half)) m.confirmSource = false;
         ImGui::SameLine(0, Px(8));
         if (SolidButton("source-ok", "Activar Fuente", half)) {
