@@ -316,7 +316,8 @@ void VoiceListener::Shared::OnResult(ISpRecoResult* result, bool recognized, con
   CoTaskMemFree(phrase);
   LPWSTR text = nullptr;
   std::string heard;
-  if (SUCCEEDED(result->GetText(SP_GETWHOLEPHRASE, SP_GETWHOLEPHRASE, TRUE, &text, nullptr))) heard = TakeString(text);
+  const ULONG whole = ULONG(SP_GETWHOLEPHRASE); // -1: todas las palabras
+  if (SUCCEEDED(result->GetText(whole, whole, TRUE, &text, nullptr))) heard = TakeString(text);
 
   const int command = int(ruleId) - int(kRuleBase);
   const bool known = recognized && command >= 0 && command < kVoiceCommandCount && !heard.empty();
