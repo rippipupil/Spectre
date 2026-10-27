@@ -338,7 +338,7 @@ void DrawClipView(OverlayWindow& w, MenuModel& m, const MenuActions& a, PanelMed
       color = p.accent;
       if (!link.queued) progress = link.progress;
       tip = link.copies   ? "Al acabar se copia el enlace solo"
-            : link.queued ? "Está en la cola de subida. Pulsa para subirlo ya y copiar el enlace al acabar"
+            : link.queued ? "Está en la cola de subida. Pulsa para que vaya la primera y copiar el enlace al acabar"
                           : "Se está subiendo solo. Pulsa para copiar el enlace al acabar";
     } else if (link.ready) {
       detail = "subido";

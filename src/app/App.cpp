@@ -2606,7 +2606,11 @@ void App::ShareLink(const std::string& path) {
   // Si ya está subido llega enseguida el aviso con el enlace (WM_SPECTRE_CLOUD).
   const bool uploaded = cloud_.State(path).phase == CloudFileState::Phase::Done;
   cloud_.Enqueue(path, true, true, ManualRemoval(path), false);
-  if (!uploaded)
+  if (uploaded) return;
+  if (cloud_.Status().paused) // la pausa a mano para también lo compartido
+    Notify({NoticeKind::Working, "Subidas en pausa",
+            FileNameOf(path) + " se sube al reanudarlas (Biblioteca > Seguir) y entonces se copia el enlace"});
+  else
     Notify({NoticeKind::Working, "Subiendo a la nube", FileNameOf(path) + ". El enlace se copia al terminar"});
 }
 
