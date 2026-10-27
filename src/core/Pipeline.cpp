@@ -520,7 +520,7 @@ void Pipeline::VideoLoop() {
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
 
-void Pipeline::SaveClip(const std::string& path, double seconds) {
+void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc) {
   if (!running_ || !buffer_) {
     if (notify_) notify_("El replay no está activo", true);
     return;
@@ -528,7 +528,11 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   auto buffer = buffer_;
   auto notify = notify_;
   // El clip termina en el instante de la tecla, el mismo para vídeo y audio.
-  double end = QpcToSeconds(QpcNow() - startQpc_);
+  // Uno anterior al arranque de la captura (se reinició mientras se hablaba) no vale.
+  const int64_t now = QpcNow();
+  if (endQpc <= startQpc_ || endQpc > now) endQpc = now;
+  double end = QpcToSeconds(endQpc - startQpc_);
+  const double requested = QpcToSeconds(now - startQpc_); // hasta aquí llega el audio tras la espera
   double age;
   {
     std::lock_guard lock(statsMutex_);
@@ -540,7 +544,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
   double latency = streams_.size() > 1 ? audio_.LatencySeconds() : 0.0;
   DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, notify, path, seconds, end, pending, waitMs] {
+  std::thread([buffer, notify, path, seconds, end, requested, pending, waitMs] {
     InstallThreadCrashHandler();
     Sleep(waitMs);
     bool ok = false;
@@ -550,7 +554,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds) {
       // no con la baja de la escritura, para que el juego no pueda dejarlo sin
       // turno con el lock cogido. Son referencias, ~1 ms con 5 min de replay.
       int64_t t0 = QpcNow();
-      auto packets = buffer->Snapshot(seconds, end);
+      auto packets = buffer->Snapshot(seconds, end, requested);
       auto streams = buffer->Streams(); // con las del fondo de la cámara añadidas por el camino
       double copyMs = QpcToSeconds(QpcNow() - t0) * 1000.0;
       // Escribir sí puede esperar: prioridad baja y, dentro de WriteClip, E/S

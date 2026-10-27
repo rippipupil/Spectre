@@ -303,23 +303,7 @@ std::shared_ptr<UiTexture> AppWindow::CreateTexture(const uint8_t* bgra, int wid
       return tex;
     }
   }
-  D3D11_TEXTURE2D_DESC desc{};
-  desc.Width = UINT(width);
-  desc.Height = UINT(height);
-  desc.MipLevels = 1;
-  desc.ArraySize = 1;
-  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  desc.SampleDesc.Count = 1;
-  desc.Usage = D3D11_USAGE_IMMUTABLE;
-  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  D3D11_SUBRESOURCE_DATA data{bgra, UINT(width) * 4, 0};
-  auto tex = std::make_shared<UiTexture>();
-  if (FAILED(device_->CreateTexture2D(&desc, &data, &tex->texture)) ||
-      FAILED(device_->CreateShaderResourceView(tex->texture.Get(), nullptr, &tex->srv)))
-    return nullptr;
-  tex->width = width;
-  tex->height = height;
-  return tex;
+  return MakeImageTexture(device_.Get(), bgra, width, height);
 }
 
 void AddTextureImage(ImDrawList* dl, const UiTexture& tex, ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1, ImU32 tint) {
@@ -339,23 +323,7 @@ void AddTextureImage(ImDrawList* dl, const UiTexture& tex, ImVec2 p0, ImVec2 p1,
 }
 
 std::shared_ptr<UiTexture> AppWindow::CreateRenderTexture(int width, int height) {
-  if (!device_ || width <= 0 || height <= 0) return nullptr;
-  D3D11_TEXTURE2D_DESC desc{};
-  desc.Width = UINT(width);
-  desc.Height = UINT(height);
-  desc.MipLevels = 1;
-  desc.ArraySize = 1;
-  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  desc.SampleDesc.Count = 1;
-  desc.Usage = D3D11_USAGE_DEFAULT;
-  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-  auto tex = std::make_shared<UiTexture>();
-  if (FAILED(device_->CreateTexture2D(&desc, nullptr, &tex->texture)) ||
-      FAILED(device_->CreateShaderResourceView(tex->texture.Get(), nullptr, &tex->srv)))
-    return nullptr;
-  tex->width = width;
-  tex->height = height;
-  return tex;
+  return MakeRenderTexture(device_.Get(), width, height);
 }
 
 // ------------------------------------------------------------------ ImGui

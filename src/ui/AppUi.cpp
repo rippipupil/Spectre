@@ -623,6 +623,9 @@ void AppUi::Draw(AppWindow& w, AppModel& m, const AppActions& a) {
   if (m.page == AppPage::Settings && m.settings.update.state == UpdateStatus::State::Downloading) w.AnimateAt(now + 100);
   if (m.page == AppPage::Settings && m.settingsPage == SettingsPage::Audio && w.Focused()) w.AnimateAt(now + 33);
   if (m.page == AppPage::Settings && m.settingsPage == SettingsPage::Performance) w.AnimateAt(now + 1000);
+  // Ajustes > Voz: «Lo último que oyó... hace 5 s».
+  if (m.page == AppPage::Settings && m.settingsPage == SettingsPage::Voice && m.settings.voice.heardAt)
+    w.AnimateAt(now + 1000);
   if (player_.Playing() || scrubbing_) w.Animate();
 
   // Miniaturas que hace rato que no se ven: fuera, para no acumular VRAM.

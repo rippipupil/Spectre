@@ -2,6 +2,7 @@
 
 #include "app/Cloud.h"
 #include "app/Config.h"
+#include "app/DiscordPresence.h"
 #include "app/Export.h"
 #include "app/Fullscreen.h"
 #include "app/Library.h"
@@ -9,12 +10,14 @@
 #include "app/System.h"
 #include "app/Updater.h"
 #include "app/VideoEdit.h"
+#include "app/Voice.h"
 #include "core/Pipeline.h"
 #include "ui/AppUi.h"
 #include "ui/AppWindow.h"
 #include "ui/KeyboardHook.h"
 #include "ui/Menu.h"
 #include "ui/OverlayWindow.h"
+#include "ui/PanelMedia.h"
 #include "ui/Toast.h"
 
 #include <shellapi.h>
@@ -41,7 +44,8 @@ private:
 
   // Acciones
   // shortClip: solo los últimos Config::shortClipSeconds (atajo de clip corto).
-  void SaveClip(bool shortClip = false);
+  // endQpc: dónde acaba (una orden de voz, donde se empezó a decir); 0 = ahora.
+  void SaveClip(bool shortClip = false, int64_t endQpc = 0);
   void ToggleRecording();
   void ToggleReplay();
   void ToggleMicrophone();
@@ -49,7 +53,11 @@ private:
   void SetClipSeconds(int seconds);
   void SetQuality(const std::string& quality);
   void CaptureScreenshot();
-  void AddMarker();
+  void AddMarker(int64_t at = 0); // at: QPC del momento; 0 = ahora
+  // Comandos de voz (Ajustes > Voz): el oyente arranca, se para o se reinicia
+  // según los ajustes y si hay un juego; cada orden hace lo mismo que su atajo.
+  void UpdateVoice();
+  void OnVoiceCommand(const VoiceEvent& event);
   void TrimClip(const std::string& path, double start, double end);
   // Biblioteca: unir clips y cámara lenta (app/Edit.h), en otro hilo como el recorte.
   void JoinClips(const std::vector<std::string>& paths);
@@ -163,6 +171,9 @@ private:
   void AnnounceGame();
   // Ajustes > Avisos > Versiones nuevas: una comprobación al abrir y cada 12 h.
   void CheckUpdatesQuietly();
+  // Estado en Discord: lo que se graba y los clips de la partida (barato si no
+  // cambia). newClips: clips que se acaban de guardar.
+  void UpdatePresence(int newClips = 0);
   void SyncModels(); // el config activo cambió: panel y ventana lo muestran
   void RefreshMenuModel();
   void RefreshPanelClips();
@@ -269,6 +280,7 @@ private:
   std::vector<int64_t> recordMarkers_; // QPC de las marcas de la grabación en curso
   ULONGLONG lowDiskWarnedAt_ = 0;
   std::string limitWarned_; // el último «el límite no puede borrar nada» avisado
+  VoiceListener voice_;     // solo escucha con los comandos de voz activados
 
   // Panel sobre el juego. Abierto sin foco (juego a pantalla completa), el
   // teclado llega por el gancho; con foco, el gancho no se instala.
@@ -314,6 +326,16 @@ private:
   int exportBatchTotal_ = 0;
   int exportBatchFailed_ = 0;
   std::string exportBatchError_;
+
+  // Panel Alt+Z: miniaturas y vista previa de los recientes (solo con el panel abierto).
+  PanelMedia panelMedia_;
+  // Estado en Discord: el hilo solo existe con la opción activada.
+  DiscordPresence discord_;
+  DWORD presencePid_ = 0;           // juego de la partida en la que se cuentan los clips (0 = ninguno)
+  int presenceClips_ = 0;           // clips guardados en esa partida
+  int64_t presenceSince_ = 0;       // segundos UNIX: desde cuándo se juega
+  bool presenceRecording_ = false;
+  int64_t presenceRecordSince_ = 0; // segundos UNIX: desde cuándo se graba
 
   // Nube y ShadowPlay
   CloudUploader cloud_;

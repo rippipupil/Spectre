@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -176,6 +177,45 @@ std::string LowerText(const std::string& s) {
   if (!w.empty()) CharLowerBuffW(w.data(), DWORD(w.size()));
   return Narrow(w);
 }
+
+// Navegadores y reproductores a pantalla completa: no son juegos.
+bool IsMediaApp(std::string exe) {
+  for (auto& ch : exe) ch = char(tolower(static_cast<unsigned char>(ch)));
+  static const char* kMediaApps[] = {"chrome",   "msedge",       "firefox",     "opera",  "brave",   "vivaldi",
+                                     "iexplore", "vlc",          "mpc-hc",      "mpc-hc64", "mpc-be", "mpc-be64",
+                                     "mpv",      "potplayermini", "potplayermini64", "wmplayer", "kodi", "spotify",
+                                     "discord",  "powerpnt",     "netflix",     "obs64"};
+  for (const char* app : kMediaApps)
+    if (exe == app) return true;
+  return false;
+}
+
+// El nombre del juego para Discord a partir del ejecutable (el título de la
+// ventana podría ser el de un vídeo o una página): «GeometryDash» pasa a
+// «Geometry Dash» y «VALORANT-Win64-Shipping», a «VALORANT».
+std::string PresenceGameName(std::string exe) {
+  for (const char* tail : {"-Win64-Shipping", "-Win32-Shipping", "-WinGDK-Shipping", "_x64", "_x86", "64"}) {
+    const size_t n = strlen(tail);
+    if (exe.size() > n + 2 && exe.compare(exe.size() - n, n, tail) == 0) {
+      exe.resize(exe.size() - n);
+      break;
+    }
+  }
+  std::string out;
+  for (size_t i = 0; i < exe.size(); ++i) {
+    const char ch = exe[i] == '_' || exe[i] == '-' ? ' ' : exe[i];
+    const bool upper = ch >= 'A' && ch <= 'Z';
+    const bool afterLower = i > 0 && exe[i - 1] >= 'a' && exe[i - 1] <= 'z';
+    if (upper && afterLower) out += ' ';
+    if (ch != ' ' || (!out.empty() && out.back() != ' ')) out += ch;
+  }
+  while (!out.empty() && out.back() == ' ') out.pop_back();
+  return out.empty() ? std::string("un juego") : out;
+}
+
+int64_t UnixNow() {
+  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
 } // namespace
 
 int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
@@ -268,6 +308,43 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
       ShowInFolder(path);
       CloseMenu(false);
     });
+  };
+  // Compartir desde el panel: el panel sigue abierto y el juego, delante.
+  menuActions_.copyFile = [this](const std::string& path) {
+    Defer([this, path] {
+      if (CopyFileToClipboard(hwnd_, path)) {
+        KeepForPaste({path}); // en el modo cibercafé no se borra al subirse: Ctrl+V lo sigue pegando
+        Toast("Copiado. Pégalo con Ctrl+V en Discord, WhatsApp o una carpeta");
+      } else {
+        Toast("No se pudo copiar el archivo al portapapeles", true);
+      }
+    });
+  };
+  // Enlace de la nube desde el panel: lo sube si hace falta y copia el enlace.
+  menuActions_.shareLink = [this](const std::string& path) { Defer([this, path] { ShareLink(path); }); };
+  menuActions_.linkState = [this](const std::string& path) {
+    using Phase = CloudFileState::Phase;
+    const CloudFileState st = cloud_.State(path); // no firma nada: se puede pedir cada frame
+    PanelLinkState link;
+    link.configured = cloud_.Configured();
+    link.busy = st.phase == Phase::Queued || st.phase == Phase::Uploading;
+    link.progress = st.progress;
+    link.ready = st.phase == Phase::Done;
+    if (st.phase == Phase::Failed) link.error = st.error;
+    return link;
+  };
+  menuActions_.exportForDiscord = [this](const std::string& path) { Defer([this, path] { ExportForDiscord(path); }); };
+  menuActions_.cancelExport = [this] {
+    exporter_.Cancel();
+    exportQueue_.clear();
+  };
+  menuActions_.setFavorite = [this](const std::string& path, bool favorite) {
+    library_->SetFavorite(path, favorite);
+    for (auto& item : menuModel_.clips)
+      if (item.path == path) item.favorite = favorite;
+    for (auto& item : appModel_.items)
+      if (item.path == path) item.favorite = favorite;
+    if (appWindow_.Visible()) appWindow_.Invalidate();
   };
 
   // Ventana de Spectre
@@ -473,7 +550,10 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   SetTimer(hwnd_, kTimerHealth, 1000, nullptr);
   CheckGame();
   UpdatePipeline();
+  UpdateVoice();
   EnforceStorageLimit();
+  if (config_.discordPresence) discord_.Start(hwnd_, WM_SPECTRE_DISCORD);
+  UpdatePresence();
   if (updated)
     Notify({NoticeKind::Update, "Spectre actualizado", "Ya tienes la versión " SPECTRE_VERSION ". Tus ajustes se conservan"});
   // La primera comprobación de versiones, un minuto después de arrancar: no
@@ -538,7 +618,9 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   if (importCancel_) importCancel_->store(true);
   exporter_.Stop(); // una exportación a medias se cancela y se borra
   editWorker_.Stop(); // y lo mismo una edición
+  discord_.Stop();    // Discord quita el estado al cerrarse la tubería
   pipeline_.Stop();
+  voice_.Stop();
   // Clips o recortes que se están escribiendo. Antes de actualizar se espera
   // lo que haga falta: el instalador no debe encontrar un MP4 a medias.
   WaitForPendingWrites(installerPath_.empty() ? 5000 : 10 * 60 * 1000);
@@ -614,7 +696,7 @@ std::string App::LowDiskNote() {
   return ". Queda poco espacio en el disco (" + FormatBytes(free) + ")";
 }
 
-void App::SaveClip(bool shortClip) {
+void App::SaveClip(bool shortClip, int64_t endQpc) {
   if (!pipeline_.Running() || !config_.replayEnabled) {
     Toast("El replay no está activo", true);
     return;
@@ -622,8 +704,10 @@ void App::SaveClip(bool shortClip) {
   // El clip corto no puede pasar de lo que guarda el replay.
   const int seconds = shortClip ? std::min(config_.shortClipSeconds, config_.clipSeconds) : config_.clipSeconds;
   std::string path = OutputName("Clip");
-  // Las marcas de los últimos segundos van con el clip, que acaba justo ahora.
+  // Las marcas de los últimos segundos van con el clip, que acaba justo ahora
+  // (o donde se empezó a decir la orden de voz).
   int64_t now = QpcNow();
+  if (endQpc > 0 && endQpc < now) now = endQpc;
   std::vector<double> tail;
   for (int64_t at : markers_) {
     double ago = QpcToSeconds(now - at);
@@ -635,7 +719,7 @@ void App::SaveClip(bool shortClip) {
   // (WM_SPECTRE_NOTIFY, siempre después) lo cambia por «Clip guardado» en la
   // misma tarjeta.
   pendingClips_[FileNameOf(path)] = {seconds, shortClip};
-  pipeline_.SaveClip(path, double(seconds));
+  pipeline_.SaveClip(path, double(seconds), endQpc);
   Notify({NoticeKind::ClipSaving, shortClip ? "Guardando clip corto" : "Guardando clip",
           "Los últimos " + ui::FormatClipLength(seconds)});
 }
@@ -687,6 +771,8 @@ void App::ToggleRecording() {
     const std::string& key = config_.hotkeys.toggleRecording;
     Notice notice{NoticeKind::Recording, "Grabando",
                   key.empty() ? "Detenla desde el panel (Alt+Z)" : "Pulsa " + key + " para detener"};
+    std::vector<std::string> stop = SplitPhrases(config_.voice.stopRecording);
+    if (voice_.Running() && !stop.empty()) notice.detail += " o di «" + SpokenPhrase(config_.voice, stop.front()) + "»";
     std::string note = LowDiskNote();
     if (!note.empty()) {
       notice.detail += note;
@@ -799,18 +885,58 @@ void App::CaptureScreenshot() {
   });
 }
 
-void App::AddMarker() {
+void App::AddMarker(int64_t at) {
   if (!pipeline_.Running()) {
     Toast("No se está capturando nada: la marca no iría a ningún clip", true);
     return;
   }
   int64_t now = QpcNow();
-  markers_.push_back(now);
+  const int64_t when = at > 0 && at < now ? at : now;
+  markers_.push_back(when);
   while (!markers_.empty() && QpcToSeconds(now - markers_.front()) > kMaxMarkerAge) markers_.pop_front();
-  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(now);
+  if (pipeline_.Recording() && recordStartQpc_) recordMarkers_.push_back(std::max(when, recordStartQpc_));
   if (config_.soundOnSave) PlayCue(Cue::Marker, config_.saveSound);
   Notify({NoticeKind::Marker, "Marca añadida",
           pipeline_.Recording() ? "En la grabación y en el replay" : "Saldrá en el próximo clip"});
+}
+
+void App::UpdateVoice() {
+  const VoiceConfig& v = config_.voice;
+  // «Solo con un juego abierto»: fuera de los juegos (y sin grabar) no se abre el micrófono.
+  const bool want = v.enabled && (!v.onlyInGames || GameActive() || pipeline_.Recording());
+  if (!want) {
+    if (voice_.Running()) {
+      voice_.Stop(500);
+      Log("Voz: deja de escuchar");
+    }
+    return;
+  }
+  // El pitido lo pone App: cambiarlo no hace falta reabrir el micrófono.
+  VoiceConfig running = voice_.Settings();
+  running.sound = v.sound;
+  if (voice_.Running() && SameVoiceConfig(running, v) && voice_.MicDeviceId() == config_.micDeviceId) return;
+  voice_.Start(v, config_.micDeviceId, hwnd_);
+}
+
+void App::OnVoiceCommand(const VoiceEvent& event) {
+  // Una orden que llega justo después de apagar la voz en Ajustes no cuenta.
+  if (!config_.voice.enabled || !voice_.Running()) return;
+  if (config_.voice.sound) PlayCue(Cue::Voice);
+  switch (event.command) {
+  case VoiceCommand::SaveClip: SaveClip(false, event.spokenQpc); break;
+  case VoiceCommand::ShortClip: SaveClip(true, event.spokenQpc); break;
+  case VoiceCommand::StartRecording:
+    if (pipeline_.Recording()) Toast("Ya se está grabando");
+    else ToggleRecording();
+    break;
+  case VoiceCommand::StopRecording:
+    if (pipeline_.Recording()) ToggleRecording();
+    else Toast("No hay ninguna grabación en marcha");
+    break;
+  case VoiceCommand::Screenshot: CaptureScreenshot(); break;
+  case VoiceCommand::Marker: AddMarker(event.spokenQpc); break;
+  default: break;
+  }
 }
 
 void App::TrimClip(const std::string& path, double start, double end) {
@@ -1327,6 +1453,7 @@ void App::OpenMenu() {
   menuModel_ = MenuModel{};
   menuModel_.config = config_;
   menuModel_.openedAt = GetTickCount64();
+  panelMedia_.Begin(hwnd_, WM_SPECTRE_PANEL_MEDIA);
   RefreshPanelClips();
   RefreshMenuModel();
   // El panel va al monitor de la ventana activa (el juego), con su DPI; sin
@@ -1355,6 +1482,8 @@ void App::CloseMenu(bool restoreFocus) {
 // completa.
 void App::EndMenuSession(bool giveFocusBack) {
   EndMenuDrag(); // cerrado a mitad de un arrastre: se guarda donde iba
+  // La vista previa y las miniaturas son de la GPU del panel, que se va.
+  panelMedia_.End();
   ++menuGeneration_;
   menuClosedAt_ = GetTickCount64();
   keyboard_.Uninstall();
@@ -1376,6 +1505,11 @@ void App::ApplyConfig(const Config& next, bool quiet) {
 
   if (old.autostart != config_.autostart && !SetAutostart(config_.autostart))
     Toast("No se pudo cambiar el inicio con Windows", true);
+  if (old.discordPresence != config_.discordPresence) {
+    if (config_.discordPresence) discord_.Start(hwnd_, WM_SPECTRE_DISCORD);
+    else discord_.Stop();
+    appModel_.settings.discord = discord_.Status();
+  }
 
   bool hotkeysOk = true;
   if (!SameHotkeys(old.hotkeys, config_.hotkeys)) {
@@ -1418,6 +1552,7 @@ void App::ApplyConfig(const Config& next, bool quiet) {
   if (!SameCameraSettings(old, config_) && pipeline_.Running()) pipeline_.SetCamera(BuildSettings());
   UpdatePipeline();
   if (pipeline_.Running()) pipeline_.SetCameraEditable(config_.cameraEditable);
+  UpdateVoice();
 
   if (old.cloud.cyberMode != config_.cloud.cyberMode) {
     Log("Nube: modo cibercafé %s", config_.cloud.cyberMode ? "activado" : "desactivado");
@@ -1543,8 +1678,14 @@ void App::UpdatePipeline(bool forceRestart) {
 }
 
 void App::CheckGame() {
-  if (menu_.Visible()) return; // el panel tapa el juego: se mantiene lo último detectado
   ULONGLONG now = GetTickCount64();
+  // El panel tapa el juego: se mantiene lo último detectado, sin que caduque
+  // (si no, a los 15 s el clip salía como del escritorio, el replay «Solo en
+  // juegos» se paraba al cambiar algo desde el panel y la voz se apagaba).
+  if (menu_.Visible()) {
+    if (GameActive()) lastGameSeen_ = now;
+    return;
+  }
   if (auto detected = DetectFullscreenApp()) {
     game_ = detected;
     lastGameSeen_ = now;
@@ -1806,20 +1947,49 @@ void App::PreviewToast() {
 void App::AnnounceGame() {
   if (!game_ || !GameActive() || game_->processId == announcedGamePid_) return;
   if (!config_.notifyGame || !config_.replayEnabled || !pipeline_.Running()) return;
-  // Navegadores y reproductores a pantalla completa no son juegos.
-  std::string exe = game_->exeName;
-  for (auto& ch : exe) ch = char(tolower(static_cast<unsigned char>(ch)));
-  static const char* kMediaApps[] = {"chrome",   "msedge",       "firefox",     "opera",  "brave",   "vivaldi",
-                                     "iexplore", "vlc",          "mpc-hc",      "mpc-hc64", "mpc-be", "mpc-be64",
-                                     "mpv",      "potplayermini", "potplayermini64", "wmplayer", "kodi", "spotify",
-                                     "discord",  "powerpnt",     "netflix",     "obs64"};
   announcedGamePid_ = game_->processId;
-  for (const char* app : kMediaApps)
-    if (exe == app) return;
+  if (IsMediaApp(game_->exeName)) return;
   const std::string& key = config_.hotkeys.saveClip;
   Notify({NoticeKind::Game, "Replay listo en " + game_->exeName,
           (key.empty() ? std::string("Guarda") : key + " guarda") + " los últimos " +
               ui::FormatClipLength(config_.clipSeconds)});
+}
+
+// Estado en Discord: «Clipeando <juego>» con el replay activo en un juego,
+// «Grabando ...» al grabar, y los clips guardados en la partida. En el
+// escritorio sin grabar, o con un navegador o un reproductor delante, no se
+// enseña nada.
+void App::UpdatePresence(int newClips) {
+  if (!discord_.Running()) return;
+  const bool game = GameActive() && !IsMediaApp(game_->exeName);
+  const DWORD pid = game ? game_->processId : 0;
+  const int64_t now = UnixNow();
+  if (pid != presencePid_) {
+    // Otra partida: los clips se cuentan desde cero.
+    presencePid_ = pid;
+    presenceClips_ = 0;
+    presenceSince_ = now;
+  }
+  presenceClips_ += newClips;
+  const bool recording = pipeline_.Recording();
+  if (recording != presenceRecording_) {
+    // Una sola vez al empezar: si se recalculara cada segundo, el redondeo
+    // cambiaría el estado sin parar (y Discord solo admite unos pocos).
+    presenceRecording_ = recording;
+    presenceRecordSince_ = now - int64_t(pipeline_.Stats().recordSeconds);
+  }
+  PresenceState state;
+  const bool replay = pipeline_.Running() && config_.replayEnabled;
+  if (recording || (game && replay)) {
+    const std::string name = game ? PresenceGameName(game_->exeName) : std::string();
+    state.active = true;
+    state.details = recording ? (game ? "Grabando " + name : std::string("Grabando la pantalla")) : "Clipeando " + name;
+    state.state = presenceClips_ > 0 ? CountText(size_t(presenceClips_), "clip guardado", "clips guardados")
+                  : recording        ? "Grabación en curso"
+                                     : "Replay listo";
+    state.startUnix = recording ? presenceRecordSince_ : presenceSince_;
+  }
+  discord_.Set(state);
 }
 
 void App::CheckUpdatesQuietly() {
@@ -1879,7 +2049,7 @@ void App::RefreshPanelClips() {
   for (const auto& item : library_->Scan(menuModel_.outputDir, kPanelClips + 1, true)) {
     if (item.path == recording) continue;
     if (menuModel_.clips.size() >= kPanelClips) break;
-    menuModel_.clips.push_back(ClipFile{item.path, item.name, item.size, item.when});
+    menuModel_.clips.push_back(item);
   }
 }
 
@@ -1891,6 +2061,7 @@ void App::RenderOverlays() {
   // publicado para la ventana anterior no cierre la nueva.
   if (menu_.Visible() && menu_.Lost()) {
     const bool hadFocus = GetForegroundWindow() == menu_.Hwnd();
+    panelMedia_.Release(); // el vídeo y las texturas eran de la GPU de esa ventana
     menu_.Hide();
     ++menuGeneration_;
     // Para el foco es como abrirlo otra vez: el juego pudo volver a minimizarse.
@@ -1908,8 +2079,14 @@ void App::RenderOverlays() {
       RefreshMenuModel();
     }
     UpdateMenuDrag();
+    // La barra de la vista previa soltada fuera del panel: sin foco, el
+    // WM_LBUTTONUP fue al juego y ImGui la seguiría arrastrando.
+    if (menuModel_.scrubbing && !AnyMouseButtonDown()) menu_.ReleaseMouseButtons();
+    // «Para Discord» en marcha: el clip abierto en el panel enseña cómo va.
+    menuModel_.exportPercent = exportRunning_ ? exporter_.Percent() : -1;
+    menuModel_.exportPath = exportRunning_ ? exporter_.Input() : std::string();
     inFrame_ = true;
-    menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_); });
+    menu_.Render([this] { DrawPanel(menu_, menuModel_, menuActions_, panelMedia_); });
     inFrame_ = false;
     if (menuModel_.panelHeight > 0) {
       // Donde DrawPanel puso el panel en este frame (el lateral llena la franja).
@@ -2227,6 +2404,7 @@ void App::RenderApp() {
   SettingsModel& s = appModel_.settings;
   if (appModel_.page == AppPage::Settings) {
     s.update = updater_.Status();
+    s.discord = discord_.Status();
     if (appModel_.settingsPage == SettingsPage::Audio) pipeline_.AudioLevels(&s.systemLevel, &s.micLevel);
   }
   // Grabando un atajo y el usuario se va a otra ventana: se cancela (si no,
@@ -2267,6 +2445,8 @@ void App::RefreshAppModel() {
   SettingsModel& s = appModel_.settings;
   s.stats = appModel_.stats;
   s.hotkeyError = hotkeyError_;
+  s.voice = voice_.Status();
+  s.voiceWaiting = config_.voice.enabled && !voice_.Running();
   if (const uint64_t v = cloud_.Version(); v != cloudVersion_) {
     cloudVersion_ = v;
     appModel_.cloud = cloud_.Snapshot();
@@ -2360,6 +2540,7 @@ void App::LoadDevices() {
   s.inputs = EnumerateAudioDevices(true);
   s.cameras = EnumerateCameras();
   s.encoders = CandidateEncoders(s.config.codec);
+  s.recognizers = InstalledRecognizers();
   s.devicesLoaded = true;
 }
 
@@ -2752,6 +2933,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       UpdatePipeline(std::exchange(restartPending_, false));
     if (wp == kTimerHealth) InstallPendingUpdate();
     if (wp == kTimerHealth) CheckUpdatesQuietly();
+    if (wp == kTimerHealth) UpdatePresence();
     if (wp == kTimerHealth) {
       std::string stall = pipeline_.TakeCameraStall();
       if (!stall.empty()) Toast(stall, true);
@@ -2776,6 +2958,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (wp == kTimerGame) {
       CheckGame();
+      UpdateVoice(); // «Solo con un juego abierto»: el juego se abrió o se cerró
     } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
       KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
       bool wasRecording = pipeline_.Recording();
@@ -2791,6 +2974,18 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       UpdatePipeline();
       InstallPendingUpdate();
+    }
+    return 0;
+  case WM_SPECTRE_VOICE: {
+    std::unique_ptr<VoiceEvent> event(reinterpret_cast<VoiceEvent*>(lp));
+    KeyboardHook::Pause pause(keyboard_); // como un atajo: guardar o grabar pueden tardar
+    OnVoiceCommand(*event);
+    return 0;
+  }
+  case WM_SPECTRE_VOICE_STATUS:
+    if (appWindow_.Visible() && appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Voice) {
+      appModel_.settings.voice = voice_.Status();
+      appWindow_.Invalidate();
     }
     return 0;
   case WM_SPECTRE_NOTIFY: {
@@ -2825,6 +3020,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (it != recentNames_.rend()) AutoUpload(*it, kind, kind == MediaKind::Clip && config_.copyClipOnSave);
       }
       if (StartsWith(message, "Clip guardado: ")) {
+        UpdatePresence(1); // el estado en Discord los cuenta
         const std::string name = message.substr(strlen("Clip guardado: "));
         if (clip.second) notice.title = "Clip corto guardado";
         notice.detail = name + " (" + ui::FormatClipLength(clip.first) + ")";
@@ -2921,6 +3117,13 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return 0;
   }
+  case WM_SPECTRE_PANEL_MEDIA:
+    if (menu_.Visible()) panelMedia_.TakeResults();
+    return 0;
+  case WM_SPECTRE_DISCORD:
+    appModel_.settings.discord = discord_.Status();
+    if (appWindow_.Visible()) appWindow_.Invalidate();
+    return 0;
   case WM_SPECTRE_MEDIA:
     if (appWindow_.Visible()) {
       appUi_.TakeMediaResults(appWindow_, appModel_, appActions_);
