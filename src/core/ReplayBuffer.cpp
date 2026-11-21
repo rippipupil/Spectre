@@ -12,6 +12,7 @@ void ReplayBuffer::Configure(const StreamList& streams, double seconds, size_t m
   entries_.clear();
   bytes_ = 0;
   lastVideoTime_ = 0;
+  newestTime_ = 0;
   Publish();
 }
 
@@ -44,7 +45,8 @@ void ReplayBuffer::SetLimits(double seconds, size_t maxBytes) {
 
 void ReplayBuffer::Publish() {
   publishedBytes_ = bytes_;
-  publishedSeconds_ = entries_.empty() ? 0.0 : lastVideoTime_ - entries_.front().time;
+  // Sin vídeo desde hace rato (solo audio) saldría negativo.
+  publishedSeconds_ = entries_.empty() ? 0.0 : std::max(0.0, lastVideoTime_ - entries_.front().time);
   publishedMaxBytes_ = maxBytes_;
 }
 
@@ -60,6 +62,7 @@ void ReplayBuffer::Push(const AVPacket* packet, int stream) {
   Entry e{SharePacket(packet), stream, TimeOf(packet, stream)};
   if (!e.packet) return;
   if (stream == 0) lastVideoTime_ = e.time;
+  newestTime_ = std::max(newestTime_, e.time);
   bytes_ += size_t(e.packet->size);
   entries_.push_back(std::move(e));
   Trim();
@@ -69,7 +72,8 @@ void ReplayBuffer::Push(const AVPacket* packet, int stream) {
 void ReplayBuffer::Trim() {
   auto overLimit = [&] {
     if (entries_.empty()) return false;
-    return bytes_ > maxBytes_ || lastVideoTime_ - entries_.front().time > seconds_ + kExtraSeconds;
+    const double newest = std::max(lastVideoTime_, newestTime_);
+    return bytes_ > maxBytes_ || newest - entries_.front().time > seconds_ + kExtraSeconds;
   };
   if (!overLimit()) return;
   while (overLimit()) {
@@ -84,11 +88,15 @@ void ReplayBuffer::Trim() {
   }
 }
 
-std::vector<std::pair<SharedPacket, int>> ReplayBuffer::Snapshot(double seconds, double end, double latest) {
+std::vector<std::pair<SharedPacket, int>> ReplayBuffer::Snapshot(double seconds, double end, double latest,
+                                                                 std::string* why) {
   std::vector<Entry> picked;
   {
     std::lock_guard lock(mutex_);
-    if (entries_.empty()) return {};
+    if (entries_.empty()) {
+      if (why) *why = "el replay está vacío";
+      return {};
+    }
     end = std::min(end, lastVideoTime_);
     // El anillo guarda la duración más un margen y empieza en un keyframe: un
     // clip que acaba unos segundos antes de pedirlo (orden de voz) puede no
@@ -99,14 +107,22 @@ std::vector<std::pair<SharedPacket, int>> ReplayBuffer::Snapshot(double seconds,
     double start = end - seconds;
     // Último keyframe de vídeo con tiempo <= start (o el primero disponible).
     size_t first = entries_.size();
+    size_t video = 0;
     for (size_t i = 0; i < entries_.size(); ++i) {
       const auto& e = entries_[i];
+      video += e.stream == 0;
       if (e.stream == 0 && (e.packet->flags & AV_PKT_FLAG_KEY)) {
         if (first == entries_.size() || e.time <= start) first = i;
         if (e.time > start) break;
       }
     }
-    if (first == entries_.size()) return {};
+    if (first == entries_.size()) {
+      // Sin keyframe el bucle llega al final: `video` cuenta todo el anillo.
+      if (why)
+        *why = video == 0 ? "en el replay solo hay audio: no le llega vídeo"
+                          : "el replay aún no tiene ningún fotograma clave (acaba de empezar)";
+      return {};
+    }
     picked.reserve(entries_.size());
     for (size_t i = 0; i < entries_.size(); ++i)
       if (InClip(i, first, end)) picked.push_back(entries_[i]);

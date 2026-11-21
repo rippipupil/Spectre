@@ -6,6 +6,7 @@
 #include <deque>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace spectre {
@@ -37,7 +38,9 @@ public:
   // porque los hilos de vídeo y audio esperan a ese lock en cada paquete.
   // latest: hasta dónde se puede alargar si el anillo ya no llega a
   // `end - seconds` (una orden de voz acaba antes de pedirse); 0 = no se alarga.
-  std::vector<std::pair<SharedPacket, int>> Snapshot(double seconds, double end, double latest = 0);
+  // why: si no sale nada, por qué (para el aviso y el log).
+  std::vector<std::pair<SharedPacket, int>> Snapshot(double seconds, double end, double latest = 0,
+                                                     std::string* why = nullptr);
 
   // Envía a `live` los paquetes desde el último keyframe y, a partir de ese
   // momento, cada paquete nuevo (todo bajo el mismo lock: no se pierde nada).
@@ -75,6 +78,9 @@ private:
   size_t maxBytes_ = 512u << 20;
   size_t bytes_ = 0;
   double lastVideoTime_ = 0;
+  // El paquete más reciente de cualquier pista: si el vídeo deja de llegar
+  // (encoder colgado), el audio no se acumula hasta el tope de RAM.
+  double newestTime_ = 0;
   PacketSink live_;
   std::atomic<size_t> publishedBytes_{0};
   std::atomic<double> publishedSeconds_{0};

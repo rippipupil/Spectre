@@ -33,9 +33,12 @@ public:
   // inicial) y paquetes descartados, para el log: si el audio empieza tarde
   // respecto al vídeo se ve aquí.
   std::string Summary() const;
+  // Por qué falló Open, Write o Close, para el aviso ("el disco está lleno").
+  const std::string& Error() const { return error_; }
 
 private:
   AVFormatContext* fmt_ = nullptr;
+  std::string error_;
   StreamList streams_;
   std::vector<int64_t> offsets_;
   std::vector<int64_t> lastDts_;
@@ -53,8 +56,11 @@ private:
 // principio, calculado con el número de paquetes. Si aun así no cupiera, se
 // reescribe con +faststart. Las pistas sin ningún paquete en el clip (un
 // fondo de la webcam de antes de moverla) no se escriben.
+// error: por qué no se pudo, en palabras para el aviso.
 bool WriteClip(const std::string& path, const StreamList& streams,
-               const std::vector<std::pair<SharedPacket, int>>& packets);
+               const std::vector<std::pair<SharedPacket, int>>& packets, std::string* error = nullptr);
+// Un error de E/S de FFmpeg en palabras ("el disco está lleno"...).
+std::string DiskErrorText(int err);
 
 // Recorta un MP4 entre start y end (segundos) sin recodificar. El inicio se
 // ajusta al keyframe anterior.

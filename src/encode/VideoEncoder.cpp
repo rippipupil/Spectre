@@ -101,6 +101,22 @@ std::vector<EncoderInfo> CandidateEncoders(const std::string& codec) {
   return out;
 }
 
+std::string NativeEncoderFor(unsigned vendorId, const std::string& codec) {
+  const char* suffix = vendorId == 0x10DE ? "_nvenc" : vendorId == 0x1002 ? "_amf" : vendorId == 0x8086 ? "_qsv" : nullptr;
+  if (!suffix) return {};
+  const std::string base = codec == "hevc" || codec == "av1" ? codec : "h264";
+  for (const auto& c : CandidatesFor(base))
+    if (c.id == base + suffix && avcodec_find_encoder_by_name(c.codec.c_str())) return c.id;
+  return {};
+}
+
+std::string EncoderLabel(const std::string& id) {
+  for (const char* codec : {"h264", "hevc", "av1"})
+    for (const auto& c : CandidatesFor(codec))
+      if (c.id == id) return c.label;
+  return id;
+}
+
 bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* device) {
   Close();
   device_ = device;
@@ -114,14 +130,26 @@ bool VideoEncoder::Open(const VideoEncoderSettings& settings, ID3D11Device* devi
     order.push_back(c);
   };
   if (settings.preferred != "auto" && !settings.preferred.empty()) add(ResolveCandidate(settings.preferred));
-  for (const auto& c : CandidatesFor(settings.codec)) add(c);
-  // HEVC/AV1 no disponibles: se vuelve a H.264, que funciona en todas partes.
-  if (settings.codec != "h264")
-    for (const auto& c : CandidatesFor("h264")) add(c);
+  if (!settings.onlyPreferred) {
+    for (const auto& c : CandidatesFor(settings.codec)) add(c);
+    // HEVC/AV1 no disponibles: se vuelve a H.264, que funciona en todas partes.
+    if (settings.codec != "h264")
+      for (const auto& c : CandidatesFor("h264")) add(c);
+  }
+  // Uno que ya se colgó con esta gráfica y este driver no se vuelve a probar,
+  // aunque se eligiera a mano: colgado, el replay se queda sin vídeo (el log
+  // lo dice en Pipeline::Start).
+  order.erase(std::remove_if(order.begin(), order.end(),
+                             [&](const Candidate& c) {
+                               return std::find(settings.exclude.begin(), settings.exclude.end(), c.id) !=
+                                      settings.exclude.end();
+                             }),
+              order.end());
 
   const bool source = settings.quality.level == kSourceLevel;
   // Un encoder por CPU elegido a mano se respeta también con hardwareOnly.
-  const bool manualSoftware = settings.preferred != "auto" && !settings.preferred.empty() && !order.front().hardware;
+  const bool manualSoftware = settings.preferred != "auto" && !settings.preferred.empty() && !order.empty() &&
+                              order.front().id == ResolveCandidate(settings.preferred).id && !order.front().hardware;
   const bool hardwareOnly = settings.hardwareOnly && !manualSoftware;
   bool triedHardware = false;
   for (const auto& cand : order) {

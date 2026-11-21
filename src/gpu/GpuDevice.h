@@ -21,6 +21,8 @@ public:
   IDXGIAdapter1* Adapter() const { return adapter_.Get(); }
   const std::string& AdapterName() const { return adapterName_; }
   UINT VendorId() const { return vendorId_; }
+  // "32.0.21045.29003" (vacío si Windows no lo dice).
+  const std::string& DriverVersion() const { return driverVersion_; }
 
   // Sube la prioridad de planificación de la GPU para que el encoder no se
   // quede sin turno cuando el juego está al 100 %. Igual que hace OBS.
@@ -36,6 +38,7 @@ private:
   ComPtr<IDXGIAdapter1> adapter_;
   std::string adapterName_;
   UINT vendorId_ = 0;
+  std::string driverVersion_;
 };
 
 } // namespace spectre

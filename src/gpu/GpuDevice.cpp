@@ -137,6 +137,7 @@ bool GpuDevice::Create(IDXGIAdapter1* adapter) {
   if (SUCCEEDED(adapter_->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd))) {
     unsigned part3 = HIWORD(umd.LowPart), part4 = LOWORD(umd.LowPart);
     int n = snprintf(driver, sizeof(driver), "%u.%u.%u.%u", HIWORD(umd.HighPart), LOWORD(umd.HighPart), part3, part4);
+    driverVersion_ = n > 0 ? std::string(driver) : std::string();
     if (vendorId_ == 0x10DE && n > 0) {
       unsigned version = (part3 % 10) * 10000 + part4;
       snprintf(driver + n, sizeof(driver) - size_t(n), " (NVIDIA %u.%02u%s)", version / 100, version % 100,
@@ -155,6 +156,7 @@ void GpuDevice::Reset() {
   adapter_.Reset();
   adapterName_.clear();
   vendorId_ = 0;
+  driverVersion_.clear();
 }
 
 void GpuDevice::BoostGpuPriority() {

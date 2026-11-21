@@ -30,6 +30,12 @@ struct VideoEncoderSettings {
   int gopFrames = 0;
   // Para el log: «Encoder de <role>: ...».
   std::string role = "vídeo";
+  // Ids que no se prueban: se colgaron antes con esta gráfica y este driver
+  // (ver Pipeline::CheckStall).
+  std::vector<std::string> exclude;
+  // Solo `preferred`, sin bajar a otros: para ver si ya abre (ver
+  // Pipeline::NativeEncoderReady).
+  bool onlyPreferred = false;
 };
 
 struct EncoderInfo {
@@ -39,6 +45,11 @@ struct EncoderInfo {
 struct EncoderCandidate;
 // Encoders que FFmpeg tiene compilados para el códec (no garantiza que la GPU los soporte).
 std::vector<EncoderInfo> CandidateEncoders(const std::string& codec);
+// El encoder propio de la gráfica para el códec (NVENC, AMF o QuickSync según
+// el fabricante); vacío si no tiene o FFmpeg no lo trae.
+std::string NativeEncoderFor(unsigned vendorId, const std::string& codec);
+// El texto de la interfaz para un id ("AMD AMF (H.264)"); el id si no se conoce.
+std::string EncoderLabel(const std::string& id);
 
 // Codificador de vídeo. Con NVENC y AMF el frame NV12 se escribe directamente
 // en la textura que consume el encoder (cero copias). Con QuickSync, Media
