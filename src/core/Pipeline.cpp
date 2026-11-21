@@ -54,6 +54,7 @@ struct Pipeline::VideoRun {
   std::atomic<uint64_t> encodedOk{0};    // de ellas, con el frame aceptado
   std::atomic<uint64_t> videoPackets{0}; // paquetes de vídeo que devolvió el encoder
   std::string encoderName, encoderLabel; // fijos desde el arranque
+  bool software = false;                 // encoder por CPU
   std::unique_ptr<VideoEncoder> orphan;  // el encoder colgado, cuando se abandona
 
   // Entra en el encoder; false si al volver el hilo ya estaba abandonado.
@@ -314,6 +315,7 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   auto run = std::make_shared<VideoRun>();
   run->encoderName = encoder_->Name();
   run->encoderLabel = encoder_->Label();
+  run->software = encoder_->Software();
   run_ = run;
   VideoEncoder* encoder = encoder_.get();
   videoThread_ = std::thread([this, run, encoder] {
@@ -700,14 +702,23 @@ VideoStall Pipeline::CheckStall() {
     watch_.reported = true; // la app reinicia la captura
     const std::string& id = run_->encoderName;
     const bool native = id == nativeId_;
+    // Un reinicio de la GPU (TDR) o una CPU llena también dejan la llamada
+    // colgada sin que la culpa sea del encoder: entonces no se guarda en la
+    // configuración (desde Ajustes no se puede deshacer) y se vuelve a probar.
+    ID3D11Device* device = gpu_.Device();
+    const bool removed = device && device->GetDeviceRemovedReason() != S_OK;
+    const bool software = run_->software;
+    const bool blameless = native || software || removed;
     const bool twice = std::find(stalledOnce_.begin(), stalledOnce_.end(), id) != stalledOnce_.end();
-    stall.remember = !native;
-    if (!native || twice) sessionExcluded_.push_back(id);
+    stall.remember = !blameless;
+    if (!blameless || twice) sessionExcluded_.push_back(id);
     else stalledOnce_.push_back(id);
     Log("Vídeo: %s; se reinicia la captura %s", stall.reason.c_str(),
-        !native ? "sin él (no se volverá a usar con esta gráfica y este driver)"
-        : twice ? "sin él hasta cerrar Spectre (es la segunda vez)"
-                : "con él otra vez (es el de la gráfica: puede haber sido un reinicio de la GPU)");
+        !blameless ? "sin él (no se volverá a usar con esta gráfica y este driver)"
+        : twice    ? "sin él hasta cerrar Spectre (es la segunda vez)"
+        : removed  ? "con él otra vez (la GPU se ha reiniciado)"
+        : software ? "con él otra vez (va por CPU: puede que la CPU fuera llena)"
+                   : "con él otra vez (es el de la gráfica: puede haber sido un reinicio de la GPU)");
   } else if (!stall.reason.empty() && !watch_.noted) {
     watch_.noted = true; // reiniciar no lo arregla: solo al log, una vez (y al aviso si falla un clip)
     Log("Vídeo: %s", stall.reason.c_str());
@@ -796,7 +807,7 @@ void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc)
   std::string videoNote = stall.reason;
   if (!videoNote.empty()) {
     Log("Clip: ojo, %s", stall.reason.c_str());
-    if (stall.restart) videoNote += ". Spectre reinicia la captura sin él: prueba otra vez en unos segundos";
+    if (stall.restart) videoNote += ". Spectre está reiniciando la captura: prueba otra vez en unos segundos";
   }
   const bool justStarted = GetTickCount64() - startedAt_ < 5000;
   // El audio se codifica con un margen (100 ms, hasta 1 s si una fuente llega

@@ -3020,7 +3020,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         UpdatePipeline();
         // Para que un clip corto justo después no extrañe: el replay empezó de nuevo.
-        if (upgrade && pipeline_.Running())
+        if (upgrade && pipeline_.Running() && pipeline_.NativeEncoder().empty())
           Notify({NoticeKind::Info, "Spectre ya graba con la gráfica", native + ": el replay empieza de nuevo"});
         InstallPendingUpdate();
       }
