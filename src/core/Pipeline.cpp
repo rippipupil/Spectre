@@ -9,9 +9,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
 
 namespace spectre {
 
@@ -31,12 +34,62 @@ SIZE TargetSize(const CaptureTarget& target) {
   return {std::max<LONG>(r.right - r.left, 2), std::max<LONG>(r.bottom - r.top, 2)};
 }
 
+// Comprobaciones seguidas del vigilante (una por segundo) antes de dar el
+// vídeo por atascado. Lo más lento visto en un encoder sano son ~2,6 s para un
+// frame (Media Foundation al arrancar Windows).
+constexpr int kStallTicks = 6;
+
 } // namespace
+
+// Lo que comparte el hilo de vídeo con Stop() y con el vigilante. Si el hilo
+// se queda colgado dentro del encoder (FFmpeg esperando a un MFT que no
+// contesta), Stop() no puede esperarle: lo marca como abandonado y le deja su
+// encoder. Si algún día vuelve, ve la marca y termina sin tocar nada más del
+// pipeline, que para entonces ya puede ser otro.
+struct Pipeline::VideoRun {
+  enum : int { kIdle = 0, kInEncode = 1, kAbandoned = 2 };
+  std::atomic<int> state{kIdle};
+  std::atomic<int64_t> encodeSince{0};   // QPC al entrar en el encoder
+  std::atomic<uint64_t> encodes{0};      // llamadas al encoder que volvieron
+  std::atomic<uint64_t> encodedOk{0};    // de ellas, con el frame aceptado
+  std::atomic<uint64_t> videoPackets{0}; // paquetes de vídeo que devolvió el encoder
+  std::string encoderName, encoderLabel; // fijos desde el arranque
+  bool software = false;                 // encoder por CPU
+  std::unique_ptr<VideoEncoder> orphan;  // el encoder colgado, cuando se abandona
+
+  // Entra en el encoder; false si al volver el hilo ya estaba abandonado.
+  template <class Fn> bool Guarded(Fn&& fn) {
+    encodeSince = QpcNow();
+    state = kInEncode;
+    fn();
+    int expected = kInEncode;
+    return state.compare_exchange_strong(expected, kIdle);
+  }
+  bool Abandoned() const { return state == kAbandoned; }
+
+  void Finish() {
+    {
+      std::lock_guard lock(mutex);
+      done = true;
+    }
+    cv.notify_all();
+  }
+  bool WaitDone(int ms) {
+    std::unique_lock lock(mutex);
+    return cv.wait_for(lock, std::chrono::milliseconds(ms), [&] { return done; });
+  }
+
+private:
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool done = false;
+};
 
 bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   Stop();
   settings_ = settings;
   notify_ = std::move(notify);
+  const bool autoEncoder = settings_.encoder == "auto" || settings_.encoder.empty();
 
   if (!settings_.target.window && !settings_.target.monitor)
     settings_.target.monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
@@ -90,6 +143,20 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     return false;
   }
   if (settings_.gpuPriority) gpu_.BoostGpuPriority();
+  // Los encoders que ya se colgaron con esta gráfica y este driver (con otro
+  // driver se vuelven a probar). Ver CheckStall.
+  gpuKey_ = "|" + gpu_.AdapterName() + "|" + gpu_.DriverVersion();
+  std::vector<std::string> excluded = sessionExcluded_;
+  for (const auto& key : settings_.stalledEncoders)
+    if (key.size() > gpuKey_.size() && key.compare(key.size() - gpuKey_.size(), gpuKey_.size(), gpuKey_) == 0)
+      excluded.push_back(key.substr(0, key.size() - gpuKey_.size()));
+  for (const auto& id : excluded)
+    Log("Vídeo: %s no se prueba: se quedó colgado antes con esta gráfica y este driver", id.c_str());
+  // El encoder propio de la gráfica: si no abre ahora, se vuelve a probar
+  // luego (ver NativeEncoderReady).
+  nativeId_ = NativeEncoderFor(gpu_.VendorId(), settings_.codec);
+  std::string native = autoEncoder ? nativeId_ : std::string();
+  if (std::find(excluded.begin(), excluded.end(), native) != excluded.end()) native.clear();
   PerfMonitor::LogEnvironment(settings_.target.monitor
                                   ? settings_.target.monitor
                                   : MonitorFromWindow(settings_.target.window, MONITOR_DEFAULTTONEAREST));
@@ -112,7 +179,8 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     es.codec = settings_.codec;
     es.preferred = settings_.encoder;
     es.hardwareOnly = hardwareOnly;
-    if (encoder_.Open(es, gpu_.Device())) return 1;
+    es.exclude = excluded;
+    if (encoder_->Open(es, gpu_.Device())) return 1;
     GpuLock lock(GpuMutex());
     converter_.Reset();
     return 0;
@@ -150,7 +218,7 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     // nativa a los Hz del monitor en la CPU le quita el procesador al juego.
     // Una vez por sesión: la captura se reinicia al abrir o cerrar el juego.
     static std::atomic<bool> warnedCpu{false};
-    if (opened > 0 && encoder_.Software() && notify_ && !warnedCpu.exchange(true))
+    if (opened > 0 && encoder_->Software() && notify_ && !warnedCpu.exchange(true))
       notify_("Fuente con el encoder por CPU elegido en Ajustes puede dar lag: pon Encoder en Automático para usar "
               "la gráfica",
               true);
@@ -173,15 +241,15 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     // varios núcleos: se baja a 720p30, que cuesta unas 4,5 veces menos. Si
     // el encoder por CPU se eligió a mano, se respeta. La captura sigue a los
     // fps de antes: solo cuesta alguna copia de textura de más.
-    if (pass > 0 || !encoder_.Software() || settings_.encoder == encoder_.Name() ||
+    if (pass > 0 || !encoder_->Software() || settings_.encoder == encoder_->Name() ||
         (height_ <= 720 && settings_.fps <= 30))
       break;
     Log("Encoder por CPU: se baja de %dx%d@%d a 720p30 como mucho para no quitarle CPU al juego", width_, height_,
         settings_.fps);
-    settings_.encoder = encoder_.Name(); // la segunda vuelta no vuelve a probar los de GPU
+    settings_.encoder = encoder_->Name(); // la segunda vuelta no vuelve a probar los de GPU
     settings_.outputHeight = settings_.outputHeight > 0 ? std::min(settings_.outputHeight, 720) : 720;
     settings_.fps = std::min(settings_.fps, 30);
-    encoder_.Close();
+    encoder_->Close();
     {
       GpuLock lock(GpuMutex());
       converter_.Reset();
@@ -189,7 +257,10 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
     opened = 0;
     static std::atomic<bool> warned{false};
     if (notify_ && !warned.exchange(true))
-      notify_("La gráfica no pudo codificar el vídeo: se graba a 720p30 por CPU. Actualiza su driver", true);
+      notify_(native.empty() ? "La gráfica no pudo codificar el vídeo: se graba a 720p30 por CPU. Actualiza su driver"
+                             : "La gráfica no abrió su encoder de vídeo: de momento se graba a 720p30 por CPU y "
+                               "Spectre la vuelve a probar en unos segundos",
+              true);
   }
   if (opened <= 0) {
     if (opened == 0 && notify_) notify_("No hay ningún encoder de vídeo disponible", true);
@@ -205,7 +276,7 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
 
   // 4. Audio (opcional: si falla se graba solo vídeo).
   streams_.clear();
-  streams_.push_back(MakeStreamDesc(encoder_.Context(), true, "Vídeo"));
+  streams_.push_back(MakeStreamDesc(encoder_->Context(), true, "Vídeo"));
   if (settings_.audio.system || settings_.audio.mic) {
     if (audio_.Start(settings_.audio, startQpc_, 1, sink)) {
       for (const auto& s : audio_.Streams()) streams_.push_back(s);
@@ -222,26 +293,45 @@ bool Pipeline::Start(const PipelineSettings& settings, Notify notify) {
   // Lo que hay debajo de la webcam, aparte (solo con encoder por GPU; su
   // encoder se abre la primera vez que se ve la cámara).
   camEditable_ = settings_.cameraEditable;
-  if (!encoder_.Software())
-    camBackground_.Start(gpu_.Device(), gpu_.Context(), buffer_, encoder_.Name(), plan_, width_, height_,
+  if (!encoder_->Software())
+    camBackground_.Start(gpu_.Device(), gpu_.Context(), buffer_, encoder_->Name(), plan_, width_, height_,
                          settings_.fps);
 
   // 5. Cámara (opcional). Se abre en su hilo: aquí no se espera.
   if (settings_.camera) StartCamera(false);
 
+  // Encoder propio que no abrió (AMF al arrancar con Windows): se le vuelve a
+  // probar. Las pruebas no empiezan de cero en cada reinicio, para que un
+  // encoder que abre en la prueba y no al arrancar no reinicie en bucle.
+  native_ = !native.empty() && encoder_->Name() != native ? native : std::string();
+  if (native_.empty()) probes_ = 0;
+  else Log("Vídeo: %s no abrió; se volverá a probar dentro de un rato", native_.c_str());
+  probe_.reset();
+  startedAt_ = GetTickCount64();
+  watch_ = {};
+
   running_ = true;
   failed_ = false;
-  videoThread_ = std::thread([this] {
+  auto run = std::make_shared<VideoRun>();
+  run->encoderName = encoder_->Name();
+  run->encoderLabel = encoder_->Label();
+  run->software = encoder_->Software();
+  run_ = run;
+  VideoEncoder* encoder = encoder_.get();
+  videoThread_ = std::thread([this, run, encoder] {
     InstallThreadCrashHandler();
     try {
-      VideoLoop();
+      VideoLoop(run, encoder);
     } catch (const std::exception& e) {
-      Log("Vídeo: excepción en el hilo de captura: %s", e.what());
-      failed_ = true;
+      if (!run->Abandoned()) {
+        Log("Vídeo: excepción en el hilo de captura: %s", e.what());
+        failed_ = true;
+      }
     }
+    run->Finish();
   });
   Log("Pipeline iniciado: %dx%d@%d, captura %s, encoder %s", width_, height_, settings_.fps, capture_->Name(),
-      encoder_.Name().c_str());
+      encoder_->Name().c_str());
   perf_.Start(gpu_.Adapter(), settings_.fps, [this](PerfMonitor::Sample* sample) {
     {
       std::lock_guard lock(statsMutex_);
@@ -275,7 +365,7 @@ double Pipeline::ReplayBytesPerSecond() const {
   double kbps = plan_.maxKbps;
   for (size_t i = 1; i < streams_.size(); ++i)
     if (streams_[i].params) kbps += double(streams_[i].params->bit_rate) / 1000.0;
-  if (settings_.camera && settings_.cameraEditable && !encoder_.Software())
+  if (settings_.camera && settings_.cameraEditable && !encoder_->Software())
     kbps += CamBackground::MaxKbps(plan_, width_, height_, settings_.cameraSizePercent);
   return kbps * 125.0 * 1.1;
 }
@@ -297,10 +387,41 @@ Pipeline::~Pipeline() {
   for (auto& t : recorderDrains_) t.join();
 }
 
+void Pipeline::JoinVideoThread() {
+  if (!run_) {
+    videoThread_.join();
+    return;
+  }
+  for (;;) {
+    if (run_->WaitDone(100)) {
+      videoThread_.join();
+      return;
+    }
+    // Lleva más de 3 s dentro de una llamada al encoder: no va a volver (o no
+    // a tiempo). Esperarle congelaría la interfaz, que es quien para el
+    // pipeline (al cambiar un ajuste, al apagar el replay...). Se le deja su
+    // encoder y su hilo; el resto del pipeline ya no lo toca (ver VideoRun).
+    int expected = VideoRun::kInEncode;
+    if (QpcToSeconds(QpcNow() - run_->encodeSince) >= 3.0 &&
+        run_->state.compare_exchange_strong(expected, VideoRun::kAbandoned)) {
+      Log("Vídeo: el encoder %s lleva %.0f s colgado dentro de FFmpeg; se deja aparte (sigue en memoria hasta cerrar "
+          "Spectre) y se sigue sin él",
+          run_->encoderName.c_str(), QpcToSeconds(QpcNow() - run_->encodeSince));
+      run_->orphan = std::move(encoder_);
+      encoder_ = std::make_unique<VideoEncoder>();
+      videoThread_.detach();
+      return;
+    }
+    // Ni ha terminado ni está dentro del encoder: se sigue esperando, como antes.
+  }
+}
+
 void Pipeline::Stop() {
   perf_.Stop();
   running_ = false;
-  if (videoThread_.joinable()) videoThread_.join();
+  if (videoThread_.joinable()) JoinVideoThread();
+  run_.reset();
+  probe_.reset();
   camBackground_.Stop();
   audio_.Stop();
   ReleaseRecorder();
@@ -317,7 +438,7 @@ void Pipeline::Stop() {
   if (capture_) capture_->Stop();
   capture_.reset();
   acceptPackets_ = false;
-  encoder_.Close();
+  encoder_->Close();
   {
     GpuLock lock(GpuMutex());
     converter_.Reset();
@@ -396,14 +517,14 @@ bool Pipeline::Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& fra
   return true;
 }
 
-void Pipeline::VideoLoop() {
+void Pipeline::VideoLoop(const std::shared_ptr<VideoRun>& run, VideoEncoder* encoder) {
   // Con encoder por GPU el hilo apenas usa CPU y la prioridad multimedia le
   // hace despertar puntual en cada ranura. Con encoder por CPU es al revés:
   // codifica aquí mismo, y con prioridad multimedia (por encima de cualquier
   // hilo del juego) le quitaría un núcleo entero. Entonces el juego va primero.
   DWORD taskIndex = 0;
   HANDLE mmcss = nullptr;
-  if (encoder_.Software()) {
+  if (encoder->Software()) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
   } else {
     mmcss = AvSetMmThreadCharacteristicsW(L"Capture", &taskIndex);
@@ -435,9 +556,15 @@ void Pipeline::VideoLoop() {
   int64_t lastIndex = -1;
   uint64_t lastSequence = 0;
   int consecutiveFailures = 0;
-  auto sink = [this](const AVPacket* pkt, int stream) {
-    if (acceptPackets_) buffer_->Push(pkt, stream);
+  // Con su propia copia del anillo: si el encoder vuelve después de
+  // abandonarse, no toca el de otro arranque.
+  std::shared_ptr<ReplayBuffer> buffer = buffer_;
+  auto sink = [this, run, buffer](const AVPacket* pkt, int stream) {
+    if (run->Abandoned()) return;
+    if (stream == 0) run->videoPackets++;
+    if (acceptPackets_) buffer->Push(pkt, stream);
   };
+  bool abandoned = false;
 
   while (running_ && !failed_) {
     int64_t now = QpcNow();
@@ -456,8 +583,21 @@ void Pipeline::VideoLoop() {
         lastSequence = frame.sequence;
         double ageMs = QpcToSeconds(t0 - frame.qpc) * 1000.0;
         camDrawn_ = false;
-        bool ok = encoder_.Encode(
-            index, [&](ID3D11Texture2D* dst, UINT slice) { return Render(dst, slice, frame); }, sink);
+        bool ok = false;
+        // Render se llama dentro del encoder con GpuMutex tomado; Stop()
+        // suelta el conversor y la cámara con ese mismo mutex, así que tras
+        // abandonar el hilo ya no entra aquí.
+        if (!run->Guarded([&] {
+              ok = encoder->Encode(
+                  index,
+                  [&](ID3D11Texture2D* dst, UINT slice) { return !run->Abandoned() && Render(dst, slice, frame); },
+                  sink);
+            })) {
+          abandoned = true;
+          break;
+        }
+        run->encodes++;
+        if (ok) run->encodedOk++;
         if (ok) camBackground_.Frame(index, frame, camDrawn_ && camEditable_ ? &camRect_ : nullptr);
         double ms = QpcToSeconds(QpcNow() - t0) * 1000.0;
 
@@ -515,14 +655,136 @@ void Pipeline::VideoLoop() {
         Sleep(DWORD(std::max<int64_t>(wait100ns / 10'000, 1)));
     }
   }
-  encoder_.Flush(sink);
+  // Vaciar el encoder también puede quedarse esperando a un MFT colgado.
+  if (!abandoned) run->Guarded([&] { encoder->Flush(sink); });
   if (timer) CloseHandle(timer);
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
 
+VideoStall Pipeline::Diagnose(int ticks) const {
+  VideoStall stall;
+  if (!run_) return stall;
+  const std::string encoder = "«" + (run_->encoderLabel.empty() ? run_->encoderName : run_->encoderLabel) + "»";
+  if (watch_.stuck >= ticks) {
+    stall.reason = "el encoder de vídeo " + encoder + " se ha colgado: lleva " + std::to_string(watch_.stuck) +
+                   " s sin devolver nada";
+    stall.encoderKey = run_->encoderName + gpuKey_;
+    stall.restart = true;
+  } else if (watch_.silent >= ticks) {
+    stall.reason = "el encoder de vídeo " + encoder + " recibe imagen pero lleva " + std::to_string(watch_.silent) +
+                   " s sin devolver vídeo";
+    stall.encoderKey = run_->encoderName + gpuKey_;
+    stall.restart = true;
+  } else if (watch_.idle >= ticks) {
+    // No se reinicia: el hilo no está dentro del encoder, Stop() tendría que
+    // esperarle y congelaría la interfaz.
+    stall.reason = "el hilo de vídeo lleva " + std::to_string(watch_.idle) + " s parado";
+  } else if (run_->encodes == 0 && watch_.ticks >= ticks) {
+    stall.reason = "la captura no ha dado ninguna imagen desde que empezó (¿la ventana capturada está minimizada?)";
+  }
+  return stall;
+}
+
+VideoStall Pipeline::CheckStall() {
+  if (!running_ || !run_ || failed_ || watch_.reported) return {};
+  const uint64_t encodes = run_->encodes, packets = run_->videoPackets;
+  const bool inEncode = run_->state == VideoRun::kInEncode;
+  const bool moved = encodes != watch_.encodes;
+  watch_.ticks++;
+  watch_.stuck = inEncode && !moved ? watch_.stuck + 1 : 0;
+  if (packets != watch_.videoPackets) watch_.silent = 0;
+  else if (moved && run_->encodedOk > 0) watch_.silent++;
+  watch_.idle = !inEncode && !moved && encodes > 0 ? watch_.idle + 1 : 0;
+  watch_.encodes = encodes;
+  watch_.videoPackets = packets;
+  VideoStall stall = Diagnose(kStallTicks);
+  if (stall.restart) {
+    watch_.reported = true; // la app reinicia la captura
+    const std::string& id = run_->encoderName;
+    const bool native = id == nativeId_;
+    // Un reinicio de la GPU (TDR) o una CPU llena también dejan la llamada
+    // colgada sin que la culpa sea del encoder: entonces no se guarda en la
+    // configuración (desde Ajustes no se puede deshacer) y se vuelve a probar.
+    ID3D11Device* device = gpu_.Device();
+    const bool removed = device && device->GetDeviceRemovedReason() != S_OK;
+    const bool software = run_->software;
+    const bool blameless = native || software || removed;
+    const bool twice = std::find(stalledOnce_.begin(), stalledOnce_.end(), id) != stalledOnce_.end();
+    stall.remember = !blameless;
+    if (!blameless || twice) sessionExcluded_.push_back(id);
+    else stalledOnce_.push_back(id);
+    Log("Vídeo: %s; se reinicia la captura %s", stall.reason.c_str(),
+        !blameless ? "sin él (no se volverá a usar con esta gráfica y este driver)"
+        : twice    ? "sin él hasta cerrar Spectre (es la segunda vez)"
+        : removed  ? "con él otra vez (la GPU se ha reiniciado)"
+        : software ? "con él otra vez (va por CPU: puede que la CPU fuera llena)"
+                   : "con él otra vez (es el de la gráfica: puede haber sido un reinicio de la GPU)");
+  } else if (!stall.reason.empty() && !watch_.noted) {
+    watch_.noted = true; // reiniciar no lo arregla: solo al log, una vez (y al aviso si falla un clip)
+    Log("Vídeo: %s", stall.reason.c_str());
+  }
+  return stall;
+}
+
+bool Pipeline::NativeEncoderReady() {
+  if (!running_ || native_.empty()) return false;
+  if (probe_) {
+    const int result = *probe_;
+    if (result < 0) return false; // aún probando
+    probe_.reset();
+    if (result > 0) {
+      Log("Vídeo: %s ya abre; se reinicia la captura para usarlo en vez de %s", native_.c_str(),
+          encoder_->Name().c_str());
+      return true;
+    }
+  }
+  // Desde el último arranque: a los 15 s, 45 s, 2 min, 5 min y 15 min.
+  static const ULONGLONG kDelays[] = {15'000, 45'000, 120'000, 300'000, 900'000};
+  if (probes_ >= std::size(kDelays) || GetTickCount64() - startedAt_ < kDelays[probes_]) return false;
+  ++probes_;
+  VideoEncoderSettings es;
+  es.width = width_;
+  es.height = height_;
+  es.fps = settings_.fps;
+  es.quality = plan_;
+  es.codec = settings_.codec;
+  es.preferred = native_;
+  es.onlyPreferred = true;
+  es.role = "vídeo (prueba)";
+  // En otro hilo: abrir un encoder tarda, y un driver que se cuelga no debe
+  // llevarse la interfaz. Con su propia referencia al dispositivo.
+  auto result = std::make_shared<std::atomic<int>>(-1);
+  probe_ = result;
+  ComPtr<ID3D11Device> device = gpu_.Device();
+  std::thread([result, device, es] {
+    InstallThreadCrashHandler();
+    VideoEncoder test;
+    bool ok = test.Open(es, device.Get());
+    test.Close();
+    *result = ok ? 1 : 0;
+  }).detach();
+  return false;
+}
+
+namespace {
+
+// El motivo de un clip fallido como frase del aviso: la primera letra en mayúscula.
+std::string Sentence(std::string text) {
+  if (!text.empty() && text[0] >= 'a' && text[0] <= 'z') text[0] = char(text[0] - 'a' + 'A');
+  return text;
+}
+
+std::string Megabytes(uint64_t bytes) { return std::to_string((bytes + (1u << 19)) >> 20) + " MB"; }
+
+} // namespace
+
 void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc) {
+  const std::string name = Narrow(std::filesystem::path(Widen(path)).filename().wstring());
+  // El aviso lleva el nombre (para saber qué «Guardando clip» era) y, tras un
+  // salto de línea, el motivo si falló.
   if (!running_ || !buffer_) {
-    if (notify_) notify_("El replay no está activo", true);
+    Log("Clip: FALLÓ %s: el replay no está activo", path.c_str());
+    if (notify_) notify_("No se pudo guardar el clip: " + name + "\nEl replay no está activo", true);
     return;
   }
   auto buffer = buffer_;
@@ -539,46 +801,83 @@ void Pipeline::SaveClip(const std::string& path, double seconds, int64_t endQpc)
     age = frameAgeMs_;
   }
   Log("Clip: %.0f s pedidos, el frame de vídeo llega al encoder con %.1f ms de media", seconds, age);
+  // Si el vídeo no está llegando al anillo, por qué: es lo que explica un clip
+  // que sale vacío (antes solo decía el nombre del archivo).
+  const VideoStall stall = Diagnose(2);
+  std::string videoNote = stall.reason;
+  if (!videoNote.empty()) {
+    Log("Clip: ojo, %s", stall.reason.c_str());
+    if (stall.restart) videoNote += ". Spectre está reiniciando la captura: prueba otra vez en unos segundos";
+  }
+  const bool justStarted = GetTickCount64() - startedAt_ < 5000;
   // El audio se codifica con un margen (100 ms, hasta 1 s si una fuente llega
   // tarde): se espera ese margen y un poco más para que haya audio hasta `end`.
   double latency = streams_.size() > 1 ? audio_.LatencySeconds() : 0.0;
   DWORD waitMs = DWORD(std::clamp(latency + 0.15, 0.15, 1.5) * 1000.0);
   auto pending = std::make_shared<PendingWrite>(); // al salir se espera a que termine
-  std::thread([buffer, notify, path, seconds, end, requested, pending, waitMs] {
+  std::thread([buffer, notify, path, name, seconds, end, requested, pending, waitMs, videoNote, justStarted] {
     InstallThreadCrashHandler();
     Sleep(waitMs);
     bool ok = false;
+    std::string reason;
     try {
       // La copia de la lista bloquea el anillo, al que entregan sus paquetes
       // los hilos de vídeo y audio: se hace con la prioridad normal del hilo,
       // no con la baja de la escritura, para que el juego no pueda dejarlo sin
       // turno con el lock cogido. Son referencias, ~1 ms con 5 min de replay.
       int64_t t0 = QpcNow();
-      auto packets = buffer->Snapshot(seconds, end, requested);
+      std::string empty;
+      auto packets = buffer->Snapshot(seconds, end, requested, &empty);
       auto streams = buffer->Streams(); // con las del fondo de la cámara añadidas por el camino
       double copyMs = QpcToSeconds(QpcNow() - t0) * 1000.0;
-      // Escribir sí puede esperar: prioridad baja y, dentro de WriteClip, E/S
-      // y memoria de fondo.
-      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-      SetThreadEcoQoS(true);
       Log("Clip: %zu paquetes tomados del anillo en %.1f ms", packets.size(), copyMs);
-      t0 = QpcNow();
-      ok = WriteClip(path, streams, packets);
-      Log("Clip: escrito en %.0f ms", QpcToSeconds(QpcNow() - t0) * 1000.0);
-      // Los paquetes que el anillo soltó mientras se escribía se liberan aquí,
-      // y liberar toma el lock del heap, que el hilo de vídeo necesita en cada
-      // frame: con prioridad normal, por lo mismo que la copia.
-      SetThreadEcoQoS(false);
-      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+      if (packets.empty()) {
+        Log("Clip: el anillo no da nada: %s", empty.c_str());
+        reason = !videoNote.empty() ? videoNote
+                 : justStarted      ? "la captura acaba de empezar y el replay aún no tiene vídeo: prueba otra "
+                                      "vez en unos segundos"
+                                    : empty;
+      } else {
+        // Que quepa en el disco (más 16 MB de margen): sin espacio, FFmpeg
+        // fallaría a medias y dejaría un archivo roto.
+        uint64_t bytes = 0;
+        for (const auto& [pkt, stream] : packets) bytes += uint64_t(pkt->size);
+        ULARGE_INTEGER space{};
+        const auto dir = std::filesystem::path(Widen(path)).parent_path();
+        if (GetDiskFreeSpaceExW(dir.c_str(), &space, nullptr, nullptr) && space.QuadPart < bytes + (16u << 20)) {
+          reason = "no cabe en el disco: hacen falta " + Megabytes(bytes) + " y quedan " + Megabytes(space.QuadPart);
+        } else {
+          // Escribir sí puede esperar: prioridad baja y, dentro de WriteClip,
+          // E/S y memoria de fondo.
+          SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+          SetThreadEcoQoS(true);
+          t0 = QpcNow();
+          ok = WriteClip(path, streams, packets, &reason);
+          Log("Clip: escrito en %.0f ms", QpcToSeconds(QpcNow() - t0) * 1000.0);
+          // Los paquetes que el anillo soltó mientras se escribía se liberan
+          // aquí, y liberar toma el lock del heap, que el hilo de vídeo
+          // necesita en cada frame: con prioridad normal, por lo mismo que la
+          // copia.
+          SetThreadEcoQoS(false);
+          SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        }
+      }
       packets.clear();
     } catch (const std::exception& e) {
       Log("Clip: excepción al guardar: %s", e.what());
+      reason = std::string("error interno al guardar: ") + e.what();
     }
-    Log("Clip %s: %s", ok ? "guardado" : "FALLÓ", path.c_str());
-    if (notify) {
-      auto name = std::filesystem::path(Widen(path)).filename();
-      notify((ok ? "Clip guardado: " : "No se pudo guardar el clip: ") + Narrow(name.wstring()), !ok);
+    if (ok) {
+      Log("Clip guardado: %s", path.c_str());
+    } else {
+      // Un MP4 a medias (sin índice) no se puede ver: fuera, para que no
+      // aparezca roto en la biblioteca.
+      DeleteFileW(Widen(path).c_str());
+      if (reason.empty()) reason = "no se sabe por qué; mira spectre.log";
+      Log("Clip: FALLÓ %s: %s", path.c_str(), reason.c_str());
     }
+    if (notify)
+      notify(ok ? "Clip guardado: " + name : "No se pudo guardar el clip: " + name + "\n" + Sentence(reason), !ok);
   }).detach();
 }
 
@@ -668,8 +967,8 @@ PipelineStats Pipeline::Stats() {
   PipelineStats s;
   s.running = running_;
   if (!running_) return s;
-  s.encoder = encoder_.Label() + (encoder_.ZeroCopy() ? " (cero copias)" : "");
-  s.encoderSoftware = encoder_.Software();
+  s.encoder = encoder_->Label() + (encoder_->ZeroCopy() ? " (cero copias)" : "");
+  s.encoderSoftware = encoder_->Software();
   s.capture = capture_ ? capture_->Name() : "";
   s.gpu = gpu_.AdapterName();
   s.width = width_;

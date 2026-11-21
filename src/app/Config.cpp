@@ -36,6 +36,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 outputDir, storageLimitGB, deleteAfterDays, showNotifications,
                                                 notifyGame, notifyUpdates, soundOnSave, saveSound, copyClipOnSave,
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
+                                                stalledEncoders,
                                                 theme, themeStyle, themeMotion, themeBackdrop, panelLayout, panelLateralX, panelCompactX,
                                                 panelCompactY, hotkeys, discordPresence, voice, cloud, shadowPlay)
 
@@ -54,6 +55,9 @@ static void Sanitize(Config& c) {
   if (!knownQuality) c.quality = "alta";
   c.cameraSizePercent = std::clamp(c.cameraSizePercent, 10, 50);
   c.maxBufferMB = std::clamp(c.maxBufferMB, 64, 8192);
+  // Los más recientes van al final: con muchos drivers distintos se olvidan los primeros.
+  if (c.stalledEncoders.size() > 16)
+    c.stalledEncoders.erase(c.stalledEncoders.begin(), c.stalledEncoders.end() - 16);
   c.systemVolume = std::clamp(c.systemVolume, 0.0f, 2.0f);
   c.micVolume = std::clamp(c.micVolume, 0.0f, 2.0f);
   if (c.outputHeight != 0) c.outputHeight = std::clamp(c.outputHeight, 360, 2160);

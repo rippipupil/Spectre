@@ -44,6 +44,21 @@ struct PipelineSettings {
   // Tope de RAM del replay; 0 = automático: lo que ocupa la duración pedida
   // al bitrate máximo del preset, sin pasar de la cuarta parte de la RAM.
   size_t maxBufferBytes = 0;
+  // Encoders que se colgaron antes (claves de VideoStall::encoderKey): con la
+  // misma gráfica y el mismo driver no se vuelven a probar.
+  std::vector<std::string> stalledEncoders;
+};
+
+// Lo que encontró el vigilante del vídeo (Pipeline::CheckStall).
+struct VideoStall {
+  std::string reason;     // en palabras, para el log y el aviso; vacío = todo bien
+  std::string encoderKey; // "id|gráfica|driver" si la culpa es del encoder
+  bool restart = false;   // reiniciar la captura lo arregla
+  // Guardar encoderKey en la configuración para no volver a probarlo. No con
+  // el encoder propio de la gráfica (NVENC, AMF, QuickSync): colgarse una vez
+  // puede ser un reinicio de la GPU, y sin él se grabaría por CPU hasta
+  // cambiar de driver. Ese solo se deja de usar en la sesión si se cuelga dos veces.
+  bool remember = false;
 };
 
 struct PipelineStats {
@@ -91,6 +106,19 @@ public:
     return capture_ && capture_->Lost();
   }
   HWND TargetWindow() const { return settings_.target.window; }
+  // Vigilante, una vez por segundo desde la interfaz: el encoder lleva
+  // segundos dentro de una llamada sin volver, o recibe imagen y no devuelve
+  // vídeo. Sin él, el replay se quedaba solo con audio y cada clip fallaba sin
+  // decir por qué (el encoder de Media Foundation de AMD, tras 3 frames). Lo
+  // devuelve una vez por arranque; la app reinicia la captura sin ese encoder.
+  VideoStall CheckStall();
+  // La gráfica tiene encoder propio (NVENC, AMF, QuickSync) pero al arrancar
+  // no abrió (AMF puede tardar en estar listo al iniciar Windows) y se graba
+  // con otro: se vuelve a probar en otro hilo de vez en cuando. true cuando ya
+  // abre: la app reinicia la captura para usarlo. Desde la interfaz.
+  bool NativeEncoderReady();
+  // El encoder propio que se está volviendo a probar (vacío si ya se usa).
+  const std::string& NativeEncoder() const { return native_; }
 
   // Guarda los últimos `seconds` segundos en `path` (asíncrono). endQpc: dónde
   // acaba el clip (una orden de voz acaba donde se empezó a decir); 0 = ahora.
@@ -120,7 +148,13 @@ public:
   PipelineStats Stats();
 
 private:
-  void VideoLoop();
+  struct VideoRun; // lo que comparte el hilo de vídeo con Stop y el vigilante (ver Pipeline.cpp)
+  void VideoLoop(const std::shared_ptr<VideoRun>& run, VideoEncoder* encoder);
+  // Espera al hilo de vídeo; si está colgado dentro del encoder, lo deja aparte.
+  void JoinVideoThread();
+  // Por qué no está llegando vídeo al anillo (vacío si llega), tras
+  // `ticks` comprobaciones seguidas del vigilante (una por segundo).
+  VideoStall Diagnose(int ticks) const;
   bool Render(ID3D11Texture2D* dst, UINT slice, const CapturedFrame& frame);
   RECT CameraRect(UINT camWidth, UINT camHeight) const;
   void StartCamera(bool userAsked);
@@ -134,7 +168,9 @@ private:
   GpuDevice gpu_;
   std::unique_ptr<CaptureSource> capture_;
   VideoConverter converter_;
-  VideoEncoder encoder_;
+  // En un puntero: si se cuelga dentro de FFmpeg, se queda con su hilo y aquí
+  // se pone uno nuevo (ver JoinVideoThread).
+  std::unique_ptr<VideoEncoder> encoder_ = std::make_unique<VideoEncoder>();
   AudioPipeline audio_;
   // Se cambia con GpuMutex tomado, igual que settings_.camera*: Render los lee
   // dentro del GpuMutex del encoder.
@@ -157,6 +193,25 @@ private:
   std::atomic<ULONGLONG> failedAt_{0};
   QualityPlan plan_;
   std::thread videoThread_;
+  std::shared_ptr<VideoRun> run_;
+  // Vigilante (solo la interfaz): contadores de la comprobación anterior.
+  struct Watch {
+    uint64_t encodes = 0, videoPackets = 0;
+    int stuck = 0;  // comprobaciones seguidas dentro de la misma llamada al encoder
+    int silent = 0; // seguidas con frames enviados y ningún paquete de vídeo de vuelta
+    int idle = 0;   // seguidas sin que el hilo de vídeo envíe nada (habiendo imagen)
+    int ticks = 0;  // desde el arranque
+    bool reported = false; // ya se pidió reiniciar
+    bool noted = false;    // ya se apuntó en el log algo que reiniciar no arregla
+  } watch_;
+  std::string gpuKey_;   // "|gráfica|driver" para las claves de VideoStall
+  std::string nativeId_; // encoder propio de esta gráfica (abra o no)
+  std::vector<std::string> sessionExcluded_; // colgados en esta sesión (ver VideoStall::remember)
+  std::vector<std::string> stalledOnce_;     // propios de la gráfica que se colgaron una vez
+  std::string native_;   // encoder propio de la gráfica que no abrió al arrancar
+  std::shared_ptr<std::atomic<int>> probe_; // prueba en curso: -1, 0 no abre, 1 abre
+  size_t probes_ = 0;    // pruebas hechas (no vuelve a 0 al reiniciar: ver NativeEncoderReady)
+  ULONGLONG startedAt_ = 0;
   int64_t startQpc_ = 0;
   int width_ = 0, height_ = 0;
 

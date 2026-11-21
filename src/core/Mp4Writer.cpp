@@ -11,12 +11,24 @@
 
 namespace spectre {
 
+std::string DiskErrorText(int err) {
+  if (err == AVERROR(ENOSPC)) return "el disco está lleno";
+  if (err == AVERROR(EACCES) || err == AVERROR(EPERM))
+    return "Windows no deja escribir en esa carpeta (permisos, o la protección contra ransomware del antivirus)";
+  if (err == AVERROR(ENOENT)) return "la carpeta de los clips no existe (¿un disco desconectado?)";
+  if (err == AVERROR(EROFS)) return "el disco es de solo lectura";
+  if (err == AVERROR(EIO)) return "error de lectura o escritura en el disco";
+  return AvError(err);
+}
+
 bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fragmented, int64_t reserveMoov) {
   Close();
+  error_.clear();
   streams_ = streams;
   int err = avformat_alloc_output_context2(&fmt_, nullptr, "mp4", path.c_str());
   if (err < 0 || !fmt_) {
     Log("MP4: no se pudo crear el contexto: %s", AvError(err).c_str());
+    error_ = "FFmpeg no pudo preparar el MP4: " + AvError(err);
     return false;
   }
   bool firstAudio = true;
@@ -40,6 +52,7 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
   err = avio_open(&fmt_->pb, path.c_str(), AVIO_FLAG_WRITE);
   if (err < 0) {
     Log("MP4: no se pudo abrir %s: %s", path.c_str(), AvError(err).c_str());
+    error_ = "no se pudo crear el archivo: " + DiskErrorText(err);
     avformat_free_context(fmt_);
     fmt_ = nullptr;
     return false;
@@ -59,6 +72,7 @@ bool Mp4Writer::Open(const std::string& path, const StreamList& streams, bool fr
   av_dict_free(&opts);
   if (err < 0) {
     Log("MP4: write_header falló: %s", AvError(err).c_str());
+    error_ = "no se pudo empezar el archivo: " + DiskErrorText(err);
     avio_closep(&fmt_->pb);
     avformat_free_context(fmt_);
     fmt_ = nullptr;
@@ -121,6 +135,7 @@ bool Mp4Writer::Write(const AVPacket* packet, int stream) {
   av_packet_unref(tmp_);
   if (err < 0) {
     Log("MP4: error escribiendo: %s", AvError(err).c_str());
+    error_ = "error al escribir el archivo: " + DiskErrorText(err);
     return false;
   }
   return true;
@@ -148,7 +163,14 @@ std::string Mp4Writer::Summary() const {
 bool Mp4Writer::Close() {
   bool ok = true;
   if (fmt_) {
-    if (headerWritten_) ok = av_write_trailer(fmt_) >= 0;
+    if (headerWritten_) {
+      int err = av_write_trailer(fmt_);
+      ok = err >= 0;
+      if (!ok) {
+        Log("MP4: no se pudo cerrar el archivo: %s", AvError(err).c_str());
+        error_ = "no se pudo terminar el archivo: " + DiskErrorText(err);
+      }
+    }
     avio_closep(&fmt_->pb);
     avformat_free_context(fmt_);
     fmt_ = nullptr;
@@ -159,8 +181,12 @@ bool Mp4Writer::Close() {
 }
 
 bool WriteClip(const std::string& path, const StreamList& allStreams,
-               const std::vector<std::pair<SharedPacket, int>>& packets) {
-  if (packets.empty()) return false;
+               const std::vector<std::pair<SharedPacket, int>>& packets, std::string* error) {
+  auto fail = [&](const std::string& why) {
+    if (error) *error = why;
+    return false;
+  };
+  if (packets.empty()) return fail("no hay nada que escribir");
   // Solo las pistas con algún paquete (la 0 siempre; otra de vídeo, con algún
   // keyframe, que es donde empieza), con índices seguidos.
   std::vector<int> map(allStreams.size(), -1);
@@ -190,7 +216,7 @@ bool WriteClip(const std::string& path, const StreamList& allStreams,
   ULONGLONG started = GetTickCount64();
   for (int attempt = 0; attempt < 2; ++attempt) {
     Mp4Writer writer;
-    if (!writer.Open(path, streams, false, attempt == 0 ? reserve : 0)) return false;
+    if (!writer.Open(path, streams, false, attempt == 0 ? reserve : 0)) return fail(writer.Error());
     for (const auto& [pkt, stream] : packets) {
       if (background.Active() && GetTickCount64() - started > 5000) {
         background.Leave();
@@ -199,13 +225,18 @@ bool WriteClip(const std::string& path, const StreamList& allStreams,
       // Una pista del fondo sin keyframe en el clip no se escribe: sus
       // paquetes se saltan, como los de antes de su primer keyframe.
       if (stream < 0 || size_t(stream) >= map.size() || map[size_t(stream)] < 0) continue;
-      if (!writer.Write(pkt.get(), map[size_t(stream)])) return false;
+      if (!writer.Write(pkt.get(), map[size_t(stream)])) {
+        std::string why = writer.Error();
+        writer.Close();
+        return fail(why);
+      }
     }
     if (attempt == 0) Log("Clip: pistas %s", writer.Summary().c_str());
     if (writer.Close()) return true;
-    if (attempt == 0) Log("Clip: el índice no cupo en los %lld KB reservados; se reescribe con faststart", (long long)(reserve / 1024));
+    if (attempt == 1) return fail(writer.Error());
+    Log("Clip: el índice no cupo en los %lld KB reservados; se reescribe con faststart", (long long)(reserve / 1024));
   }
-  return false;
+  return fail("no se pudo terminar el archivo");
 }
 
 bool ProbeDuration(const std::string& path, double* seconds) {

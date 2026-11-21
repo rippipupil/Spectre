@@ -700,7 +700,21 @@ std::string App::LowDiskNote() {
 
 void App::SaveClip(bool shortClip, int64_t endQpc) {
   if (!pipeline_.Running() || !config_.replayEnabled) {
-    Toast("El replay no está activo", true);
+    // Por qué no hay replay, en vez de solo «no está activo».
+    Notice notice{NoticeKind::Error, "No se pudo guardar el clip", ""};
+    notice.error = true;
+    const std::string& toggle = config_.hotkeys.toggleReplay;
+    if (!config_.replayEnabled)
+      notice.detail = "El replay está desactivado: actívalo " +
+                      (toggle.empty() ? "desde el panel (" + config_.hotkeys.overlay + ")" : "con " + toggle);
+    else if (config_.onlyInGames && !GameActive())
+      notice.detail = "El replay solo graba con un juego abierto (Ajustes > Replay > Solo con un juego abierto)";
+    else if (startFailedAt_)
+      notice.detail = "La captura no se pudo iniciar: el motivo está en spectre.log (%APPDATA%\\Spectre)";
+    else
+      notice.detail = "El replay no está activo";
+    Log("Clip: no se guarda: %s", notice.detail.c_str());
+    Notify(std::move(notice));
     return;
   }
   // El clip corto no puede pasar de lo que guarda el replay.
@@ -1651,6 +1665,7 @@ PipelineSettings App::BuildSettings() const {
   // 1024 MB es el valor por defecto de siempre: con él, el tope lo calcula el
   // pipeline según calidad, duración y RAM (con 5 min en Alta se quedaba corto).
   s.maxBufferBytes = config_.maxBufferMB == 1024 ? 0 : size_t(config_.maxBufferMB) << 20;
+  s.stalledEncoders = config_.stalledEncoders;
   return s;
 }
 
@@ -2965,21 +2980,50 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (wp == kTimerGame) {
       CheckGame();
       UpdateVoice(); // «Solo con un juego abierto»: el juego se abrió o se cerró
-    } else if (wp == kTimerHealth && pipeline_.Running() && pipeline_.CaptureLost()) {
-      KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
-      bool wasRecording = pipeline_.Recording();
-      std::string path = wasRecording ? pipeline_.Stats().recordPath : std::string();
-      int64_t stoppedAt = QpcNow();
-      if (wasRecording) pipeline_.StopRecording();
-      Log("Captura perdida: se reinicia");
-      pipeline_.Stop();
-      restartPending_ = false;
-      if (wasRecording) {
-        Notify({NoticeKind::RecordingSaved, "Grabación guardada", "La ventana capturada se cerró: " + FileNameOf(path)});
-        OnRecordingStopped(path, stoppedAt);
+    } else if (wp == kTimerHealth && pipeline_.Running()) {
+      // Captura perdida (ventana cerrada, GPU reiniciada), encoder colgado o
+      // sin devolver vídeo (el replay se quedaba solo con audio y cada clip
+      // fallaba), o el encoder propio de la gráfica que al arrancar no abrió y
+      // ahora sí: se reinicia la captura.
+      const bool lost = pipeline_.CaptureLost();
+      const VideoStall stall = lost ? VideoStall{} : pipeline_.CheckStall();
+      const bool upgrade = !lost && !stall.restart && !pipeline_.Recording() && pipeline_.NativeEncoderReady();
+      if (lost || stall.restart || upgrade) {
+        KeyboardHook::Pause pause(keyboard_); // reiniciar la captura tarda
+        if (stall.remember && !stall.encoderKey.empty() &&
+            std::find(config_.stalledEncoders.begin(), config_.stalledEncoders.end(), stall.encoderKey) ==
+                config_.stalledEncoders.end()) {
+          // Con esta gráfica y este driver no se vuelve a probar (tampoco en
+          // el próximo arranque).
+          config_.stalledEncoders.push_back(stall.encoderKey);
+          SaveConfig(config_);
+        }
+        const std::string native = upgrade ? EncoderLabel(pipeline_.NativeEncoder()) : std::string();
+        bool wasRecording = pipeline_.Recording();
+        std::string path = wasRecording ? pipeline_.Stats().recordPath : std::string();
+        int64_t stoppedAt = QpcNow();
+        if (wasRecording) pipeline_.StopRecording();
+        Log(lost ? "Captura perdida: se reinicia" : stall.restart ? "Vídeo: se reinicia la captura con otro encoder"
+                                                                  : "Vídeo: se reinicia la captura con el encoder de la gráfica");
+        pipeline_.Stop();
+        restartPending_ = false;
+        if (wasRecording) {
+          Notify({NoticeKind::RecordingSaved, "Grabación guardada",
+                  (lost ? "La ventana capturada se cerró: " : "El vídeo dejó de llegar: ") + FileNameOf(path)});
+          OnRecordingStopped(path, stoppedAt);
+        } else if (stall.restart) {
+          std::string reason = stall.reason;
+          if (!reason.empty() && reason[0] >= 'a' && reason[0] <= 'z') reason[0] = char(reason[0] - 'a' + 'A');
+          Notice notice{NoticeKind::Warning, "El vídeo dejó de llegar al replay", reason + ". Spectre reinicia la captura"};
+          notice.warning = true;
+          Notify(std::move(notice));
+        }
+        UpdatePipeline();
+        // Para que un clip corto justo después no extrañe: el replay empezó de nuevo.
+        if (upgrade && pipeline_.Running() && pipeline_.NativeEncoder().empty())
+          Notify({NoticeKind::Info, "Spectre ya graba con la gráfica", native + ": el replay empieza de nuevo"});
+        InstallPendingUpdate();
       }
-      UpdatePipeline();
-      InstallPendingUpdate();
     }
     return 0;
   case WM_SPECTRE_VOICE: {
@@ -3004,10 +3048,17 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     std::pair<int, bool> clip{config_.clipSeconds, false};
     for (const char* prefix : {"Clip guardado: ", "No se pudo guardar el clip: "}) {
       if (!StartsWith(message, prefix)) continue;
-      auto it = pendingClips_.find(message.substr(strlen(prefix)));
+      // Tras el nombre, en otra línea, el motivo si falló (ver Pipeline::SaveClip).
+      const std::string rest = message.substr(strlen(prefix));
+      const size_t newline = rest.find('\n');
+      auto it = pendingClips_.find(rest.substr(0, newline));
       if (it != pendingClips_.end()) {
         clip = it->second;
         pendingClips_.erase(it);
+      }
+      if (error && newline != std::string::npos) {
+        notice.title = clip.second ? "No se pudo guardar el clip corto" : "No se pudo guardar el clip";
+        notice.detail = rest.substr(newline + 1);
       }
     }
     if (!error && (StartsWith(message, "Clip guardado") || StartsWith(message, "Captura guardada") ||

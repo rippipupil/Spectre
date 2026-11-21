@@ -237,6 +237,10 @@ std::unique_ptr<CamBackground::Aux> CamBackground::Open(const RECT& rect) {
   es.codec = "h264";
   es.preferred = encoder_;
   es.hardwareOnly = true;
+  // El mismo encoder que el vídeo o ninguno: si no, VideoEncoder::Open seguiría
+  // por la lista y podría abrir uno que el vídeo dejó apartado por colgarse
+  // (h264_mf_hw), y aquí se codifica fuera del vigilante del hilo de vídeo.
+  es.onlyPreferred = true;
   es.gopFrames = std::max(fps_ / 4, 1);
   es.role = "fondo de la cámara";
   if (!aux->encoder.Open(es, device_.Get())) {

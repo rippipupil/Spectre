@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace spectre {
 
@@ -138,6 +139,10 @@ struct Config {
   bool closeToTray = true;             // cerrar la ventana deja Spectre en la bandeja
   bool trayHintShown = false;          // ya se avisó de que cerrar la ventana no cierra Spectre
   int maxBufferMB = 1024;
+  // Encoders de vídeo que se colgaron ("id|gráfica|driver", ver
+  // Pipeline::CheckStall): no se vuelven a probar hasta cambiar de driver. No
+  // sale en Ajustes.
+  std::vector<std::string> stalledEncoders;
 
   // Apariencia (ver ui/Theme.h)
   std::string theme = "negro";         // id de ui/Theme.h: "negro", "psiquico" o uno de RoCer0
