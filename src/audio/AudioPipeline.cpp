@@ -4,6 +4,7 @@
 #include "common/Util.h"
 
 #include <avrt.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <cmath>
@@ -16,14 +17,24 @@ constexpr int64_t kLatencyFrames = 4800;    // 100 ms de margen mínimo para que
 constexpr int64_t kMaxLatencyFrames = kAudioRate; // con más de 1 s de retraso se pierde audio antes que esperar
 constexpr int64_t kLatencySlack = kFrameSize + kAudioRate / 50; // un frame AAC + 20 ms
 
+// Cada cuánto se mira por qué salidas suena el juego, y cuántas pasadas
+// seguidas sin él hacen falta para dejar de grabar una (un fallo puntual de
+// COM no corta el audio).
+constexpr DWORD kWatchIntervalMs = 2000;
+constexpr int kWatchMisses = 3;
+} // namespace
+
 // Retraso con el que se codifica: lo que tarde la fuente más lenta en
 // entregar más un margen. No afecta a la sincronía (cada muestra va a su
 // posición), solo evita codificar silencio en lugar de audio que aún viene.
-int64_t ReadMargin(const AudioCapture* system, const AudioCapture* mic) {
-  int64_t lag = std::max(system ? system->LagFrames() : 0, mic ? mic->LagFrames() : 0);
+int64_t AudioPipeline::ReadMargin() {
+  int64_t lag = std::max(system_ ? system_->LagFrames() : 0, mic_ ? mic_->LagFrames() : 0);
+  {
+    std::lock_guard lock(extrasMutex_);
+    for (auto& e : extras_) lag = std::max(lag, e.capture->LagFrames());
+  }
   return std::clamp(lag + kLatencySlack, kLatencyFrames, kMaxLatencyFrames);
 }
-} // namespace
 
 bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int firstStream, PacketSink sink) {
   Stop();
@@ -34,6 +45,7 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
   margin_ = kLatencyFrames;
   loggedMargin_ = kLatencyFrames;
   micMuted_ = false;
+  if (settings.processId) gamePid_ = settings.processId;
 
   // Las dos fuentes se abren a la vez: un auricular Bluetooth lento ya no
   // suma su espera a la del otro dispositivo.
@@ -79,6 +91,7 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
   packet_ = av_packet_alloc();
   sysBuf_.assign(kFrameSize * kAudioChannels, 0.0f);
   micBuf_.assign(kFrameSize * kAudioChannels, 0.0f);
+  extraBuf_.assign(kFrameSize * kAudioChannels, 0.0f);
   running_ = true;
   systemLevel_ = micLevel_ = 0.0f;
   systemPeak_ = micPeak_ = 0.0f;
@@ -91,6 +104,22 @@ bool AudioPipeline::Start(const AudioSettings& settings, int64_t startQpc, int f
       Log("Audio: excepción en el hilo de mezcla: %s", e.what());
     }
   });
+  // El sonido del PC es el de una salida, pero un juego puede sonar por otra:
+  // muchos (FMOD, SDL...) se quedan con la que era predeterminada al abrirse,
+  // y con unos auriculares Bluetooth cuyo micrófono está en uso Windows tiene
+  // dos salidas del mismo auricular. Entonces el clip solo tenía el micrófono.
+  if (system_ && !processOnly) {
+    watchStop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (watchStop_)
+      watchThread_ = std::thread([this] {
+        InstallThreadCrashHandler();
+        try {
+          WatchOutputs();
+        } catch (const std::exception& e) {
+          Log("Audio: excepción vigilando las salidas: %s", e.what());
+        }
+      });
+  }
   Log("Audio: %zu pista(s), sistema=%d micrófono=%d", tracks_.size(), system_ ? 1 : 0, mic_ ? 1 : 0);
   return true;
 }
@@ -117,6 +146,20 @@ bool AudioPipeline::OpenTrack(Track& track, const char* title) {
 void AudioPipeline::Stop() {
   running_ = false;
   if (thread_.joinable()) thread_.join();
+  if (watchThread_.joinable()) {
+    SetEvent(watchStop_);
+    watchThread_.join();
+  }
+  if (watchStop_) CloseHandle(watchStop_);
+  watchStop_ = nullptr;
+  {
+    std::vector<ExtraOutput> extras;
+    {
+      std::lock_guard lock(extrasMutex_);
+      extras.swap(extras_);
+    }
+    for (auto& e : extras) e.capture->Stop();
+  }
   if (system_) system_->Stop();
   if (mic_) mic_->Stop();
   for (auto& t : tracks_) {
@@ -137,13 +180,80 @@ void AudioPipeline::Stop() {
   av_packet_free(&packet_);
 }
 
+void AudioPipeline::WatchOutputs() {
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  DWORD lastPid = 0;
+  std::string lastReport;
+  std::vector<std::string> failed; // salidas que no se pudieron abrir con este juego
+  while (WaitForSingleObject(watchStop_, kWatchIntervalMs) == WAIT_TIMEOUT) {
+    const DWORD pid = gamePid_;
+    if (pid != lastPid) {
+      lastPid = pid;
+      failed.clear();
+    }
+    // Mientras la principal se reabre (cambio de predeterminado) no se sabe
+    // cuál es: se espera a la siguiente pasada para no duplicar el audio.
+    const std::string main = system_->CurrentDeviceId();
+    if (main.empty()) continue;
+    std::vector<AudioDevice> outputs = OutputDevicesOfProcess(pid);
+    // Para el log: por dónde suena el juego, cada vez que cambia.
+    std::string report;
+    for (const auto& o : outputs) report += (report.empty() ? "" : ", ") + o.name + (o.id == main ? " (la que se graba)" : "");
+    if (pid && !report.empty() && report != lastReport)
+      Log("Audio: el juego (proceso %lu) suena por: %s", static_cast<unsigned long>(pid), report.c_str());
+    if (!report.empty()) lastReport = report;
+    std::erase_if(outputs, [&](const AudioDevice& o) { return o.id == main; });
+
+    // Fuera las salidas por las que ya no suena (o que pasan a ser la principal).
+    std::vector<ExtraOutput> dropped;
+    {
+      std::lock_guard lock(extrasMutex_);
+      for (auto it = extras_.begin(); it != extras_.end();) {
+        bool wanted = std::any_of(outputs.begin(), outputs.end(), [&](const AudioDevice& o) { return o.id == it->id; });
+        it->misses = wanted ? 0 : it->misses + 1;
+        if (it->id == main || it->misses >= kWatchMisses) {
+          dropped.push_back(std::move(*it));
+          it = extras_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (auto& e : dropped) {
+      Log("Audio: se deja de grabar «%s»", e.name.c_str());
+      e.capture->Stop();
+    }
+    // Las nuevas se abren aquí (puede tardar con Bluetooth), no en el hilo de mezcla.
+    for (const auto& o : outputs) {
+      {
+        std::lock_guard lock(extrasMutex_);
+        if (std::any_of(extras_.begin(), extras_.end(), [&](const ExtraOutput& e) { return e.id == o.id; })) continue;
+      }
+      if (std::find(failed.begin(), failed.end(), o.id) != failed.end()) continue;
+      ExtraOutput extra{o.id, o.name, std::make_unique<AudioCapture>(), 0};
+      extra.capture->SetPinned(true);
+      // Espera corta: Stop() del pipeline espera a este hilo.
+      extra.capture->Begin(AudioSourceKind::SystemLoopback, o.id, 0, startQpc_);
+      if (!extra.capture->WaitStarted(2000)) {
+        Log("Audio: el juego suena por «%s», pero no se pudo grabar esa salida", o.name.c_str());
+        failed.push_back(o.id);
+        continue;
+      }
+      Log("Audio: el juego suena por «%s», que no es la salida que se graba; se graba también", o.name.c_str());
+      std::lock_guard lock(extrasMutex_);
+      extras_.push_back(std::move(extra));
+    }
+  }
+  CoUninitialize();
+}
+
 void AudioPipeline::Run() {
   DWORD taskIndex = 0;
   HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Audio", &taskIndex);
   const int64_t freq = QpcFrequency();
   while (running_) {
     Sleep(10);
-    int64_t margin = ReadMargin(system_.get(), mic_.get());
+    int64_t margin = ReadMargin();
     margin_ = margin;
     if (margin > loggedMargin_ + kAudioRate / 50) {
       loggedMargin_ = margin;
@@ -156,6 +266,10 @@ void AudioPipeline::Run() {
     // Un pico a 0 con el juego sonando delata que se escucha el dispositivo
     // equivocado.
     float sys = system_ ? system_->TakePeak() : 0.0f;
+    {
+      std::lock_guard lock(extrasMutex_);
+      for (auto& e : extras_) sys = std::max(sys, e.capture->TakePeak());
+    }
     float mic = mic_ ? mic_->TakePeak() : 0.0f;
     systemLevel_ = std::max(sys, systemLevel_.load() * 0.85f);
     micLevel_ = std::max(mic, micLevel_.load() * 0.85f);
@@ -180,6 +294,14 @@ void AudioPipeline::EncodeChunk() {
   std::fill(sysBuf_.begin(), sysBuf_.end(), 0.0f);
   std::fill(micBuf_.begin(), micBuf_.end(), 0.0f);
   if (system_) system_->ReadAt(produced_, sysBuf_.data(), kFrameSize);
+  {
+    // Las otras salidas por las que suena el juego van a la misma pista.
+    std::lock_guard lock(extrasMutex_);
+    for (auto& e : extras_) {
+      if (!e.capture->ReadAt(produced_, extraBuf_.data(), kFrameSize)) continue;
+      for (size_t i = 0; i < sysBuf_.size(); ++i) sysBuf_[i] += extraBuf_[i];
+    }
+  }
   if (mic_) mic_->ReadAt(produced_, micBuf_.data(), kFrameSize);
 
   const float micGain = micMuted_ ? 0.0f : settings_.micVolume;

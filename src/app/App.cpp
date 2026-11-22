@@ -1733,6 +1733,9 @@ void App::CheckGame() {
   }
   UpdatePipeline();
   AnnounceGame();
+  // Por si el juego suena por otra salida que la que se graba (el pipeline lo
+  // mira solo). Se queda con el último juego aunque ya no esté delante.
+  pipeline_.SetGameProcess(game_ ? game_->processId : 0);
 }
 
 bool App::RegisterHotkeys() {

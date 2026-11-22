@@ -21,6 +21,9 @@ struct AudioDevice {
   std::string name;
 };
 std::vector<AudioDevice> EnumerateAudioDevices(bool capture);
+// Salidas activas en las que el proceso pid tiene abierta una sesión de
+// audio: por dónde suena de verdad (un juego puede no usar el predeterminado).
+std::vector<AudioDevice> OutputDevicesOfProcess(DWORD pid);
 
 enum class AudioSourceKind {
   SystemLoopback,  // todo lo que suena por un dispositivo de salida
@@ -52,6 +55,11 @@ public:
   void Begin(AudioSourceKind kind, const std::string& deviceId, DWORD processId, int64_t startQpc);
   bool WaitStarted(DWORD timeoutMs = 6000);
   void Stop();
+  // Solo ese dispositivo: si desaparece no se cae al predeterminado (para
+  // grabar además otra salida sin duplicar la del predeterminado). Antes de Begin.
+  void SetPinned(bool pinned) { pinned_ = pinned; }
+  // Abrió el dispositivo y el hilo sigue vivo (false si falló al abrir).
+  bool Failed() const { return readyEvent_ && WaitForSingleObject(readyEvent_, 0) == WAIT_OBJECT_0 && !startOk_; }
 
   // Rellena dst con las frames muestras estéreo intercaladas de la posición
   // pos (en muestras a 48 kHz desde startQpc). Lo que aún no ha llegado o ya
@@ -65,6 +73,9 @@ public:
   float TakePeak() { return peak_.exchange(0.0f); }
   // Dispositivo y formato con el que se abrió (para el log y los ajustes).
   std::string Description();
+  // Id (UTF-8) del endpoint que se está capturando ahora (cambia si sigue al
+  // predeterminado; vacío en audio por proceso o sin dispositivo).
+  std::string CurrentDeviceId();
 
 private:
   void Run();
@@ -94,9 +105,11 @@ private:
   Client* client_ = nullptr;
   std::wstring openedId_;  // id del endpoint abierto (vacío en audio por proceso)
   bool followDefault_ = false;
+  bool pinned_ = false;
 
   std::mutex mutex_;
   std::string description_;
+  std::wstring currentId_;
   std::vector<float> fifo_; // ring buffer de muestras intercaladas
   size_t readPos_ = 0;
   size_t count_ = 0; // en frames

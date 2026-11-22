@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +45,10 @@ public:
   // Dispositivo y formato con los que se abrió cada fuente (vacío si no hay).
   std::string SystemDescription() const { return system_ ? system_->Description() : std::string(); }
   std::string MicDescription() const { return mic_ ? mic_->Description() : std::string(); }
+  // Proceso del juego (0 si no hay): si suena por una salida que no es la que
+  // se graba (otro auricular, el modo manos libres de un Bluetooth...), esa
+  // salida se graba también. Se puede llamar en cualquier momento.
+  void SetGameProcess(DWORD pid) { gamePid_ = pid; }
   // Silencia el micrófono sin reiniciar la captura (el buffer de replay no se pierde).
   void SetMicMuted(bool muted) { micMuted_ = muted; }
   // Cuánto va el audio codificado por detrás del reloj (normalmente 0,1 s; más
@@ -58,7 +63,17 @@ private:
     int streamIndex = 0;
   };
 
+  // Otra salida en la que suena el juego, grabada junto a la principal.
+  struct ExtraOutput {
+    std::string id;
+    std::string name;
+    std::unique_ptr<AudioCapture> capture;
+    int misses = 0; // pasadas seguidas sin el juego en esa salida
+  };
+
   void Run();
+  void WatchOutputs();
+  int64_t ReadMargin();
   void EncodeChunk();
   bool OpenTrack(Track& track, const char* title);
 
@@ -67,6 +82,11 @@ private:
   PacketSink sink_;
   std::unique_ptr<AudioCapture> system_;
   std::unique_ptr<AudioCapture> mic_;
+  std::mutex extrasMutex_; // extras_: lo cambia WatchOutputs, lo lee el hilo de mezcla
+  std::vector<ExtraOutput> extras_;
+  std::atomic<DWORD> gamePid_{0};
+  std::thread watchThread_;
+  HANDLE watchStop_ = nullptr;
   std::vector<Track> tracks_;
   StreamList streams_;
   std::atomic<bool> running_{false};
@@ -82,7 +102,7 @@ private:
   int64_t loggedMargin_ = 0;
   AVFrame* frame_ = nullptr;
   AVPacket* packet_ = nullptr;
-  std::vector<float> sysBuf_, micBuf_;
+  std::vector<float> sysBuf_, micBuf_, extraBuf_;
 };
 
 } // namespace spectre
