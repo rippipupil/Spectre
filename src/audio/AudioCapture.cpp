@@ -6,6 +6,7 @@
 #include "encode/Media.h"
 
 #include <audioclient.h>
+#include <audiopolicy.h>
 #include <avrt.h>
 #include <mmdeviceapi.h>
 #include <mmreg.h>
@@ -150,7 +151,7 @@ std::wstring DefaultDeviceId(bool capture) {
 
 // Devuelve el dispositivo pedido o, si no existe o no se pidió ninguno, el
 // predeterminado. usedDefault dice cuál de los dos fue.
-ComPtr<IMMDevice> GetDevice(const std::wstring& id, bool capture, bool* usedDefault) {
+ComPtr<IMMDevice> GetDevice(const std::wstring& id, bool capture, bool* usedDefault, bool pinned) {
   *usedDefault = true;
   auto enumerator = Enumerator();
   if (!enumerator) return nullptr;
@@ -169,8 +170,9 @@ ComPtr<IMMDevice> GetDevice(const std::wstring& id, bool capture, bool* usedDefa
         return device;
       }
     }
-    Log("Audio: el dispositivo elegido no está disponible, se usa el predeterminado");
     device.Reset();
+    if (pinned) return nullptr;
+    Log("Audio: el dispositivo elegido no está disponible, se usa el predeterminado");
   }
   enumerator->GetDefaultAudioEndpoint(capture ? eCapture : eRender, eConsole, &device);
   return device;
@@ -345,6 +347,45 @@ std::vector<AudioDevice> EnumerateAudioDevices(bool capture) {
   return list;
 }
 
+std::vector<AudioDevice> OutputDevicesOfProcess(DWORD pid) {
+  std::vector<AudioDevice> list;
+  auto enumerator = Enumerator();
+  ComPtr<IMMDeviceCollection> collection;
+  if (!pid || !enumerator || FAILED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection)))
+    return list;
+  UINT count = 0;
+  collection->GetCount(&count);
+  for (UINT i = 0; i < count; ++i) {
+    ComPtr<IMMDevice> device;
+    ComPtr<IAudioSessionManager2> manager;
+    ComPtr<IAudioSessionEnumerator> sessions;
+    if (FAILED(collection->Item(i, &device)) ||
+        FAILED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, &manager)) ||
+        FAILED(manager->GetSessionEnumerator(&sessions)))
+      continue;
+    int n = 0;
+    sessions->GetCount(&n);
+    bool found = false;
+    for (int j = 0; j < n && !found; ++j) {
+      ComPtr<IAudioSessionControl> control;
+      ComPtr<IAudioSessionControl2> control2;
+      AudioSessionState state = AudioSessionStateExpired;
+      DWORD owner = 0;
+      if (SUCCEEDED(sessions->GetSession(j, &control)) && SUCCEEDED(control.As(&control2)) &&
+          SUCCEEDED(control2->GetState(&state)) && state == AudioSessionStateActive &&
+          control2->GetProcessId(&owner) == S_OK && owner == pid)
+        found = true;
+    }
+    if (!found) continue;
+    AudioDevice info;
+    info.id = Narrow(DeviceId(device.Get()));
+    info.name = DeviceName(device.Get());
+    if (info.name.empty()) info.name = info.id;
+    list.push_back(std::move(info));
+  }
+  return list;
+}
+
 void AudioCapture::Begin(AudioSourceKind kind, const std::string& deviceId, DWORD processId, int64_t startQpc) {
   Stop();
   kind_ = kind;
@@ -397,6 +438,11 @@ void AudioCapture::Stop() {
 std::string AudioCapture::Description() {
   std::lock_guard lock(mutex_);
   return description_;
+}
+
+std::string AudioCapture::CurrentDeviceId() {
+  std::lock_guard lock(mutex_);
+  return Narrow(currentId_);
 }
 
 size_t AudioCapture::ReadAt(int64_t pos, float* dst, size_t frames) {
@@ -515,6 +561,8 @@ void AudioCapture::UpdateLag(int64_t packetEndFrames, int64_t nowFrames) {
 void AudioCapture::CloseClient() {
   delete client_;
   client_ = nullptr;
+  std::lock_guard lock(mutex_);
+  currentId_.clear();
 }
 
 bool AudioCapture::Open() {
@@ -543,9 +591,9 @@ bool AudioCapture::Open() {
   } else {
     const bool isCapture = kind_ == AudioSourceKind::Microphone;
     bool usedDefault = true;
-    auto device = GetDevice(deviceId_, isCapture, &usedDefault);
+    auto device = GetDevice(deviceId_, isCapture, &usedDefault, pinned_ && !deviceId_.empty());
     if (!device) {
-      Log("Audio (%s): no hay ningún dispositivo", KindName(kind_));
+      if (!pinned_) Log("Audio (%s): no hay ningún dispositivo", KindName(kind_));
       return false;
     }
     openedId_ = DeviceId(device.Get());
@@ -614,6 +662,7 @@ bool AudioCapture::Open() {
   {
     std::lock_guard lock(mutex_);
     description_ = deviceLabel + " (" + formatLabel + ")";
+    currentId_ = openedId_;
   }
   REFERENCE_TIME period = 0, latency = 0;
   c->client->GetDevicePeriod(&period, nullptr);

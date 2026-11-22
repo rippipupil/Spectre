@@ -137,6 +137,7 @@ public:
   std::string TakeCameraStall();
   bool MicCaptured() const { return running_ && audio_.HasMic(); }
   void SetMicMuted(bool muted) { audio_.SetMicMuted(muted); }
+  void SetGameProcess(DWORD pid) { audio_.SetGameProcess(pid); }
   // Nivel de pico reciente (0..1) de cada fuente de audio, barato de leer en cada frame.
   void AudioLevels(float* system, float* mic) const {
     if (running_) audio_.Levels(system, mic);
