@@ -58,8 +58,6 @@ public:
   // Solo ese dispositivo: si desaparece no se cae al predeterminado (para
   // grabar además otra salida sin duplicar la del predeterminado). Antes de Begin.
   void SetPinned(bool pinned) { pinned_ = pinned; }
-  // Abrió el dispositivo y el hilo sigue vivo (false si falló al abrir).
-  bool Failed() const { return readyEvent_ && WaitForSingleObject(readyEvent_, 0) == WAIT_OBJECT_0 && !startOk_; }
 
   // Rellena dst con las frames muestras estéreo intercaladas de la posición
   // pos (en muestras a 48 kHz desde startQpc). Lo que aún no ha llegado o ya

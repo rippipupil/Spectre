@@ -22,6 +22,8 @@ constexpr int64_t kLatencySlack = kFrameSize + kAudioRate / 50; // un frame AAC 
 // COM no corta el audio).
 constexpr DWORD kWatchIntervalMs = 2000;
 constexpr int kWatchMisses = 3;
+// Una salida que no abrió (Bluetooth cambiando de perfil) se reintenta a las 15 pasadas (30 s).
+constexpr int kWatchRetryPasses = 15;
 } // namespace
 
 // Retraso con el que se codifica: lo que tarde la fuente más lenta en
@@ -184,9 +186,12 @@ void AudioPipeline::WatchOutputs() {
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   DWORD lastPid = 0;
   std::string lastReport;
-  std::vector<std::string> failed; // salidas que no se pudieron abrir con este juego
+  int pass = 0;
+  std::vector<std::pair<std::string, int>> failed; // salida que no abrió y en qué pasada
   while (WaitForSingleObject(watchStop_, kWatchIntervalMs) == WAIT_TIMEOUT) {
     const DWORD pid = gamePid_;
+    pass++;
+    std::erase_if(failed, [&](const auto& f) { return pass - f.second >= kWatchRetryPasses; });
     if (pid != lastPid) {
       lastPid = pid;
       failed.clear();
@@ -229,14 +234,14 @@ void AudioPipeline::WatchOutputs() {
         std::lock_guard lock(extrasMutex_);
         if (std::any_of(extras_.begin(), extras_.end(), [&](const ExtraOutput& e) { return e.id == o.id; })) continue;
       }
-      if (std::find(failed.begin(), failed.end(), o.id) != failed.end()) continue;
+      if (std::any_of(failed.begin(), failed.end(), [&](const auto& f) { return f.first == o.id; })) continue;
       ExtraOutput extra{o.id, o.name, std::make_unique<AudioCapture>(), 0};
       extra.capture->SetPinned(true);
       // Espera corta: Stop() del pipeline espera a este hilo.
       extra.capture->Begin(AudioSourceKind::SystemLoopback, o.id, 0, startQpc_);
       if (!extra.capture->WaitStarted(2000)) {
         Log("Audio: el juego suena por «%s», pero no se pudo grabar esa salida", o.name.c_str());
-        failed.push_back(o.id);
+        failed.emplace_back(o.id, pass);
         continue;
       }
       Log("Audio: el juego suena por «%s», que no es la salida que se graba; se graba también", o.name.c_str());
@@ -295,9 +300,16 @@ void AudioPipeline::EncodeChunk() {
   std::fill(micBuf_.begin(), micBuf_.end(), 0.0f);
   if (system_) system_->ReadAt(produced_, sysBuf_.data(), kFrameSize);
   {
-    // Las otras salidas por las que suena el juego van a la misma pista.
+    // Las otras salidas por las que suena el juego van a la misma pista. Si
+    // la principal acaba de pasar a una de ellas (cambio de predeterminado),
+    // esa se salta hasta que WatchOutputs la quite: si no, sonaría doble.
     std::lock_guard lock(extrasMutex_);
+    const std::string main = extras_.empty() || !system_ ? std::string() : system_->CurrentDeviceId();
     for (auto& e : extras_) {
+      if (e.id == main) {
+        e.capture->ReadAt(produced_, extraBuf_.data(), kFrameSize); // se consume igual
+        continue;
+      }
       if (!e.capture->ReadAt(produced_, extraBuf_.data(), kFrameSize)) continue;
       for (size_t i = 0; i < sysBuf_.size(); ++i) sysBuf_[i] += extraBuf_[i];
     }

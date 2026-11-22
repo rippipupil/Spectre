@@ -372,7 +372,7 @@ std::vector<AudioDevice> OutputDevicesOfProcess(DWORD pid) {
       AudioSessionState state = AudioSessionStateExpired;
       DWORD owner = 0;
       if (SUCCEEDED(sessions->GetSession(j, &control)) && SUCCEEDED(control.As(&control2)) &&
-          SUCCEEDED(control2->GetState(&state)) && state != AudioSessionStateExpired &&
+          SUCCEEDED(control2->GetState(&state)) && state == AudioSessionStateActive &&
           control2->GetProcessId(&owner) == S_OK && owner == pid)
         found = true;
     }
