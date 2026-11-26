@@ -1973,8 +1973,8 @@ void PagePhone(SettingsModel& m, const SettingsActions& a) {
                               : "Para pegarlo en la app con «Pegar el código». Lleva tus claves: no lo mandes "
                                 "por un chat que vea otra gente");
   } else {
-    Help("Escanéalo con Spectre Holder («Escanear el código»). Lleva las claves de tu nube: mientras se ve, esta "
-         "ventana no sale en los clips, las grabaciones ni las capturas. Ocúltalo al terminar.");
+    Help("Escanéalo con Spectre Holder («Escanear el código»). Lleva las claves de tu nube: desde ahora y hasta "
+         "que cierres esta ventana, no sale en los clips, las grabaciones ni las capturas. Ocúltalo al terminar.");
     Gap(6);
     if (!DrawQr(1, m.phoneCode, Px(300))) ErrorText("No se pudo hacer el código: la dirección de la nube es demasiado larga.");
     Gap(6);

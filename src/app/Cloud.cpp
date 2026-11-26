@@ -915,7 +915,10 @@ struct CloudUploader::Shared {
   // lista; solo lo que aún hay que borrar del PC.
   void CyberCleanup() {
     entries.erase(std::remove_if(entries.begin(), entries.end(),
-                                 [](const Entry& e) { return e.st == Entry::St::Done && !e.deletePending; }),
+                                 [](const Entry& e) {
+                                   return e.st == Entry::St::Done && !e.deletePending &&
+                                          !(e.local && (e.deleteAfter || e.deleteAtExit));
+                                 }),
                   entries.end());
   }
   // Qué hacer con el archivo del PC al terminar de subirse `e` (aún sin
@@ -1027,7 +1030,9 @@ struct CloudUploader::Shared {
       // recibe otra al cargarse). Spectre puede acabar sin Stop: el programa
       // del cibercafé lo cierra a la fuerza.
       const bool done = e.st == Entry::St::Done;
-      if (config.cyberMode && done && !(e.local && (e.deletePending || e.deleteAtExit))) continue;
+      // También lo que espera a su otra entrada (enlace o móvil) para borrarse: si
+      // no, tras un cierre a la fuerza se quedaría en el PC del cibercafé.
+      if (config.cyberMode && done && !(e.local && (e.deletePending || e.deleteAtExit || e.deleteAfter))) continue;
       nlohmann::json v = {{"path", e.path},
                           {"name", e.name},
                           {"size", e.size},

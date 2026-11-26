@@ -348,8 +348,8 @@ private:
   // Nube y ShadowPlay
   CloudUploader cloud_;
   uint64_t cloudVersion_ = 0; // la de appModel_.cloud
-  // El QR de emparejar el móvil lleva las claves: mientras se ve, la ventana
-  // no sale en los clips ni en las capturas (SetWindowDisplayAffinity).
+  // El QR de emparejar el móvil lleva las claves: desde que se enseña hasta
+  // cerrar la ventana, no sale en los clips ni en las capturas (SetWindowDisplayAffinity).
   bool phoneCodeHidden_ = false;
   uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
   std::unordered_set<std::string> cyberCancelled_; // en minúsculas: canceladas a mano en esta sesión

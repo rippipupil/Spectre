@@ -11,6 +11,7 @@
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
+#include <dwmapi.h>
 #include <shellscalingapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
@@ -2883,20 +2884,21 @@ void App::GuardPhoneCode() {
   if (s.phoneShown && !(appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Phone))
     ForgetPhoneCode(s);
   const HWND hwnd = appWindow_.Visible() ? appWindow_.Hwnd() : nullptr;
-  const bool want = s.phoneShown && hwnd;
-  if (want == phoneCodeHidden_ || !hwnd) return;
-  if (!SetWindowDisplayAffinity(hwnd, want ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE)) {
+  // Una vez fuera de la captura, la ventana sigue así hasta cerrarla: el
+  // último frame con el QR se compone después de presentarlo, y quitarlo al
+  // ocultarlo lo dejaría entrar en el replay. La ventana nueva empieza normal.
+  if (!s.phoneShown || phoneCodeHidden_ || !hwnd) return;
+  if (!SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
     Log("Móvil: SetWindowDisplayAffinity falló (%lu)", GetLastError());
-    if (want) {
-      // Sin eso, el QR saldría en el replay: mejor no enseñarlo.
-      ForgetPhoneCode(s);
-      Toast("Windows no deja sacar esta ventana de los clips, así que el código no se enseña. Usa «Copiar el "
-            "código» y pégalo en Spectre Holder.",
-            true);
-    }
+    // Sin eso, el QR saldría en el replay: mejor no enseñarlo.
+    ForgetPhoneCode(s);
+    Toast("Windows no deja sacar esta ventana de los clips, así que el código no se enseña. Usa «Copiar el "
+          "código» y pégalo en Spectre Holder.",
+          true);
     return;
   }
-  phoneCodeHidden_ = want;
+  DwmFlush(); // compuesto ya sin la ventana antes del primer frame con el QR
+  phoneCodeHidden_ = true;
 }
 
 void App::CopyCloudLink(const std::string& path) {
