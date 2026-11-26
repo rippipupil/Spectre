@@ -77,7 +77,7 @@ std::string FormatClipLength(int seconds);  // 30 s, 2 min
 enum class Icon {
   Replay, Mic, Camera, Close, Back, Play, Pause, Folder, Trash, Star, StarFilled, Scissors, Copy, Pencil,
   Shot, Marker, Search, Volume, Muted, Next, Prev, External, Share, Sliders, Undo, Redo,
-  Check, Alert, Download, Info, Gamepad, Record, Home, Grid, Gear, Upload
+  Check, Alert, Download, Info, Gamepad, Record, Home, Grid, Gear, Upload, Phone
 };
 void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 center, float radius, ImU32 color);
 // Una raya en diagonal encima de un icono: apagado (micrófono, cámara, replay).

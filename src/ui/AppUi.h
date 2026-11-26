@@ -58,6 +58,8 @@ struct AppModel {
   // Nube: estado de cada archivo de la biblioteca por ruta (el de la cola
   // entera está en settings.cloud).
   std::unordered_map<std::string, CloudFileState> cloud;
+  // «Enviar al móvil»: lo que aún sube a la nube para el móvil (o falló), por ruta.
+  std::unordered_map<std::string, CloudFileState> phone;
 };
 
 struct AppActions {
@@ -110,6 +112,10 @@ struct AppActions {
   std::function<void(const std::string&)> shareLink;
   std::function<void(const std::string&)> cancelUpload;
   std::function<void(const std::string&)> retryUpload;
+  // «Enviar al móvil» (Spectre Holder): a la cola de la nube, a la carpeta del
+  // móvil; también reintenta los que fallaron. cancelPhone la quita de la cola.
+  std::function<void(const std::vector<std::string>&)> sendToPhone;
+  std::function<void(const std::string&)> cancelPhone;
   SettingsActions settings;
 };
 
@@ -179,6 +185,8 @@ private:
   void CloudMenuItems(AppModel& m, const AppActions& a, const std::string& path);
   void CloudLine(AppModel& m, const AppActions& a);
   void OpenCloudSettings(AppModel& m);
+  void PhoneMenuItem(AppModel& m, const AppActions& a, const std::string& path);
+  void OpenPhoneSettings(AppModel& m);
   void Dialogs(AppModel& m, const AppActions& a);
   void Timeline(AppWindow& w, const MediaItem& item, float width);
   // Miniatura de un archivo; width = ancho en píxeles al que se va a dibujar

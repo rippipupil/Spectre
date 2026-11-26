@@ -87,6 +87,13 @@ struct MenuActions {
   // enlace. Sin poner, el panel no enseña el botón.
   std::function<void(const std::string&)> shareLink;
   std::function<PanelLinkState(const std::string&)> linkState;
+  // «Enviar al móvil» (Spectre Holder) por la misma nube: lo manda o, si ya
+  // va, lo cancela. phoneState usa busy/queued/progress/error (ready: ya está
+  // en la nube esperando al móvil). Sin poner, no hay botón.
+  std::function<void(const std::string&)> sendToPhone;
+  std::function<void(const std::string&)> cancelPhone;
+  std::function<PanelLinkState(const std::string&)> phoneState;
+  std::function<void()> openPhoneSetup; // la ventana de Spectre en Ajustes > Móvil (cierra el panel)
 };
 
 // Ancho del panel rápido en píxeles lógicos (se multiplica por la escala DPI).

@@ -72,6 +72,15 @@ struct ShadowPlayConfig {
   bool operator==(const ShadowPlayConfig&) const = default;
 };
 
+// Spectre Holder, la app del móvil (holder/): «Enviar al móvil» sube por la
+// nube de arriba a spectre/movil/ y el móvil lo descarga (Ajustes > Móvil).
+struct PhoneConfig {
+  bool autoSend = false;     // cada clip nuevo va al móvil solo
+  bool sendScreenshots = false; // ...y también las capturas
+
+  bool operator==(const PhoneConfig&) const = default;
+};
+
 // Duraciones del clip que ofrecen el panel, Inicio y Ajustes (segundos). Las
 // largas solo caben si la RAM da para ellas con la calidad elegida: la
 // interfaz lo avisa (PipelineStats::replayFitSeconds).
@@ -168,6 +177,7 @@ struct Config {
   VoiceConfig voice;
   CloudConfig cloud;
   ShadowPlayConfig shadowPlay;
+  PhoneConfig phone;
 };
 
 Config LoadConfig();

@@ -127,4 +127,68 @@ jobs:
           $tag = "v$env:APP_VERSION"
           gh release create $tag installer/output/Spectre-Setup.exe installer/output/Spectre-Portable.zip `
             --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Spectre $tag" --latest `
-            --notes "Descarga **Spectre-Setup.exe** y ábrelo. Incluye todo lo necesario y no pide permisos de administrador. Si ya tienes Spectre, se actualiza conservando tus ajustes. Atajos: Alt+Z abre el panel, Alt+F10 guarda un clip y Alt+F9 empieza o detiene una grabación."
+            --notes "Descarga **Spectre-Setup.exe** y ábrelo. Incluye todo lo necesario y no pide permisos de administrador. Si ya tienes Spectre, se actualiza conservando tus ajustes. Atajos: Alt+Z abre el panel, Alt+F10 guarda un clip y Alt+F9 empieza o detiene una grabación.`n`n**Spectre-Holder.apk** es la app para Android: recibe en el móvil los clips que mandas con «Enviar al móvil» (a través de tu nube, Ajustes > Móvil)."
+
+  # Spectre Holder, la app para Android (holder/): recibe en el móvil lo que el
+  # PC manda a la nube con «Enviar al móvil». Se compila en cada cambio y cada
+  # release de main lleva su APK junto al instalador del PC.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: APK de Spectre Holder
+        working-directory: holder
+        shell: bash
+        env:
+          HOLDER_KEYSTORE_BASE64: ${{ secrets.HOLDER_KEYSTORE_BASE64 }}
+          HOLDER_KEYSTORE_PASSWORD: ${{ secrets.HOLDER_KEYSTORE_PASSWORD }}
+          HOLDER_KEY_ALIAS: ${{ secrets.HOLDER_KEY_ALIAS }}
+          HOLDER_KEY_PASSWORD: ${{ secrets.HOLDER_KEY_PASSWORD }}
+        run: |
+          # La misma versión que la release del PC; el número de versión de
+          # Android crece en cada ejecución para que se instale encima.
+          version="0.1.$GITHUB_RUN_NUMBER"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          export HOLDER_VERSION_NAME="$version" HOLDER_VERSION_CODE="$GITHUB_RUN_NUMBER"
+          # Con los secretos HOLDER_KEYSTORE_* firma con esa clave; si no, con
+          # la del repositorio (holder/signing/README.md).
+          if [ -n "$HOLDER_KEYSTORE_BASE64" ]; then
+            echo "$HOLDER_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/holder.jks"
+            export HOLDER_KEYSTORE_FILE="$RUNNER_TEMP/holder.jks"
+          fi
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/Spectre-Holder.apk"
+          ls -la "$GITHUB_WORKSPACE/Spectre-Holder.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectre-holder-apk
+          path: Spectre-Holder.apk
+
+  holder-release:
+    # Después de la del PC: la release ya existe y solo se le añade el APK.
+    needs: [windows, android]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: spectre-holder-apk
+
+      - name: Añadir el APK a la release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="0.1.$GITHUB_RUN_NUMBER"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          gh release upload "v$version" Spectre-Holder.apk --repo "$GITHUB_REPOSITORY" --clobber

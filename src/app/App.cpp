@@ -11,6 +11,7 @@
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
+#include <dwmapi.h>
 #include <shellscalingapi.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
@@ -27,6 +28,10 @@
 
 #ifndef SPECTRE_VERSION
 #define SPECTRE_VERSION "0.1.0"
+#endif
+
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011 // Windows 10 2004
 #endif
 
 namespace spectre {
@@ -335,6 +340,28 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     if (st.phase == Phase::Failed) link.error = st.error;
     return link;
   };
+  // Al móvil desde el panel: a la cola de la nube; el panel sigue abierto.
+  menuActions_.sendToPhone = [this](const std::string& path) { Defer([this, path] { SendToPhone({path}); }); };
+  menuActions_.cancelPhone = [this](const std::string& path) { cloud_.CancelPhone(path); };
+  menuActions_.phoneState = [this](const std::string& path) {
+    using Phase = CloudFileState::Phase;
+    const CloudFileState st = cloud_.PhoneState(path);
+    PanelLinkState phone;
+    phone.configured = cloud_.Configured();
+    phone.busy = st.phase == Phase::Queued || st.phase == Phase::Uploading;
+    phone.queued = st.phase == Phase::Queued;
+    phone.progress = st.progress;
+    phone.ready = st.phase == Phase::Done;
+    if (st.phase == Phase::Failed) phone.error = st.error;
+    return phone;
+  };
+  menuActions_.openPhoneSetup = [this] {
+    Defer([this] {
+      CloseMenu(false);
+      OpenApp(AppPage::Settings);
+      appModel_.settingsPage = SettingsPage::Phone;
+    });
+  };
   menuActions_.exportForDiscord = [this](const std::string& path) { Defer([this, path] { ExportForDiscord(path); }); };
   menuActions_.cancelExport = [this] {
     exporter_.Cancel();
@@ -465,6 +492,10 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     cloud_.Cancel(path);
   };
   appActions_.retryUpload = [this](const std::string& path) { cloud_.Retry(path); };
+  appActions_.sendToPhone = [this](const std::vector<std::string>& paths) {
+    Defer([this, paths] { SendToPhone(paths); });
+  };
+  appActions_.cancelPhone = [this](const std::string& path) { cloud_.CancelPhone(path); };
   SettingsActions& settings = appActions_.settings;
   settings.checkUpdates = [this] { updater_.Check(); };
   settings.installUpdate = [this] { updater_.Download(hwnd_); };
@@ -546,6 +577,40 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     if (importCancel_) importCancel_->store(true);
   };
   settings.chooseShadowPlayFolder = [this] { Defer([this] { ChooseShadowPlayFolder(); }); };
+  settings.showPhoneCode = [this] {
+    SettingsModel& s = appModel_.settings;
+    ForgetPhoneCode(s);
+    s.phoneCode = PhonePairingCode();
+    s.phoneShown = !s.phoneCode.empty();
+    if (!s.phoneShown) Toast("Primero guarda tu nube y sus claves en Ajustes > Nube", true);
+  };
+  settings.copyPhoneCode = [this] {
+    Defer([this] {
+      if (config_.cloud.cyberMode) {
+        Toast("En el modo cibercafé no se copia el código: el siguiente cliente podría pegarlo", true);
+        return;
+      }
+      std::string code = PhonePairingCode();
+      if (code.empty()) {
+        Toast("Primero guarda tu nube y sus claves en Ajustes > Nube", true);
+        return;
+      }
+      const bool ok = CopyTextToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, code, true);
+      SecureZeroMemory(code.data(), code.size());
+      if (ok)
+        Toast("Código copiado. En Spectre Holder pulsa «Pegar el código». Lleva tus claves: bórralo de donde lo pegues");
+      else
+        Toast("No se pudo copiar al portapapeles", true);
+    });
+  };
+  settings.copyText = [this](const std::string& text) {
+    Defer([this, text] {
+      if (CopyTextToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, text))
+        Toast("Enlace copiado: ábrelo en el navegador del móvil", false, NoticeKind::Copied);
+      else
+        Toast("No se pudo copiar al portapapeles", true);
+    });
+  };
 
   if (!RegisterHotkeys()) Toast(hotkeyError_, true);
   SetTimer(hwnd_, kTimerGame, 2000, nullptr);
@@ -2362,6 +2427,8 @@ void App::OpenApp(std::optional<AppPage> page) {
 void App::CloseApp() {
   if (!appWindow_.Visible()) return;
   CancelHotkeyCapture(appModel_.settings, appActions_.settings);
+  ForgetPhoneCode(appModel_.settings); // el QR de emparejar lleva las claves
+  phoneCodeHidden_ = false;
   appUi_.OnClosed();
   appWindow_.Close();
   // Cerrada no se queda con nada: ni la lista de la biblioteca ni los dispositivos.
@@ -2405,6 +2472,8 @@ void App::RenderApp() {
     const bool focused = appWindow_.Focused();
     const AppPage page = appModel_.page == AppPage::Viewer ? appModel_.viewBack : appModel_.page;
     CancelHotkeyCapture(appModel_.settings, appActions_.settings);
+    ForgetPhoneCode(appModel_.settings); // la ventana nueva no está fuera de la captura
+    phoneCodeHidden_ = false;
     appUi_.OnClosed();
     appWindow_.Close();
     if (!appWindow_.Open(focused)) {
@@ -2430,9 +2499,11 @@ void App::RenderApp() {
   // Grabando un atajo y el usuario se va a otra ventana: se cancela (si no,
   // los atajos globales se quedarían sin registrar).
   if (s.capturing >= 0 && !appWindow_.Focused()) CancelHotkeyCapture(s, appActions_.settings);
+  GuardPhoneCode();
   inFrame_ = true;
   appWindow_.Render([this] { appUi_.Draw(appWindow_, appModel_, appActions_); });
   inFrame_ = false;
+  GuardPhoneCode(); // «Enseñar el código» se pulsó en este frame: fuera de la captura antes del siguiente
   // El tema no espera a Aplicar: se guarda al elegirlo y lo usan enseguida el
   // panel (Alt+Z) y los avisos, no solo esta ventana. Tampoco cuenta como
   // cambio sin aplicar.
@@ -2470,6 +2541,7 @@ void App::RefreshAppModel() {
   if (const uint64_t v = cloud_.Version(); v != cloudVersion_) {
     cloudVersion_ = v;
     appModel_.cloud = cloud_.Snapshot();
+    appModel_.phone = cloud_.PhoneSnapshot();
     s.cloud = cloud_.Status();
   }
   s.shadowPlayTotal = importing_ ? importTotal_->load() : 0;
@@ -2648,8 +2720,37 @@ void App::UploadToCloud(const std::vector<std::string>& paths) {
               ". Los enlaces se copian desde la biblioteca o Ajustes > Nube"});
 }
 
+void App::SendToPhone(const std::vector<std::string>& paths) {
+  if (paths.empty()) return;
+  if (!cloud_.Configured()) {
+    Toast("Para mandarlo al móvil, configura tu nube y Spectre Holder en Ajustes > Móvil", true);
+    return;
+  }
+  for (const auto& path : paths) cloud_.SendToPhone(path, ManualRemoval(path), false);
+  const std::string what = paths.size() == 1 ? FileNameOf(paths[0]) : CountText(paths.size(), "archivo", "archivos");
+  if (cloud_.Status().paused)
+    Notify({NoticeKind::Working, "Subidas en pausa", what + " va al móvil al reanudarlas (Ajustes > Nube > Seguir)"});
+  else
+    Notify({NoticeKind::Working, "Enviando al móvil", what + ". Ábrelo en Spectre Holder cuando acabe de subir"});
+}
+
+std::string App::PhonePairingCode() const {
+  wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+  std::string pc = GetComputerNameW(name, &size) ? Narrow(name) : std::string("PC");
+  return cloud_.PhonePairingCode(pc);
+}
+
 void App::AutoUpload(const std::string& path, MediaKind kind, bool forPaste) {
   const CloudConfig& c = config_.cloud;
+  // «Mandar al móvil cada clip nuevo» (Ajustes > Móvil), aparte de la subida
+  // automática. En el cibercafé se borra al subirse, salvo lo copiado para
+  // pegarlo (al salir); si también sube con enlace, al subirse el último.
+  if (config_.phone.autoSend && cloud_.Configured() &&
+      (kind == MediaKind::Clip || (kind == MediaKind::Screenshot && config_.phone.sendScreenshots)))
+    cloud_.SendToPhone(path,
+                       !c.cyberMode ? CloudDelete::Keep : forPaste ? CloudDelete::AtExit : CloudDelete::AfterUpload,
+                       true);
   if (!c.cyberMode && !c.autoUpload) return;
   const bool wanted = c.cyberMode || (kind == MediaKind::Recording    ? c.uploadRecordings
                                       : kind == MediaKind::Screenshot ? c.uploadScreenshots
@@ -2682,9 +2783,12 @@ CloudDelete App::ManualRemoval(const std::string& path) const {
 
 void App::KeepForPaste(const std::vector<std::string>& paths) {
   if (!config_.cloud.cyberMode) return;
-  for (const auto& path : paths)
-    if (CyberOwned(path) && cloud_.State(path).phase != CloudFileState::Phase::Done)
+  for (const auto& path : paths) {
+    if (!CyberOwned(path)) continue;
+    if (cloud_.State(path).phase != CloudFileState::Phase::Done)
       cloud_.Enqueue(path, false, false, CloudDelete::AtExit, true);
+    cloud_.KeepForPaste(path); // también lo que va al móvil y lo ya subido
+  }
 }
 
 void App::CyberSweep() {
@@ -2746,7 +2850,14 @@ void App::OnCloudChanged() {
       removed = true;
     }
     if (!ev.ok) {
-      Toast("No se pudo subir " + ev.name + ": " + ev.error, true);
+      Toast((ev.phone ? "No se pudo enviar al móvil " : "No se pudo subir ") + ev.name + ": " + ev.error, true);
+      continue;
+    }
+    if (ev.phone) {
+      // Lo automático no avisa cada vez: el móvil ya lo enseña.
+      if (!ev.automatic || ev.deleted)
+        Notify({NoticeKind::Saved, "Listo para el móvil",
+                ev.name + ". Ábrelo en Spectre Holder para descargarlo" + (ev.deleted ? ". Ya no está en este PC" : "")});
       continue;
     }
     std::string detail = ev.name;
@@ -2765,6 +2876,29 @@ void App::OnCloudChanged() {
   }
   if (menu_.Visible()) RefreshMenuModel();
   if (appWindow_.Visible()) appWindow_.Invalidate();
+}
+
+void App::GuardPhoneCode() {
+  SettingsModel& s = appModel_.settings;
+  // Solo en su página: al irse a la biblioteca u otra parte se olvida.
+  if (s.phoneShown && !(appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Phone))
+    ForgetPhoneCode(s);
+  const HWND hwnd = appWindow_.Visible() ? appWindow_.Hwnd() : nullptr;
+  // Una vez fuera de la captura, la ventana sigue así hasta cerrarla: el
+  // último frame con el QR se compone después de presentarlo, y quitarlo al
+  // ocultarlo lo dejaría entrar en el replay. La ventana nueva empieza normal.
+  if (!s.phoneShown || phoneCodeHidden_ || !hwnd) return;
+  if (!SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
+    Log("Móvil: SetWindowDisplayAffinity falló (%lu)", GetLastError());
+    // Sin eso, el QR saldría en el replay: mejor no enseñarlo.
+    ForgetPhoneCode(s);
+    Toast("Windows no deja sacar esta ventana de los clips, así que el código no se enseña. Usa «Copiar el "
+          "código» y pégalo en Spectre Holder.",
+          true);
+    return;
+  }
+  DwmFlush(); // compuesto ya sin la ventana antes del primer frame con el QR
+  phoneCodeHidden_ = true;
 }
 
 void App::CopyCloudLink(const std::string& path) {

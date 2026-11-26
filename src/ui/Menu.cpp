@@ -354,6 +354,41 @@ void DrawClipView(OverlayWindow& w, MenuModel& m, const MenuActions& a, PanelMed
         !(link.busy && link.copies))
       a.shareLink(item.path);
   }
+  if (a.sendToPhone) {
+    const PanelLinkState phone = a.phoneState ? a.phoneState(item.path) : PanelLinkState{};
+    std::string detail = "Spectre Holder";
+    ImU32 color = p.textFaint;
+    float progress = -1.0f;
+    std::string tip = "Lo sube a tu nube y Spectre Holder, la app para Android, lo descarga a la galería del móvil";
+    if (!phone.configured) {
+      detail = "sin nube";
+      tip = "Configura tu nube y el móvil en Spectre (Ajustes > Móvil) para mandarle clips";
+    } else if (phone.busy) {
+      detail = phone.queued ? std::string("en la cola")
+                            : "subiendo " + std::to_string(int(std::clamp(phone.progress, 0.0f, 1.0f) * 100.0f + 0.5f)) +
+                                  " %";
+      color = p.accent;
+      if (!phone.queued) progress = phone.progress;
+      tip = "Va de camino al móvil. Pulsa para cancelar";
+    } else if (!phone.error.empty()) {
+      detail = "falló";
+      color = p.danger;
+      tip = phone.error + ". Pulsa para reintentar";
+    } else if (phone.ready) {
+      detail = "enviado";
+      color = p.accent;
+      tip = "Ya está en tu nube esperando al móvil: ábrelo en Spectre Holder. Pulsa para mandarlo otra vez";
+    }
+    if (ShareRow("phone", Icon::Phone, "Enviar al móvil", detail, color, progress, tip.c_str())) {
+      if (!phone.configured) {
+        if (a.openPhoneSetup) a.openPhoneSetup();
+      } else if (phone.busy) {
+        if (a.cancelPhone) a.cancelPhone(item.path);
+      } else {
+        a.sendToPhone(item.path);
+      }
+    }
+  }
 
   // Teclado de la vista (llega también sin foco, por el gancho).
   if (player && !player->Failed()) {
