@@ -24,6 +24,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(CloudConfig, provider, endpoint,
                                                 deleteAfterUpload, gameLimitKBps, cyberMode)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ShadowPlayConfig, library, folder)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PhoneConfig, autoSend, sendScreenshots)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSeconds, onlyInGames, folderPerGame,
                                                 shortClipSeconds, recordLimitMinutes,
@@ -38,7 +39,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Config, replayEnabled, clipSecon
                                                 toastPosition, autostart, closeToTray, trayHintShown, maxBufferMB,
                                                 stalledEncoders,
                                                 theme, themeStyle, themeMotion, themeBackdrop, panelLayout, panelLateralX, panelCompactX,
-                                                panelCompactY, hotkeys, discordPresence, voice, cloud, shadowPlay)
+                                                panelCompactY, hotkeys, discordPresence, voice, cloud, shadowPlay, phone)
 
 static std::filesystem::path ConfigPath() { return AppDataDir() / L"config.json"; }
 

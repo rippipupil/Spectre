@@ -341,6 +341,12 @@ void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 c, float r, ImU32 color) {
     poly({{-0.42f, -0.38f}, {0.0f, -0.80f}, {0.42f, -0.38f}}, false);
     line(-0.80f, 0.80f, 0.80f, 0.80f);
     break;
+  case Icon::Phone:
+    // Móvil de frente: cuerpo de esquinas rectas, altavoz arriba y botón abajo.
+    dl->AddRect(P(-0.46f, -0.90f), P(0.46f, 0.90f), color, 0, 0, t);
+    line(-0.14f, -0.66f, 0.14f, -0.66f);
+    dl->AddRectFilled(P(-0.08f, 0.58f), P(0.08f, 0.74f), color);
+    break;
   case Icon::Info:
     dl->AddRect(P(-0.80f, -0.80f), P(0.80f, 0.80f), color, 0, 0, t);
     line(0.0f, -0.12f, 0.0f, 0.50f);

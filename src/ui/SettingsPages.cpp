@@ -6,6 +6,7 @@
 #include "ui/Backdrop.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
+#include "third_party/qrcodegen/qrcodegen.hpp"
 
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -15,10 +16,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iterator>
+#include <memory>
 
 #ifndef SPECTRE_VERSION
 #define SPECTRE_VERSION "0.1.0"
+#endif
+#ifndef SPECTRE_UPDATE_REPO
+#define SPECTRE_UPDATE_REPO ""
 #endif
 
 namespace spectre {
@@ -35,6 +41,7 @@ const char* SettingsPageName(SettingsPage page) {
   case SettingsPage::Voice: return "Voz";
   case SettingsPage::Storage: return "Almacenamiento";
   case SettingsPage::Cloud: return "Nube";
+  case SettingsPage::Phone: return "Móvil";
   case SettingsPage::Notifications: return "Avisos";
   case SettingsPage::General: return "General";
   case SettingsPage::Performance: return "Rendimiento";
@@ -1850,6 +1857,187 @@ void PageCloud(SettingsModel& m, const SettingsActions& a) {
   CloudUploads(m, a);
 }
 
+// Un QR dibujado con rectángulos: negro sobre blanco y con su margen de 4
+// módulos, que los lectores necesitan sea cual sea el tema. Corrección de
+// errores baja: el QR más pequeño que cabe, con los módulos más grandes en
+// pantalla (encodeText la sube si sobra sitio). Se codifica una vez por
+// texto; slot separa los de la página. Sin texto o si no cabe en un QR, no
+// dibuja nada y devuelve false.
+struct QrCache {
+  size_t hash = 0;
+  std::unique_ptr<qrcodegen::QrCode> qr;
+};
+QrCache g_qr[2];
+
+void ForgetQr(int slot) {
+  g_qr[slot].qr.reset();
+  g_qr[slot].hash = 0;
+}
+
+bool DrawQr(int slot, const std::string& text, float size) {
+  if (text.empty()) return false;
+  QrCache& cache = g_qr[slot];
+  const size_t hash = std::hash<std::string>{}(text);
+  if (!cache.qr || cache.hash != hash) {
+    try {
+      cache.qr = std::make_unique<qrcodegen::QrCode>(qrcodegen::QrCode::encodeText(text.c_str(), qrcodegen::QrCode::Ecc::LOW));
+      cache.hash = hash;
+    } catch (const std::exception&) {
+      ForgetQr(slot);
+      return false;
+    }
+  }
+  const qrcodegen::QrCode& qr = *cache.qr;
+  const int n = qr.getSize();
+  const int total = n + 8;
+  // Módulos de píxeles enteros: con medios píxeles el móvil lo lee peor.
+  const float module = std::max(2.0f, std::floor(size / float(total)));
+  const float side = module * float(total);
+  ImVec2 q = ImGui::GetCursorScreenPos();
+  q.x = std::floor(q.x);
+  q.y = std::floor(q.y);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(q, ImVec2(q.x + side, q.y + side), IM_COL32(255, 255, 255, 255));
+  for (int y = 0; y < n; ++y) {
+    for (int x = 0; x < n;) {
+      if (!qr.getModule(x, y)) {
+        ++x;
+        continue;
+      }
+      int run = x;
+      while (run < n && qr.getModule(run, y)) ++run; // una tira por fila: menos rectángulos
+      const float x0 = q.x + module * float(x + 4), y0 = q.y + module * float(y + 4);
+      dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + module * float(run - x), y0 + module), IM_COL32(0, 0, 0, 255));
+      x = run;
+    }
+  }
+  ImGui::Dummy(ImVec2(side, side));
+  return true;
+}
+
+// Ajustes > Móvil: Spectre Holder, la app para Android. Instalarla (QR de la
+// release), emparejarla (QR con la nube y las claves) y lo que se le manda.
+void PagePhone(SettingsModel& m, const SettingsActions& a) {
+  const Palette& p = Colors();
+  auto& c = m.config.phone;
+  const CloudStatus& st = m.cloud;
+  const bool cyber = m.base.cloud.cyberMode;
+  Heading("SPECTRE HOLDER");
+  Help("La app para Android que recibe lo que mandas al móvil: va por tu nube, Spectre Holder lo descarga a la "
+       "galería del móvil y lo borra de la nube al descargarlo.");
+  Gap(6);
+  static const std::string apk = std::string(SPECTRE_UPDATE_REPO).empty()
+                                     ? std::string()
+                                     : "https://github.com/" SPECTRE_UPDATE_REPO "/releases/latest/download/Spectre-Holder.apk";
+  if (apk.empty()) {
+    Help("Descarga Spectre-Holder.apk de la última versión de Spectre en GitHub y ábrelo en el móvil.");
+  } else {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float qrSide = Px(150);
+    DrawQr(0, apk, qrSide);
+    const ImVec2 end = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(ImVec2(start.x + qrSide + Px(20), start.y));
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(ImGui::GetContentRegionAvail().x, Px(360)));
+    ImGui::TextUnformatted("1. Instala la app");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(C(p.textMuted)));
+    ImGui::TextUnformatted("Apunta la cámara del móvil a este código para descargar Spectre-Holder.apk y ábrelo. "
+                           "Android pedirá permiso para instalar apps de fuera de Google Play: dáselo a tu "
+                           "navegador. Se actualiza instalando el APK nuevo encima.");
+    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
+    Gap(6);
+    if (LinkButton("apk-copy", "Copiar el enlace de descarga") && a.copyText) a.copyText(apk);
+    ImGui::EndGroup();
+    ImGui::SetCursorScreenPos(ImVec2(start.x, std::max(end.y, ImGui::GetCursorScreenPos().y)));
+    ImGui::Dummy(ImVec2(0, 0));
+  }
+
+  Heading("EMPAREJAR");
+  if (!st.configured) {
+    Warning("El móvil recibe los clips por tu nube (Cloudflare R2 o Backblaze B2, gratis hasta 10 GB): "
+            "configúrala primero en Ajustes > Nube.");
+    Gap(4);
+    if (SolidButton("phone-cloud", "Configurar la nube", Px(190), 30)) m.jump = SettingsPage::Cloud;
+  } else if (!m.phoneShown) {
+    Help("2. Abre Spectre Holder, pulsa «Escanear el código» y apunta a este QR. Lleva la dirección de tu nube y "
+         "sus claves: enséñalo solo a tu móvil.");
+    Gap(4);
+    if (SolidButton("phone-show", "Enseñar el código", Px(190), 30) && a.showPhoneCode) a.showPhoneCode();
+    ImGui::SameLine(0, Px(6));
+    ImGui::BeginDisabled(cyber);
+    if (GhostButton("phone-copy", "Copiar el código", Px(170), Tone::Normal, 30) && a.copyPhoneCode) a.copyPhoneCode();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      ImGui::SetTooltip(cyber ? "No en el modo cibercafé: el siguiente cliente podría pegarlo"
+                              : "Para pegarlo en la app con «Pegar el código». Lleva tus claves: no lo mandes "
+                                "por un chat que vea otra gente");
+  } else {
+    Help("Escanéalo con Spectre Holder («Escanear el código»). Lleva las claves de tu nube: ocúltalo al terminar.");
+    Gap(6);
+    if (!DrawQr(1, m.phoneCode, Px(300))) ErrorText("No se pudo hacer el código: la dirección de la nube es demasiado larga.");
+    Gap(6);
+    if (SolidButton("phone-hide", "Ocultar", Px(120), 30)) ForgetPhoneCode(m);
+  }
+  if (st.configured)
+    Help("Si cambias de nube o de claves, vuelve a emparejar el móvil (en la app: Ajustes > «Emparejar con otro código»).");
+
+  Heading("ENVIAR");
+  m.dirty |= SwitchField("Mandar al móvil cada clip nuevo", &c.autoSend,
+                         "Cada clip que guardes se sube solo a la carpeta del móvil de tu nube. Spectre Holder lo "
+                         "enseña al abrirla, o lo descarga sin pulsar nada si lo activas en la app.");
+  ImGui::BeginDisabled(!c.autoSend);
+  m.dirty |= SwitchField("También las capturas", &c.sendScreenshots);
+  ImGui::EndDisabled();
+  Help("A mano: en la biblioteca, clic derecho > «Enviar al móvil» (también con varios elegidos), o en el panel "
+       "(Alt+Z) > «Enviar al móvil». Con un juego abierto se sube con el límite de Ajustes > Nube.");
+  Help("Lo que el móvil no descarga, Spectre Holder lo borra de la nube a los 7 días (se cambia en la app).");
+  if (st.phoneQueued > 0 || st.phoneFailed > 0) {
+    Gap(6);
+    if (st.currentPhone && !st.current.empty()) {
+      std::string text = "Enviando " + st.current + "  ·  " + std::to_string(int(st.progress * 100.0f)) + " %";
+      if (st.bytesPerSecond > 0) text += "  ·  " + FormatBytes(uint64_t(st.bytesPerSecond)) + "/s";
+      UpdateStatusLine(p.accent, true, text);
+      Bar(ImVec2(ControlWidth(), Px(4)), st.progress, p.accent);
+      Gap(4);
+    } else if (st.phoneQueued > 0) {
+      UpdateStatusLine(p.textMuted, false,
+                       st.paused        ? std::string("En pausa (Ajustes > Nube)")
+                       : st.waitingGame ? std::string("Esperando a que cierres el juego")
+                       : st.offline     ? std::string("Sin conexión: sigue sola al volver")
+                                        : "Esperando turno en la cola de la nube");
+    }
+    if (st.phoneQueued > 0) ValueRow("Por enviar", std::to_string(st.phoneQueued));
+    if (st.phoneFailed > 0) {
+      ValueRow("Sin enviar", std::to_string(st.phoneFailed));
+      if (!st.lastError.empty()) {
+        Gap(2);
+        ErrorText(st.lastError.c_str());
+      }
+      Gap(4);
+      if (GhostButton("phone-retry", "Reintentar", Px(110), Tone::Normal, 28) && a.retryUploads) a.retryUploads();
+    }
+  }
+
+  if (st.phoneRecent.empty()) return;
+  Heading("LO ÚLTIMO ENVIADO");
+  const float rowW = std::min(ImGui::GetContentRegionAvail().x, Px(620));
+  const size_t shown = std::min<size_t>(st.phoneRecent.size(), 8);
+  for (size_t i = 0; i < shown; ++i) {
+    const auto& r = st.phoneRecent[i];
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    const float rowH = Px(30);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x, q.y + Px(2)), C(p.text),
+         Ellipsize(ImGui::GetFont(), Px(kSmall), r.name, rowW).c_str());
+    std::string sub = "En la nube desde " + r.when + "  ·  se borra al descargarlo en el móvil";
+    Text(dl, ImGui::GetFont(), Px(kHint), ImVec2(q.x, q.y + Px(kSmall) + Px(5)), C(p.textFaint), sub.c_str());
+    dl->AddRectFilled(ImVec2(q.x, q.y + rowH + Px(4)), ImVec2(q.x + rowW, q.y + rowH + Px(4) + Px(1)), C(p.line));
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(8)));
+    ImGui::Dummy(ImVec2(rowW, 0));
+  }
+}
+
 // Estado en Discord (Rich Presence): el interruptor y cómo va la conexión.
 void DiscordSection(SettingsModel& m) {
   using S = DiscordStatus::State;
@@ -1975,8 +2163,16 @@ void CancelHotkeyCapture(SettingsModel& model, const SettingsActions& actions) {
   EndCapture(model, actions);
 }
 
+void ForgetPhoneCode(SettingsModel& m) {
+  if (!m.phoneCode.empty()) SecureZeroMemory(m.phoneCode.data(), m.phoneCode.size());
+  m.phoneCode.clear();
+  m.phoneShown = false;
+  ForgetQr(1);
+}
+
 void DrawSettingsPage(SettingsPage page, SettingsModel& m, const SettingsActions& a) {
   if (page != SettingsPage::Hotkeys) CancelHotkeyCapture(m, a);
+  if (page != SettingsPage::Phone && m.phoneShown) ForgetPhoneCode(m); // lleva las claves: solo mientras se ve
   switch (page) {
   case SettingsPage::Replay: PageReplay(m); break;
   case SettingsPage::Video: PageVideo(m); break;
@@ -1986,6 +2182,7 @@ void DrawSettingsPage(SettingsPage page, SettingsModel& m, const SettingsActions
   case SettingsPage::Voice: PageVoice(m); break;
   case SettingsPage::Storage: PageStorage(m, a); break;
   case SettingsPage::Cloud: PageCloud(m, a); break;
+  case SettingsPage::Phone: PagePhone(m, a); break;
   case SettingsPage::Notifications: PageNotifications(m, a); break;
   case SettingsPage::General: PageGeneral(m, a); break;
   case SettingsPage::Projects: PageProjects(a); break;

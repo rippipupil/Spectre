@@ -12,6 +12,12 @@
 // Con la dirección pública del bucket el enlace no caduca; sin ella es una
 // URL firmada que vale hasta 7 días y se vuelve a firmar al copiarla.
 //
+// Spectre Holder (la app para Android de holder/): «Enviar al móvil» sube a
+// spectre/movil/<identificador>-<código>/<nombre del archivo>, con el nombre a
+// la vista para que el móvil lo enseñe sin pedir nada más. El móvil lo lista,
+// lo descarga y lo borra de la nube; se empareja con el código de
+// PhonePairingCode (el QR de Ajustes > Móvil).
+//
 // Ningún hilo vive sin trabajo: el de subida arranca con la primera de la
 // cola y acaba al vaciarla. Con un juego abierto va en modo de fondo y con la
 // velocidad limitada (Ajustes > Nube), para no subir el ping.
@@ -61,6 +67,7 @@ struct CloudEvent {
   bool copyLink = false;  // el enlace va al portapapeles (compartir, o Ajustes > Nube)
   bool automatic = false; // subida automática: el aviso es más discreto
   bool deleted = false;   // se borró del PC al subirse
+  bool phone = false;     // «Enviar al móvil»: ya está en la nube esperando al móvil
 };
 
 // Ajustes > Nube y la línea de la biblioteca.
@@ -84,6 +91,12 @@ struct CloudStatus {
   };
   std::vector<Recent> recent; // las últimas subidas, de la más reciente a la más antigua
   int doneCount = 0;
+  // «Enviar al móvil»: lo que espera subirse o falló, y lo último enviado
+  // (también en las cuentas de arriba, que son de toda la cola).
+  int phoneQueued = 0;       // esperando o subiendo
+  int phoneFailed = 0;
+  bool currentPhone = false; // la que sube ahora (current) va al móvil
+  std::vector<Recent> phoneRecent;
   enum class Test { Idle, Running, Ok, Warning, Failed };
   Test test = Test::Idle;
   std::string testMessage;
@@ -123,6 +136,14 @@ public:
   // aunque luego se pegue otra.
   void Enqueue(const std::string& path, bool front, bool copyLink, CloudDelete removal, bool automatic);
   void Cancel(const std::string& path);
+  // «Enviar al móvil»: a spectre/movil/ (aparte de los enlaces). automatic:
+  // «Mandar al móvil cada clip nuevo», sin prisa; a mano va la primera.
+  void SendToPhone(const std::string& path, CloudDelete removal, bool automatic);
+  void CancelPhone(const std::string& path);
+  CloudFileState PhoneState(const std::string& path) const;
+  // "spectre-holder:<base64url>" con el bucket y las claves para la app del
+  // móvil (el QR de Ajustes > Móvil). Vacío sin nube configurada.
+  std::string PhonePairingCode(const std::string& pcName) const;
   // Vuelve a intentar las fallidas (todas con path vacío).
   void Retry(const std::string& path = {});
   void Renamed(const std::string& from, const std::string& to);
@@ -132,12 +153,15 @@ public:
   // Hay un juego abierto o se graba (App, cada 2 s): se sube con el límite de Ajustes.
   void SetGameActive(bool active);
 
+  // De los enlaces (compartir); lo enviado al móvil va en PhoneState.
   CloudFileState State(const std::string& path) const;
   // Enlace de algo ya subido (vacío si no). Sin dirección pública se firma ahora.
   std::string Link(const std::string& path) const;
   CloudStatus Status() const;
   // Todo lo que tiene estado, de una vez (biblioteca), sin enlaces.
   std::unordered_map<std::string, CloudFileState> Snapshot() const;
+  // Lo que va al móvil y aún no está en la nube (en cola, subiendo o fallado).
+  std::unordered_map<std::string, CloudFileState> PhoneSnapshot() const;
   uint64_t Version() const;
   // Lo que espera subirse: el límite de espacio no lo borra.
   std::vector<std::string> PendingPaths() const;

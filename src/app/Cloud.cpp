@@ -43,6 +43,8 @@ constexpr int kMaxTries = 8;                    // fallos seguidos de una subida
 constexpr int kShareKBps = 1024;                // compartir con «Esperar a cerrar el juego»: sube igualmente, despacio
 constexpr char kKeyPrefix[] = "spectre/";
 constexpr char kExportPrefix[] = "spectre-nube:";
+constexpr char kPhonePrefix[] = "spectre/movil/";  // lo que espera al móvil (Spectre Holder)
+constexpr char kPairPrefix[] = "spectre-holder:";  // el código del QR de Ajustes > Móvil
 constexpr char kEntropy[] = "Spectre: claves de la nube";
 
 // ------------------------------------------------------------------ cifrado
@@ -720,6 +722,20 @@ std::string NewKey(const std::string& path) {
   return std::string(kKeyPrefix) + Base36(UnixMillis()) + "-" + code + ext;
 }
 
+// spectre/movil/<id>-<código>/<nombre del archivo>: el móvil enseña el nombre
+// (juego, fecha, clip o captura) sin pedir nada más que la lista del bucket.
+std::string NewPhoneKey(const std::string& path) {
+  const std::string code = RandomCode(24);
+  if (code.empty()) return {};
+  std::string name = Narrow(std::filesystem::path(Widen(path)).filename().wstring());
+  for (char& c : name)
+    if ((unsigned char)c < 32 || c == '/' || c == '\\' || c == 127) c = '_';
+  if (name.empty() || name == "." || name == "..") name = "archivo" + Extension(path);
+  return std::string(kPhonePrefix) + Base36(UnixMillis()) + "-" + code + "/" + name;
+}
+
+std::string NewKeyFor(bool phone, const std::string& path) { return phone ? NewPhoneKey(path) : NewKey(path); }
+
 std::string ContentType(const std::string& name) {
   std::string ext = Extension(name);
   if (ext == ".mp4") return "video/mp4";
@@ -800,6 +816,7 @@ struct Entry {
   bool local = true;          // sigue en el PC
   bool deletePending = false; // subido, pero no se pudo borrar del PC todavía
   bool foreign = false;       // quedó de una sesión del modo cibercafé: solo sube con «Reintentar»
+  bool phone = false;         // «Enviar al móvil»: va a spectre/movil/ y no da enlace
   // Solo en memoria
   bool otherCloud = false; // modo cibercafé: es de la nube de antes (fallada hasta «Reintentar» o hasta que vuelva)
   bool thisRun = false; // se puso en la cola (o se reintentó) desde que se abrió Spectre
@@ -868,13 +885,21 @@ struct CloudUploader::Shared {
     // algo que se borró del PC).
     Entry* uploaded = nullptr;
     for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-      if (it->lower != lower) continue;
+      if (it->lower != lower || it->phone) continue; // lo del móvil va aparte (FindPhone)
       if (it->local || it->st != Entry::St::Done) return &*it;
       if (!uploaded) uploaded = &*it;
     }
     return uploaded;
   }
   const Entry* FindPath(const std::string& path) const { return const_cast<Shared*>(this)->FindPath(path); }
+  // Lo último que se mandó al móvil de ese archivo.
+  Entry* FindPhone(const std::string& path) {
+    const std::string lower = LowerPath(path);
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+      if (it->phone && it->lower == lower) return &*it;
+    return nullptr;
+  }
+  const Entry* FindPhone(const std::string& path) const { return const_cast<Shared*>(this)->FindPhone(path); }
   bool HaveTarget() const { return !keys.Empty() && !Trim(config.endpoint).empty() && !CloudBucket(config).empty(); }
   // Con un juego abierto y «Esperar a cerrarlo», solo sube lo que se compartió a mano.
   bool Waits(const Entry& e) const { return gameActive && config.gameLimitKBps == 0 && !e.urgent; }
@@ -905,7 +930,7 @@ struct CloudUploader::Shared {
                 "configurada ahora.";
       ForgetTarget(e);
       // Un código nuevo: el de antes pudo quedar en un cloud.json de esa sesión.
-      if (std::string key = NewKey(e.path); !key.empty()) e.key = std::move(key);
+      if (std::string key = NewKeyFor(e.phone, e.path); !key.empty()) e.key = std::move(key);
     }
   }
   static void ForgetTarget(Entry& e) {
@@ -996,6 +1021,7 @@ struct CloudUploader::Shared {
       if (e.urgent) v["urgent"] = true;
       if (e.deletePending) v["deletePending"] = true;
       if (e.foreign) v["foreign"] = true;
+      if (e.phone) v["phone"] = true;
       items.push_back(std::move(v));
     }
     return {{"version", 1}, {"paused", paused}, {"items", std::move(items)}};
@@ -1035,10 +1061,11 @@ struct CloudUploader::Shared {
         e.urgent = v.value("urgent", false);
         e.deletePending = v.value("deletePending", false);
         e.foreign = v.value("foreign", false);
+        e.phone = v.value("phone", false);
         // En el modo cibercafé se guarda sin clave: lo subido solo sirve para
         // borrarlo, y lo demás se subirá con un código nuevo.
         if (e.key.empty() && e.st != Entry::St::Done) {
-          e.key = NewKey(e.path);
+          e.key = NewKeyFor(e.phone, e.path);
           e.uploadId.clear();
           e.etags.clear();
           e.partSize = 0;
@@ -1387,6 +1414,7 @@ void Worker(std::shared_ptr<Shared> sh) {
         ev.name = e->name;
         ev.error = error;
         ev.automatic = e->automatic;
+        ev.phone = e->phone;
         sh->events.push_back(std::move(ev));
         sh->Changed();
         continue;
@@ -1422,7 +1450,7 @@ void Worker(std::shared_ptr<Shared> sh) {
     buffer.clear();
     buffer.shrink_to_fit(); // nada de memoria retenida entre archivos
 
-    bool deleted = false;
+    bool deleted = false, handedOff = false;
     if (o == Outcome::Done) {
       // Sin la clave: con ella y la dirección pública, el log abriría el enlace.
       Log("Nube: subido %s (%s)", job.name.c_str(), FormatBytes(job.size).c_str());
@@ -1431,7 +1459,22 @@ void Worker(std::shared_ptr<Shared> sh) {
         std::lock_guard lock(sh->mutex);
         Entry* e = sh->Find(job.id);
         // Tras Stop (al salir) también lo que se borraba al salir: esa limpieza ya pasó.
-        if (e && (e->deleteAfter || (sh->stop && e->deleteAtExit))) removePath = e->path;
+        if (e && (e->deleteAfter || (sh->stop && e->deleteAtExit))) {
+          // El mismo archivo aún tiene que subir con otro destino (enlace y
+          // móvil a la vez): lo borra ese al acabar.
+          Entry* other = nullptr;
+          for (auto& x : sh->entries)
+            if (&x != e && x.lower == e->lower && x.st != Entry::St::Done) {
+              other = &x;
+              break;
+            }
+          if (other && !sh->stop) {
+            other->deleteAfter = true;
+            handedOff = true;
+          } else {
+            removePath = e->path;
+          }
+        }
       }
       if (!removePath.empty()) {
         deleted = DeleteFileW(Widen(removePath).c_str()) != FALSE;
@@ -1472,14 +1515,15 @@ void Worker(std::shared_ptr<Shared> sh) {
       e->at = int64_t(UnixMillis());
       e->when = NowText();
       e->local = !deleted;
-      e->deletePending = !deleted && (e->deleteAfter || (sh->stop && e->deleteAtExit));
+      e->deletePending = !deleted && !handedOff && (e->deleteAfter || (sh->stop && e->deleteAtExit));
       sh->offline = false;
       CloudEvent ev;
       ev.path = e->path;
       ev.name = e->name;
       ev.ok = true;
-      ev.link = LinkFor(*sh, *e);
-      ev.copyLink = e->copyLink;
+      ev.phone = e->phone;
+      if (!e->phone) ev.link = LinkFor(*sh, *e); // lo del móvil no se comparte
+      ev.copyLink = e->copyLink && !e->phone;
       ev.automatic = e->automatic;
       ev.deleted = deleted;
       sh->events.push_back(std::move(ev));
@@ -1550,6 +1594,7 @@ void Worker(std::shared_ptr<Shared> sh) {
         ev.name = e->name;
         ev.error = error;
         ev.automatic = e->automatic;
+        ev.phone = e->phone;
         sh->events.push_back(std::move(ev));
       }
       sh->Changed();
@@ -1902,6 +1947,108 @@ void CloudUploader::Enqueue(const std::string& path, bool front, bool copyLink, 
   Kick();
 }
 
+void CloudUploader::SendToPhone(const std::string& path, CloudDelete removal, bool automatic) {
+  if (path.empty()) return;
+  WIN32_FILE_ATTRIBUTE_DATA fa{};
+  if (!GetFileAttributesExW(Widen(path).c_str(), GetFileExInfoStandard, &fa)) {
+    Log("Móvil: no se puede enviar %s: no existe", path.c_str());
+    return;
+  }
+  const uint64_t size = (uint64_t(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+  const int64_t mtime = int64_t((uint64_t(fa.ftLastWriteTime.dwHighDateTime) << 32) | fa.ftLastWriteTime.dwLowDateTime);
+  {
+    std::lock_guard lock(shared_->mutex);
+    Shared& sh = *shared_;
+    Entry* existing = sh.FindPhone(path);
+    if (existing && existing->st != Entry::St::Done) {
+      // Ya en la cola o fallado: otra vez a la cola (delante si se pidió a mano).
+      existing->st = Entry::St::Queued;
+      existing->error.clear();
+      existing->tries = 0;
+      existing->retryAt = 0;
+      existing->urgent |= !automatic;
+      existing->automatic &= automatic;
+      existing->deleteAfter |= removal == CloudDelete::AfterUpload;
+      existing->deleteAtExit |= removal == CloudDelete::AtExit;
+      if (sh.config.cyberMode && existing->id != sh.currentId &&
+          (existing->uploadId.empty() || sh.OtherCloud(*existing)))
+        Shared::ForgetTarget(*existing);
+      existing->thisRun = true;
+      existing->foreign = false;
+      existing->otherCloud = false;
+      if (!automatic && existing->id != sh.currentId) {
+        Entry moved = std::move(*existing);
+        sh.entries.erase(sh.At(existing));
+        sh.entries.push_front(std::move(moved));
+      }
+    } else {
+      // Otra vez aunque ya se mandara: el móvil pudo descargarlo y borrarlo de la nube.
+      Entry e;
+      e.id = sh.nextId++;
+      e.path = path;
+      e.lower = LowerPath(path);
+      e.name = Narrow(std::filesystem::path(Widen(path)).filename().wstring());
+      e.size = size;
+      e.mtime = mtime;
+      e.phone = true;
+      e.key = NewPhoneKey(path);
+      if (e.key.empty()) {
+        e.st = Entry::St::Failed;
+        e.error = "Windows no pudo generar el código del archivo.";
+      }
+      e.urgent = !automatic;
+      e.automatic = automatic;
+      e.deleteAfter = removal == CloudDelete::AfterUpload;
+      e.deleteAtExit = removal == CloudDelete::AtExit;
+      e.thisRun = true;
+      if (sh.config.cyberMode && sh.HaveTarget()) {
+        e.endpoint = Trim(sh.config.endpoint);
+        e.bucket = CloudBucket(sh.config);
+      }
+      if (automatic) sh.entries.push_back(std::move(e));
+      else sh.entries.push_front(std::move(e));
+    }
+    sh.Changed();
+  }
+  SaveQueue(*shared_, true);
+  shared_->cv.notify_all();
+  Kick();
+}
+
+std::string CloudUploader::PhonePairingCode(const std::string& pcName) const {
+  CloudConfig config;
+  CloudKeys keys;
+  {
+    std::lock_guard lock(shared_->mutex);
+    if (!shared_->HaveTarget()) return {};
+    config = shared_->config;
+    keys = shared_->keys;
+  }
+  Endpoint ep;
+  if (!ParseEndpoint(config.endpoint, &ep, nullptr)) {
+    Wipe(keys.secret);
+    return {};
+  }
+  // Ya resuelto (host, puerto, región y bucket): el móvil firma igual que aquí.
+  nlohmann::json j = {{"v", 1},
+                      {"h", ep.host},
+                      {"p", ep.port},
+                      {"r", RegionFor(config, ep.host)},
+                      {"b", CloudBucket(config)},
+                      {"k", keys.keyId},
+                      {"s", keys.secret},
+                      {"x", kPhonePrefix},
+                      {"n", pcName}};
+  Wipe(keys.secret);
+  std::string plain = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  std::string code = Base64(plain);
+  Wipe(plain);
+  // base64url sin relleno: cabe en un QR más pequeño y sirve como enlace.
+  for (char& c : code) c = c == '+' ? '-' : c == '/' ? '_' : c;
+  while (!code.empty() && code.back() == '=') code.pop_back();
+  return std::string(kPairPrefix) + code;
+}
+
 namespace {
 
 // Subida por partes que ya no se va a terminar: se avisa al bucket para que
@@ -1948,6 +2095,24 @@ void CloudUploader::Cancel(const std::string& path) {
     std::lock_guard lock(shared_->mutex);
     Shared& sh = *shared_;
     Entry* e = sh.FindPath(path);
+    if (!e || e->st == Entry::St::Done) return;
+    if (!e->uploadId.empty()) aborts.push_back(AbortFor(sh, *e));
+    keys = sh.keys;
+    sh.entries.erase(sh.At(e));
+    sh.Changed();
+  }
+  SaveQueue(*shared_, true);
+  shared_->cv.notify_all();
+  AbortUploads(std::move(aborts), std::move(keys));
+}
+
+void CloudUploader::CancelPhone(const std::string& path) {
+  std::vector<PendingAbort> aborts;
+  CloudKeys keys;
+  {
+    std::lock_guard lock(shared_->mutex);
+    Shared& sh = *shared_;
+    Entry* e = sh.FindPhone(path);
     if (!e || e->st == Entry::St::Done) return;
     if (!e->uploadId.empty()) aborts.push_back(AbortFor(sh, *e));
     keys = sh.keys;
@@ -2078,6 +2243,12 @@ CloudFileState CloudUploader::State(const std::string& path) const {
   return e ? FileState(*shared_, *e) : CloudFileState{};
 }
 
+CloudFileState CloudUploader::PhoneState(const std::string& path) const {
+  std::lock_guard lock(shared_->mutex);
+  const Entry* e = shared_->FindPhone(path);
+  return e ? FileState(*shared_, *e) : CloudFileState{};
+}
+
 std::string CloudUploader::Link(const std::string& path) const {
   std::lock_guard lock(shared_->mutex);
   const Entry* e = shared_->FindPath(path);
@@ -2100,17 +2271,24 @@ CloudStatus CloudUploader::Status() const {
     const Entry& e = *it;
     if (e.st == Entry::St::Failed) {
       ++s.failed;
+      if (e.phone) ++s.phoneFailed;
     } else if (e.st == Entry::St::Queued) {
+      if (e.phone) ++s.phoneQueued;
       if (e.id == sh.currentId) {
         s.current = e.name;
         s.progress = e.progress;
+        s.currentPhone = e.phone;
       } else {
         ++s.queued;
         if (sh.Waits(e)) s.waitingGame = true;
       }
     } else {
       ++s.doneCount;
-      if (s.recent.size() < 20 && !e.key.empty()) s.recent.push_back({e.path, e.name, e.when, e.local});
+      if (e.phone) {
+        if (s.phoneRecent.size() < 20) s.phoneRecent.push_back({e.path, e.name, e.when, e.local});
+      } else if (s.recent.size() < 20 && !e.key.empty()) {
+        s.recent.push_back({e.path, e.name, e.when, e.local});
+      }
     }
   }
   s.test = sh.test;
@@ -2123,9 +2301,17 @@ std::unordered_map<std::string, CloudFileState> CloudUploader::Snapshot() const 
   std::unordered_map<std::string, CloudFileState> out;
   std::lock_guard lock(shared_->mutex);
   for (const auto& e : shared_->entries) {
-    if (!e.local && e.st == Entry::St::Done) continue;
+    if (e.phone || (!e.local && e.st == Entry::St::Done)) continue; // la biblioteca enseña los enlaces
     out[e.path] = FileState(*shared_, e); // la última de un mismo archivo gana
   }
+  return out;
+}
+
+std::unordered_map<std::string, CloudFileState> CloudUploader::PhoneSnapshot() const {
+  std::unordered_map<std::string, CloudFileState> out;
+  std::lock_guard lock(shared_->mutex);
+  for (const auto& e : shared_->entries)
+    if (e.phone && e.st != Entry::St::Done) out[e.path] = FileState(*shared_, e);
   return out;
 }
 

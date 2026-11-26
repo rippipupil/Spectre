@@ -23,7 +23,8 @@
 namespace spectre {
 
 enum class SettingsPage {
-  Replay, Video, Audio, Camera, Hotkeys, Voice, Storage, Cloud, Notifications, General, Performance, Projects, Count
+  Replay, Video, Audio, Camera, Hotkeys, Voice, Storage, Cloud, Phone, Notifications, General, Performance, Projects,
+  Count
 };
 const char* SettingsPageName(SettingsPage page);
 
@@ -67,7 +68,16 @@ struct SettingsModel {
   // 1 mover; -1 nada) y cuántos van mientras se importa (total 0 = nada en marcha).
   int shadowPlayConfirm = -1;
   int shadowPlayDone = 0, shadowPlayTotal = 0;
+  // Móvil (Spectre Holder): el código de emparejar solo vive mientras se
+  // enseña (lleva las claves); se borra al ocultarlo o salir de la página.
+  std::string phoneCode;
+  bool phoneShown = false;
+  // Una página pide ir a otra (Móvil sin nube: «Configurar la nube»). Count = ninguna.
+  SettingsPage jump = SettingsPage::Count;
 };
+
+// Borra el código de emparejar el móvil de la memoria.
+void ForgetPhoneCode(SettingsModel& model);
 
 struct SettingsActions {
   std::function<void()> checkUpdates;
@@ -96,6 +106,11 @@ struct SettingsActions {
   std::function<void(bool)> importShadowPlay; // true: mover en vez de copiar
   std::function<void()> cancelImport;
   std::function<void()> chooseShadowPlayFolder;
+  // Móvil: rellena model.phoneCode (vacío si la nube no está lista) y copia
+  // el código o cualquier texto al portapapeles.
+  std::function<void()> showPhoneCode;
+  std::function<void()> copyPhoneCode;
+  std::function<void(const std::string&)> copyText;
 };
 
 // Dibuja el contenido de la página (sin título ni pie: los pone la ventana).

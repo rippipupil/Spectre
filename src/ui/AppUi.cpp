@@ -83,6 +83,11 @@ const CloudFileState* CloudOf(const AppModel& m, const std::string& path) {
   return it == m.cloud.end() ? nullptr : &it->second;
 }
 
+const CloudFileState* PhoneOf(const AppModel& m, const std::string& path) {
+  auto it = m.phone.find(path);
+  return it == m.phone.end() ? nullptr : &it->second;
+}
+
 // La etiqueta de la nube en la tarjeta (vacía si no tiene nada que ver con ella).
 std::string CloudTag(const CloudFileState* cloud) {
   if (!cloud) return {};
@@ -1308,6 +1313,7 @@ void AppUi::ItemMenu(AppModel& m, const AppActions& a) {
   if (ImGui::MenuItem("Mostrar en la carpeta")) a.showInFolder(path);
   if (ImGui::MenuItem("Copiar para pegar en Discord")) a.copyToClipboard(path);
   CloudMenuItems(m, a, path);
+  PhoneMenuItem(m, a, path);
   if (Editable(*item)) {
     if (m.exportPercent >= 0 && m.exportPath == path) {
       std::string label = "Cancelar la exportación (" + std::to_string(m.exportPercent) + " %)";
@@ -1386,6 +1392,45 @@ void AppUi::OpenCloudSettings(AppModel& m) {
   m.settingsPage = SettingsPage::Cloud;
 }
 
+// Mandarlo a Spectre Holder (la app del móvil) por tu nube, o cancelar o
+// reintentar el envío en marcha.
+void AppUi::PhoneMenuItem(AppModel& m, const AppActions& a, const std::string& path) {
+  const CloudFileState* phone = PhoneOf(m, path);
+  const auto phase = phone ? phone->phase : CloudFileState::Phase::None;
+  if (!m.settings.cloud.configured && phase == CloudFileState::Phase::None) {
+    if (ImGui::MenuItem("Enviar al móvil...")) OpenPhoneSettings(m);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Con Spectre Holder, la app para Android: lo recibe por tu nube y lo descarga a la galería. "
+                        "Se configura una vez en Ajustes > Móvil");
+    return;
+  }
+  switch (phase) {
+  case CloudFileState::Phase::Queued:
+    if (ImGui::MenuItem("Cancelar el envío al móvil (en cola)")) a.cancelPhone(path);
+    break;
+  case CloudFileState::Phase::Uploading: {
+    std::string label = "Cancelar el envío al móvil (" + std::to_string(int(phone->progress * 100.0f)) + " %)";
+    if (ImGui::MenuItem(label.c_str())) a.cancelPhone(path);
+    break;
+  }
+  case CloudFileState::Phase::Failed:
+    if (ImGui::MenuItem("Reintentar el envío al móvil")) a.sendToPhone({path});
+    if (ImGui::IsItemHovered() && !phone->error.empty()) ImGui::SetTooltip("%s", phone->error.c_str());
+    break;
+  default:
+    if (ImGui::MenuItem("Enviar al móvil")) a.sendToPhone({path});
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Lo sube a tu nube para Spectre Holder: en el móvil, ábrela y descárgalo a la galería. Al "
+                        "descargarlo se borra de la nube");
+    break;
+  }
+}
+
+void AppUi::OpenPhoneSettings(AppModel& m) {
+  Navigate(m, AppPage::Settings);
+  m.settingsPage = SettingsPage::Phone;
+}
+
 void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
   if (!ImGui::BeginPopup("selection-menu")) return;
   const auto chosen = SelectedItems(m);
@@ -1418,6 +1463,15 @@ void AppUi::SelectionMenu(AppModel& m, const AppActions& a) {
       std::vector<std::string> paths;
       for (const auto* item : chosen) paths.push_back(item->path);
       a.uploadToCloud(paths);
+    }
+  }
+  if (ImGui::MenuItem(("Enviar " + count + " al móvil").c_str())) {
+    if (!m.settings.cloud.configured) {
+      OpenPhoneSettings(m);
+    } else {
+      std::vector<std::string> paths;
+      for (const auto* item : chosen) paths.push_back(item->path);
+      a.sendToPhone(paths);
     }
   }
   ImGui::Separator();
@@ -1670,6 +1724,10 @@ void AppUi::SelectionBar(AppModel& m, const AppActions& a, const std::vector<con
        n >= 2 && videos == n ? "Del más antiguo al más reciente, sin recodificar: solo vídeos grabados con la misma "
                                "calidad, resolución y audio. El resultado es un vídeo nuevo; los originales no cambian."
                              : "Elige dos vídeos o más (sin capturas) para unirlos"},
+      {"sel-phone", "Al móvil", Tone::Normal, n > 0,
+       m.settings.cloud.configured
+           ? "Los manda por tu nube a Spectre Holder, la app del móvil, para descargarlos a la galería"
+           : std::string("Para mandarlos al móvil con Spectre Holder: configúralo en Ajustes > Móvil")},
       {"sel-delete", "Borrar", Tone::Danger, n > 0, "A la papelera de reciclaje (Supr)"},
   };
   constexpr int kActions = int(sizeof(actions) / sizeof(actions[0]));
@@ -1723,7 +1781,16 @@ void AppUi::SelectionBar(AppModel& m, const AppActions& a, const std::vector<con
   case 1: FavoriteSelection(m, a); break;
   case 2: ExportSelection(m, a); break;
   case 3: JoinSelection(m, a); break;
-  case 4: AskDeleteSelection(m); break;
+  case 4:
+    if (!m.settings.cloud.configured) {
+      OpenPhoneSettings(m);
+    } else {
+      std::vector<std::string> paths;
+      for (const auto* item : chosen) paths.push_back(item->path);
+      a.sendToPhone(paths);
+    }
+    break;
+  case 5: AskDeleteSelection(m); break;
   default: break;
   }
   if (close) EndSelection();
@@ -2151,7 +2218,7 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
     const bool exporting = m.exportPercent >= 0;
     const bool exportingThis = exporting && m.exportPath == item.path;
     if (exportingThis) sub = "Exportando para Discord: " + std::to_string(m.exportPercent) + " %";
-    const int actions = editable ? 9 : photoEditable ? 8 : 7;
+    const int actions = editable ? 10 : photoEditable ? 9 : 8; // con «Enviar al móvil»
     float actionsW = rowH * float(actions) + Px(4) * float(actions - 1);
     Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(tx, q.y + Px(21)), C(exportingThis ? p.accent : p.textMuted),
          Ellipsize(ImGui::GetFont(), Px(kSmall), sub, ImGui::GetContentRegionAvail().x - rowH - actionsW - Px(30)).c_str());
@@ -2198,6 +2265,31 @@ void AppUi::PageViewer(AppWindow& w, AppModel& m, const AppActions& a) {
         if (busy) a.cancelUpload(item.path);
         else if (phase == CloudFileState::Phase::Failed) a.retryUpload(item.path);
         else a.shareLink(item.path);
+      }
+    }
+    ImGui::SameLine(0, Px(4));
+    {
+      // Al móvil (Spectre Holder), o cancelar el envío en marcha.
+      const CloudFileState* phone = PhoneOf(m, item.path);
+      const auto phase = phone ? phone->phase : CloudFileState::Phase::None;
+      const bool busy = phase == CloudFileState::Phase::Queued || phase == CloudFileState::Phase::Uploading;
+      std::string tip = !m.settings.cloud.configured ? "Enviar al móvil: configura Spectre Holder en Ajustes > Móvil"
+                        : busy ? (phase == CloudFileState::Phase::Queued
+                                      ? std::string("En la cola para el móvil. Clic para cancelar")
+                                      : "Enviando al móvil: " + std::to_string(int(phone->progress * 100.0f)) +
+                                            " %. Clic para cancelar")
+                        : phase == CloudFileState::Phase::Failed
+                            ? "No se pudo enviar al móvil: " + phone->error + ". Clic para reintentar"
+                            : "Enviar al móvil: lo sube a tu nube y Spectre Holder lo descarga a la galería";
+      if (IconButton("phone", Icon::Phone, rowH, tip.c_str(), busy)) {
+        if (!m.settings.cloud.configured) {
+          OpenPhoneSettings(m);
+          ImGui::EndChild();
+          ImGui::PopStyleVar();
+          return;
+        }
+        if (busy) a.cancelPhone(item.path);
+        else a.sendToPhone({item.path});
       }
     }
     ImGui::SameLine(0, Px(4));
@@ -2636,6 +2728,10 @@ void AppUi::PageSettings(AppWindow& w, AppModel& m, const AppActions& a) {
   DrawHoverTrail(ImGui::GetWindowDrawList());
   PageTitle(SettingsPageName(m.settingsPage), "", PageNumber(AppPage::Settings, m.settingsPage), "Ajustes");
   DrawSettingsPage(m.settingsPage, m.settings, a.settings);
+  if (m.settings.jump != SettingsPage::Count) {
+    m.settingsPage = m.settings.jump; // p. ej. Móvil sin nube: «Configurar la nube»
+    m.settings.jump = SettingsPage::Count;
+  }
   Gap(16);
   ImGui::EndChild();
   ImGui::PopStyleVar();

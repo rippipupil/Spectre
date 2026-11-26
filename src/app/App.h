@@ -108,6 +108,11 @@ private:
   CloudFileState CloudState(const std::string& path) const { return cloud_.State(path); }
   bool CloudConfigured() const { return cloud_.Configured(); }
   void UploadToCloud(const std::vector<std::string>& paths);
+  // «Enviar al móvil» (Spectre Holder, holder/): a la carpeta del móvil de la
+  // nube. Sin nube solo avisa, como ShareLink.
+  void SendToPhone(const std::vector<std::string>& paths);
+  // Ajustes > Móvil > «Enseñar el código» / «Copiar el código».
+  std::string PhonePairingCode() const;
   // Algo nuevo guardado: con la subida automática o el modo cibercafé, a la cola.
   // forPaste: además se copió al portapapeles (en el cibercafé se borra al salir, no al subirse).
   void AutoUpload(const std::string& path, MediaKind kind, bool forPaste = false);
