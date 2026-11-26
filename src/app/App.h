@@ -112,7 +112,7 @@ private:
   // nube. Sin nube solo avisa, como ShareLink.
   void SendToPhone(const std::vector<std::string>& paths);
   // Ajustes > Móvil > «Enseñar el código» / «Copiar el código».
-  std::string PhonePairingCode() const;
+  std::string PhonePairingCode();
   // Algo nuevo guardado: con la subida automática o el modo cibercafé, a la cola.
   // forPaste: además se copió al portapapeles (en el cibercafé se borra al salir, no al subirse).
   void AutoUpload(const std::string& path, MediaKind kind, bool forPaste = false);
@@ -128,7 +128,8 @@ private:
   // WM_SPECTRE_CLOUD: avisos de lo que terminó y estado para la ventana.
   void OnCloudChanged();
   // Antes y después de cada frame de la ventana: el QR de emparejar solo se
-  // ve en Ajustes > Móvil y con la ventana fuera de la captura.
+  // ve en Ajustes > Móvil y con la ventana fuera de la captura. También lee
+  // la lista de móviles al abrir la página.
   void GuardPhoneCode();
   void CopyCloudLink(const std::string& path);
   void PasteCloudSettings(bool cyber);
@@ -351,6 +352,9 @@ private:
   // El QR de emparejar el móvil lleva las claves: desde que se enseña hasta
   // cerrar la ventana, no sale en los clips ni en las capturas (SetWindowDisplayAffinity).
   bool phoneCodeHidden_ = false;
+  bool phonePageOpen_ = false;  // Ajustes > Móvil a la vista (al abrirla se lee la lista de móviles)
+  bool phoneCodeShown_ = false; // el QR estaba a la vista en el frame anterior
+  uint64_t pairedSerial_ = 0;   // el último móvil emparejado del que se avisó
   uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
   std::unordered_set<std::string> cyberCancelled_; // en minúsculas: canceladas a mano en esta sesión
   std::shared_ptr<std::atomic<bool>> importCancel_;

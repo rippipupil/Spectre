@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -296,6 +297,7 @@ class MainActivity : Activity() {
       return buildString {
         append(c.host).append(c.bucket).append('|').append(Holder.listed).append(Holder.refreshing && !Holder.listed)
         append('|').append(Holder.error)
+        append('|').append(Holder.link).append(Holder.linkError)
         Holder.clips.forEach { append(it.key).append(',') }
         append('|')
         saved.take(30).forEach { append(it.key).append(',') }
@@ -341,7 +343,11 @@ class MainActivity : Activity() {
       box.addView(ui.section("Emparejar").apply { setPadding(0, ui.dp(28), 0, ui.dp(8)) })
       box.addView(ui.text("1. En el PC, abre Spectre > Ajustes > Móvil.", 15f), ui.margins(t = 4))
       box.addView(ui.text("2. Pulsa «Enseñar el código».", 15f), ui.margins(t = 8))
-      box.addView(ui.text("3. Escanéalo con este móvil.", 15f), ui.margins(t = 8))
+      box.addView(ui.text("3. Pulsa «Escanear el código» aquí abajo y apunta al QR.", 15f), ui.margins(t = 8))
+      box.addView(
+        ui.text("Se lee desde esta app: la cámara normal del móvil no sabe abrirlo.", 13f, C.MUTED),
+        ui.margins(t = 6),
+      )
       box.addView(ui.button("Escanear el código", Ui.Style.PRIMARY) { scan() }, ui.margins(t = 24))
       box.addView(ui.button("Pegar el código", Ui.Style.SECONDARY) { pasteCode() }, ui.margins(t = 8))
       box.addView(
@@ -351,10 +357,59 @@ class MainActivity : Activity() {
       content.addView(box)
     }
 
+    // Recién emparejado: si el PC ya sabe de este móvil (el aviso de spectre/moviles/).
+    private fun linkBox(c: CloudConfig) {
+      val pc = c.pcName.ifEmpty { "tu PC" }
+      val box = ui.column().apply { setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12)) }
+      when (Holder.link) {
+        Holder.Link.NONE -> return
+        Holder.Link.CONNECTING -> {
+          box.background = ui.box(C.BG_ALT, C.LINE_STRONG)
+          box.addView(ui.text("Conectando con $pc…", 14f, bold = true))
+          box.addView(ui.text("Avisando al PC de que este móvil lee tu nube.", 13f, C.MUTED), ui.margins(t = 4))
+        }
+        Holder.Link.CONNECTED -> {
+          box.background = ui.box(C.BG_ALT, C.TEXT)
+          box.addView(ui.text("Conectado con $pc", 14f, bold = true))
+          box.addView(
+            ui.text(
+              "Ya puedes mandar clips desde el PC: en la biblioteca, clic derecho > «Enviar al móvil», o en el " +
+                "panel (Alt+Z). Aparecen aquí.",
+              13f, C.MUTED,
+            ),
+            ui.margins(t = 4),
+          )
+          box.addView(ui.button("Entendido", Ui.Style.SECONDARY) { Holder.dismissLink() }, ui.margins(t = 10))
+        }
+        Holder.Link.FAILED -> {
+          box.background = ui.box(C.BG_ALT, C.DANGER)
+          box.addView(ui.text("No se pudo avisar a $pc", 14f, C.DANGER, bold = true))
+          box.addView(
+            ui.text(
+              (Holder.linkError ?: "") + " Lo que mandes del PC llega igual si la nube responde; el PC solo no " +
+                "sabrá que el móvil está emparejado.",
+              13f, C.MUTED,
+            ),
+            ui.margins(t = 4),
+          )
+          val row = ui.row()
+          val half = ViewGroup.LayoutParams.WRAP_CONTENT
+          row.addView(ui.button("Volver a probar", Ui.Style.SECONDARY) { Holder.announce() }, ui.lp(0, half, 1f))
+          row.addView(
+            ui.button("Cerrar", Ui.Style.GHOST) { Holder.dismissLink() },
+            ui.lp(0, half, 1f).apply { setMargins(ui.dp(8), 0, 0, 0) },
+          )
+          box.addView(row, ui.margins(t = 10))
+        }
+      }
+      content.addView(box, ui.margins(16, 16, 16, 0))
+    }
+
     private fun list(c: CloudConfig) {
       val sub = if (c.pcName.isNotEmpty()) "Nube de ${c.pcName}" else c.bucket
       header.addView(topBar("Spectre Holder", sub, backButton = false, right = ui.button("Ajustes", Ui.Style.GHOST) { push(Settings()) }))
 
+      linkBox(c)
       val err = Holder.error
       if (err != null) {
         val box = ui.column().apply {
@@ -729,6 +784,10 @@ class MainActivity : Activity() {
         return
       }
       scanner?.stop()
+      // Leído: se nota en la mano antes de cambiar de pantalla.
+      scanner?.performHapticFeedback(
+        if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY,
+      )
       paired(config)
     }
   }

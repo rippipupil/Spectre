@@ -16,7 +16,9 @@
 // spectre/movil/<identificador>-<código>/<nombre del archivo>, con el nombre a
 // la vista para que el móvil lo enseñe sin pedir nada más. El móvil lo lista,
 // lo descarga y lo borra de la nube; se empareja con el código de
-// PhonePairingCode (el QR de Ajustes > Móvil).
+// PhonePairingCode (el QR de Ajustes > Móvil). Al emparejarse deja
+// spectre/moviles/<id>.json con su nombre y el código que leyó: así el PC
+// sabe qué móviles leen la nube y cuándo uno acaba de leer el QR.
 //
 // Ningún hilo vive sin trabajo: el de subida arranca con la primera de la
 // cola y acaba al vaciarla. Con un juego abierto va en modo de fondo y con la
@@ -70,6 +72,14 @@ struct CloudEvent {
   bool phone = false;     // «Enviar al móvil»: ya está en la nube esperando al móvil
 };
 
+// Un móvil con Spectre Holder emparejado (su aviso en spectre/moviles/).
+struct PhoneDevice {
+  std::string id;      // el del móvil (aleatorio)
+  std::string name;    // el que le puso el usuario, o la marca y el modelo
+  std::string app;     // versión de Spectre Holder
+  int64_t seenMs = 0;  // la última vez que dejó el aviso (hora del bucket, ms desde 1970)
+};
+
 // Ajustes > Nube y la línea de la biblioteca.
 struct CloudStatus {
   bool configured = false; // endpoint, bucket y claves
@@ -97,6 +107,14 @@ struct CloudStatus {
   int phoneFailed = 0;
   bool currentPhone = false; // la que sube ahora (current) va al móvil
   std::vector<Recent> phoneRecent;
+  // Los móviles emparejados (el visto más reciente primero) y el último código.
+  std::vector<PhoneDevice> phones;
+  bool phonesListed = false;   // ya se leyó la lista al menos una vez
+  bool phonesChecking = false;
+  std::string phonesError;     // la última lista falló
+  bool pairWaiting = false;    // mirando cada pocos segundos si un móvil leyó el último código
+  std::string pairedName;      // el móvil que lo leyó ("" = todavía ninguno)
+  uint64_t pairedSerial = 0;   // sube cada vez que un móvil lee un código
   enum class Test { Idle, Running, Ok, Warning, Failed };
   Test test = Test::Idle;
   std::string testMessage;
@@ -145,8 +163,16 @@ public:
   void KeepForPaste(const std::string& path);
   CloudFileState PhoneState(const std::string& path) const;
   // "spectre-holder:<base64url>" con el bucket y las claves para la app del
-  // móvil (el QR de Ajustes > Móvil). Vacío sin nube configurada.
-  std::string PhonePairingCode(const std::string& pcName) const;
+  // móvil (el QR de Ajustes > Móvil). Vacío sin nube configurada. Cada código
+  // lleva uno aleatorio nuevo: el móvil que lo lea lo deja en su aviso.
+  std::string PhonePairingCode(const std::string& pcName);
+  // Lee ahora la lista de móviles emparejados (al abrir Ajustes > Móvil).
+  void CheckPhones();
+  // Mira cada 3 s, durante ms, si un móvil leyó el último código (hasta que
+  // uno lo lea). Con un móvil ya emparejado con ese código no hace nada.
+  void WatchPairing(DWORD ms);
+  // Borra su aviso del bucket: sale de la lista (sigue con las claves).
+  void ForgetPhone(const std::string& id);
   // Vuelve a intentar las fallidas (todas con path vacío).
   void Retry(const std::string& path = {});
   void Renamed(const std::string& from, const std::string& to);

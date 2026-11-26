@@ -4,11 +4,14 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.provider.Settings
+import org.json.JSONObject
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -58,6 +61,13 @@ object Holder {
   var error: String? = null
     private set
 
+  // Emparejar: el aviso al PC (spectre/moviles/<id>.json) recién leído el código.
+  enum class Link { NONE, CONNECTING, CONNECTED, FAILED }
+  @Volatile var link = Link.NONE
+    private set
+  var linkError: String? = null
+    private set
+
   // Descargas (lock para la cola).
   private val lock = Any()
   private val queue = ArrayDeque<Clip>()
@@ -81,25 +91,112 @@ object Holder {
   }
 
   fun pair(config: CloudConfig) {
+    val old = cloud
     store.setCloud(config)
     cloud = config
     clips = emptyList()
     listed = false
     error = null
     failed.clear()
+    // Otra nube: el aviso de la de antes se quita (allí ya no se lee nada).
+    if (old != null && !old.sameCloud(config)) forget(old)
+    announce()
     refresh()
   }
 
   fun unpair() {
     synchronized(lock) { queue.clear() }
     current?.let { cancelKey = it.key }
+    cloud?.let { forget(it) }
     store.setCloud(null)
+    store.announced(null, 0)
     cloud = null
     clips = emptyList()
     listed = false
     error = null
     failed.clear()
+    link = Link.NONE
+    linkError = null
     changed()
+  }
+
+  // Ya visto el «Conectado con...» (o el fallo) de después de emparejar.
+  fun dismissLink() {
+    link = Link.NONE
+    linkError = null
+    changed()
+  }
+
+  // Avisa al PC de que este móvil lee la nube. Lo enseña la pantalla de inicio.
+  fun announce() {
+    val config = cloud ?: return
+    link = Link.CONNECTING
+    linkError = null
+    changed()
+    Thread {
+      val err = try {
+        sendAnnounce(S3(config), config)
+        null
+      } catch (e: IOException) {
+        e.message ?: "No se pudo escribir en la nube."
+      } catch (e: Exception) {
+        "La nube respondió algo que Spectre Holder no entiende. Prueba otra vez."
+      }
+      main.post {
+        if (cloud != config) return@post
+        link = if (err == null) Link.CONNECTED else Link.FAILED
+        linkError = err
+        changed()
+      }
+    }.start()
+  }
+
+  private fun announceKey(): String = CloudConfig.PHONES_PREFIX + store.deviceId + ".json"
+
+  // spectre/moviles/<id>.json: quién es este móvil (lo que enseña el PC) y el
+  // código que leyó (así sabe que fue este, aunque tenga más emparejados).
+  private fun sendAnnounce(s3: S3, config: CloudConfig) {
+    val version = try {
+      app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+    } catch (e: Exception) {
+      ""
+    }
+    val body = JSONObject()
+      .put("v", 1)
+      .put("id", store.deviceId)
+      .put("name", deviceName())
+      .put("app", version)
+      .put("c", config.nonce)
+      .put("pc", config.pcName)
+      .put("t", System.currentTimeMillis())
+      .toString()
+    s3.put(announceKey(), body.toByteArray(Charsets.UTF_8), "application/json")
+    store.announced(config, System.currentTimeMillis())
+  }
+
+  // Sin esperar: al cambiar de nube o desemparejar (sin red, se queda allí).
+  private fun forget(config: CloudConfig) {
+    val key = announceKey()
+    Thread {
+      try {
+        S3(config).delete(key)
+      } catch (e: Exception) {
+      }
+    }.start()
+  }
+
+  // El nombre que el usuario le puso al móvil (Ajustes > Información) o la marca y el modelo.
+  fun deviceName(): String {
+    val named = try {
+      Settings.Global.getString(app.contentResolver, Settings.Global.DEVICE_NAME)
+    } catch (e: Exception) {
+      null
+    }?.trim().orEmpty()
+    if (named.isNotEmpty()) return named.take(60)
+    val maker = Build.MANUFACTURER.orEmpty().trim().replaceFirstChar { it.titlecase() }
+    val model = Build.MODEL.orEmpty().trim()
+    val full = if (model.startsWith(maker, ignoreCase = true) || maker.isEmpty()) model else "$maker $model"
+    return full.ifEmpty { "Android" }.take(60)
   }
 
   // Vuelve a pedir la lista. auto: al abrir la app (descarga sola si está activado).
@@ -113,6 +210,13 @@ object Holder {
       var err: String? = null
       try {
         val s3 = S3(config)
+        // El PC enseña cuándo se vio el móvil: el aviso se repite si pasó más de una hora.
+        if (link == Link.NONE && store.announceDue(config, System.currentTimeMillis())) {
+          try {
+            sendAnnounce(s3, config)
+          } catch (e: Exception) {
+          }
+        }
         val all = s3.list()
         val now = System.currentTimeMillis()
         val firstSeen = store.markSeen(all.map { it.key }, now)

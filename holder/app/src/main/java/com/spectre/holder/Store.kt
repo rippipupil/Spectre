@@ -116,6 +116,31 @@ class Store(context: Context) {
     get() = prefs.getBoolean("askedNotifications", false)
     set(v) = prefs.edit().putBoolean("askedNotifications", v).apply()
 
+  // Este móvil en spectre/moviles/<id>.json: aleatorio, sale una vez y no cambia.
+  val deviceId: String
+    @Synchronized get() {
+      prefs.getString("deviceId", null)?.takeIf { it.length >= 12 }?.let { return it }
+      val digits = "abcdefghijklmnopqrstuvwxyz0123456789"
+      val rnd = java.security.SecureRandom()
+      val id = String(CharArray(16) { digits[rnd.nextInt(digits.length)] })
+      prefs.edit().putString("deviceId", id).apply()
+      return id
+    }
+
+  // El último aviso al PC: a qué nube (con qué código) y cuándo.
+  fun announceDue(config: CloudConfig, now: Long): Boolean =
+    prefs.getString("announcedTo", "") != announceSign(config) || now - prefs.getLong("announcedAt", 0) > ANNOUNCE_EVERY
+
+  fun announced(config: CloudConfig?, now: Long) {
+    if (config == null) {
+      prefs.edit().remove("announcedTo").remove("announcedAt").apply()
+    } else {
+      prefs.edit().putString("announcedTo", announceSign(config)).putLong("announcedAt", now).apply()
+    }
+  }
+
+  private fun announceSign(c: CloudConfig): String = "${c.host}:${c.port}/${c.bucket}/${c.keyId}/${c.nonce}"
+
   fun cloud(): CloudConfig? {
     val sealed = prefs.getString("cloud", null) ?: return null
     val plain = open(sealed) ?: return null
@@ -242,5 +267,6 @@ class Store(context: Context) {
   companion object {
     private const val ALIAS = "spectre-holder-cloud"
     private const val MAX_SAVED = 200
+    private const val ANNOUNCE_EVERY = 3_600_000L // el PC enseña «visto en la última hora» o «hace N h»
   }
 }
