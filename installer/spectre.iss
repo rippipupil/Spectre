@@ -166,9 +166,14 @@ var
   Pid, Code: Integer;
   Filter: String;
 begin
-  if WaitSpectreGone(15000) then Exit;
-  // Solo el proceso que lanzó la actualización, y solo si sigue siendo Spectre.
   Pid := StrToIntDef(ExpandConstant('{param:spectrepid|0}'), 0);
+  if WaitSpectreGone(15000) then Exit;
+  // Una instalación silenciosa que no lanzó Spectre (a mano, un script): el
+  // Spectre abierto se está usando y lo cierra Restart Manager, que le deja
+  // terminar la grabación y salir bien. Lo lanzó Spectre si trae /SPECTREPID
+  // o, desde el actualizador de la 0.1.138 y anteriores, /RELAUNCH=1.
+  if (Pid = 0) and not RelaunchAfterUpdate() then Exit;
+  // Solo el proceso que lanzó la actualización, y solo si sigue siendo Spectre.
   Filter := '/FI "IMAGENAME eq spectre.exe"';
   if Pid > 0 then Filter := Filter + ' /FI "PID eq ' + IntToStr(Pid) + '"';
   Log('Spectre sigue abierto 15 s despues de lanzar la actualizacion: se cierra a la fuerza');

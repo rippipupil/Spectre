@@ -20,10 +20,12 @@ namespace {
 
 // Lo que el instalador apartó como .old porque un Spectre anterior aún lo
 // tenía abierto (installer/spectre.iss, MoveAsideInUseFiles). Si ese proceso
-// sigue vivo no se puede borrar: se reintenta en el próximo arranque.
+// sigue vivo no se puede borrar: se reintenta en el próximo arranque. Solo en
+// la copia instalada: la carpeta de la portable la elige el usuario.
 void RemoveMovedAsideFiles() {
   std::error_code ec;
   const auto dir = spectre::ExecutablePath().parent_path();
+  if (!std::filesystem::exists(dir / L"unins000.exe", ec)) return;
   for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
     const std::wstring name = it->path().filename().wstring();
     auto endsWith = [&name](const wchar_t* suffix) {
@@ -58,13 +60,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     // no existir todavía (se crea nada más arrancar). O la otra ya no tiene
     // ventana y está terminando de cerrarse (tras actualizar, o si el driver
     // de la cámara la retiene): en cuanto suelte el mutex, esta pasa a ser la
-    // instancia. Tras el instalador no se busca ventana: la que haya es la que
-    // se está cerrando.
-    const bool afterInstaller = updated || updateFailed;
+    // instancia. El Spectre que lanza una actualización destruye su ventana
+    // antes: una que aparezca tras el instalador es otro Spectre abierto.
     HWND other = nullptr;
     bool owned = false;
     for (int i = 0; i < 100; ++i) {
-      if (!afterInstaller && (other = FindWindowW(L"SpectreMain", nullptr)) != nullptr) break;
+      if ((other = FindWindowW(L"SpectreMain", nullptr)) != nullptr) break;
       DWORD wait = WaitForSingleObject(mutex, 100);
       if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
         owned = true;
