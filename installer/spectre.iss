@@ -63,6 +63,8 @@ Filename: "{cmd}"; Parameters: "/C taskkill /IM spectre.exe /F"; Flags: runhidde
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\Spectre"
+; Archivos que una actualización apartó porque seguían en uso (ver MoveAsideInUseFiles).
+Type: files; Name: "{app}\*.old"
 
 [Code]
 function IsUpgrade(): Boolean;
@@ -98,25 +100,82 @@ begin
     Log(Format('Spectre termino de cerrarse en %d ms', [Waited]));
 end;
 
+var
+  MovedDir: String;
+  Moved: TArrayOfString; // lo que MoveAsideInUseFiles apartó
+
+// Último recurso si Spectre no termina ni a la fuerza (un hilo atascado
+// dentro del driver de la webcam): Windows deja renombrar un exe o una DLL en
+// uso, aunque no reemplazarlos. Se apartan como .old, el instalador copia los
+// nuevos en su sitio y Spectre borra los .old al abrirse (src/main.cpp).
+procedure MoveAsideInUseFiles();
+var
+  Dir: String;
+  Names: TArrayOfString;
+  FindRec: TFindRec;
+  I: Integer;
+begin
+  if not RegQueryStringValue(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'InstallLocation', Dir) then
+    Exit;
+  Dir := AddBackslash(Dir);
+  SetArrayLength(Names, 1);
+  Names[0] := 'spectre.exe';
+  if FindFirst(Dir + '*.dll', FindRec) then begin
+    try
+      repeat
+        if CompareText(ExtractFileExt(FindRec.Name), '.dll') = 0 then begin
+          SetArrayLength(Names, GetArrayLength(Names) + 1);
+          Names[GetArrayLength(Names) - 1] := FindRec.Name;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  for I := 0 to GetArrayLength(Names) - 1 do
+    if FileExists(Dir + Names[I]) then begin
+      DeleteFile(Dir + Names[I] + '.old');
+      if RenameFile(Dir + Names[I], Dir + Names[I] + '.old') then begin
+        Log('Apartado ' + Names[I] + ' (sigue en uso)');
+        SetArrayLength(Moved, GetArrayLength(Moved) + 1);
+        Moved[GetArrayLength(Moved) - 1] := Names[I];
+      end else
+        Log('No se pudo apartar ' + Names[I]);
+    end;
+  MovedDir := Dir;
+end;
+
+// La instalación no terminó: lo apartado que no tenga ya un archivo nuevo en
+// su sitio vuelve a su nombre, para que la versión anterior se pueda abrir.
+procedure RestoreMovedFiles();
+var
+  I: Integer;
+begin
+  for I := 0 to GetArrayLength(Moved) - 1 do
+    if not FileExists(MovedDir + Moved[I]) then
+      RenameFile(MovedDir + Moved[I] + '.old', MovedDir + Moved[I]);
+end;
+
 // Spectre lanza la actualización mientras termina de cerrarse. Si algo lo
 // retiene (el driver de una webcam que no suelta la cámara), su exe y sus DLL
 // siguen en uso, los archivos no se pueden reemplazar y la instalación se
-// deshace. Se espera a que termine y, si no termina, se cierra a la fuerza: a
-// esas alturas ya lo guardó todo.
+// deshace. Se espera a que termine; si no, se cierra a la fuerza (a esas
+// alturas ya lo guardó todo); y si ni así, se apartan sus archivos.
 procedure WaitForSpectreToExit();
 var
   Pid, Code: Integer;
   Filter: String;
 begin
-  if WaitSpectreGone(20000) then Exit;
+  if WaitSpectreGone(15000) then Exit;
   // Solo el proceso que lanzó la actualización, y solo si sigue siendo Spectre.
   Pid := StrToIntDef(ExpandConstant('{param:spectrepid|0}'), 0);
   Filter := '/FI "IMAGENAME eq spectre.exe"';
   if Pid > 0 then Filter := Filter + ' /FI "PID eq ' + IntToStr(Pid) + '"';
-  Log('Spectre sigue abierto 20 s despues de lanzar la actualizacion: se cierra a la fuerza');
+  Log('Spectre sigue abierto 15 s despues de lanzar la actualizacion: se cierra a la fuerza');
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F ' + Filter, '', SW_HIDE, ewWaitUntilTerminated, Code);
-  if not WaitSpectreGone(30000) then
-    Log('Spectre sigue sin cerrarse: la instalacion puede fallar por archivos en uso');
+  if WaitSpectreGone(10000) then Exit;
+  Log('Spectre sigue sin cerrarse: se apartan sus archivos');
+  MoveAsideInUseFiles();
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -133,6 +192,7 @@ var
   Dir: String;
   Code: Integer;
 begin
+  if not InstallFinished then RestoreMovedFiles();
   if RelaunchAfterUpdate() and not InstallFinished and
      RegQueryStringValue(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'InstallLocation', Dir) and
      FileExists(AddBackslash(Dir) + 'spectre.exe') then

@@ -13,7 +13,31 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
+#include <filesystem>
 #include <string>
+
+namespace {
+
+// Lo que el instalador apartó como .old porque un Spectre anterior aún lo
+// tenía abierto (installer/spectre.iss, MoveAsideInUseFiles). Si ese proceso
+// sigue vivo no se puede borrar: se reintenta en el próximo arranque.
+void RemoveMovedAsideFiles() {
+  std::error_code ec;
+  const auto dir = spectre::ExecutablePath().parent_path();
+  for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    const std::wstring name = it->path().filename().wstring();
+    auto endsWith = [&name](const wchar_t* suffix) {
+      const size_t n = wcslen(suffix);
+      return name.size() > n && _wcsicmp(name.c_str() + name.size() - n, suffix) == 0;
+    };
+    if (!endsWith(L".exe.old") && !endsWith(L".dll.old")) continue;
+    std::error_code removeError;
+    if (std::filesystem::remove(it->path(), removeError))
+      spectre::Log("Borrado %s, que apartó una actualización", spectre::Narrow(name).c_str());
+  }
+}
+
+} // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   using namespace spectre;
@@ -31,14 +55,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
     if (tray) return 0;
     // Recién abierta (doble clic dos veces seguidas), su ventana oculta puede
-    // no existir todavía. O la otra ya no tiene ventana y está terminando de
-    // cerrarse (tras actualizar, o si un driver la retiene): en cuanto suelte
-    // el mutex, esta pasa a ser la instancia. Tras el instalador se espera
-    // más y no se busca ventana: la que haya es la que se está cerrando.
+    // no existir todavía (se crea nada más arrancar). O la otra ya no tiene
+    // ventana y está terminando de cerrarse (tras actualizar, o si el driver
+    // de la cámara la retiene): en cuanto suelte el mutex, esta pasa a ser la
+    // instancia. Tras el instalador no se busca ventana: la que haya es la que
+    // se está cerrando.
     const bool afterInstaller = updated || updateFailed;
     HWND other = nullptr;
     bool owned = false;
-    for (int i = 0; i < (afterInstaller ? 300 : 100); ++i) {
+    for (int i = 0; i < 100; ++i) {
       if (!afterInstaller && (other = FindWindowW(L"SpectreMain", nullptr)) != nullptr) break;
       DWORD wait = WaitForSingleObject(mutex, 100);
       if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
@@ -46,17 +71,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
         break;
       }
     }
-    if (!owned) {
-      if (other) {
-        // Le cedemos el primer plano: si no, Windows no deja que su ventana se ponga delante.
-        DWORD pid = 0;
-        GetWindowThreadProcessId(other, &pid);
-        AllowSetForegroundWindow(pid);
-        PostMessageW(other, WM_SPECTRE_SHOW_APP, 0, 0);
-      }
+    if (other) {
+      // Le cedemos el primer plano: si no, Windows no deja que su ventana se ponga delante.
+      DWORD pid = 0;
+      GetWindowThreadProcessId(other, &pid);
+      AllowSetForegroundWindow(pid);
+      PostMessageW(other, WM_SPECTRE_SHOW_APP, 0, 0);
       return 0;
     }
+    // 10 s sin ventana: lo que queda es un proceso que no termina de salir
+    // (ya no graba, ni tiene atajos ni bandeja). Spectre se abre igualmente.
+    if (!owned) Log("Otro Spectre sigue sin terminar de cerrarse: se abre igualmente");
   }
+  RemoveMovedAsideFiles();
 
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   winrt::init_apartment(winrt::apartment_type::single_threaded);
