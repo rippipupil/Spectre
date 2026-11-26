@@ -111,6 +111,7 @@ struct SettingsActions {
   std::function<void()> showPhoneCode;
   std::function<void()> copyPhoneCode;
   std::function<void(const std::string&)> copyText;
+  std::function<void(const std::string&)> forgetPhone; // por su id: fuera de la lista de móviles
 };
 
 // Dibuja el contenido de la página (sin título ni pie: los pone la ventana).

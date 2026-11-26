@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1915,6 +1916,64 @@ bool DrawQr(int slot, const std::string& text, float size) {
   return true;
 }
 
+// Cuándo dejó el móvil su aviso por última vez: Spectre Holder lo repite al
+// abrirse si pasó más de una hora.
+std::string PhoneSeenText(int64_t ms) {
+  if (ms <= 0) return "Emparejado";
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+  const int64_t mins = std::max<int64_t>(0, (now - ms) / 60000);
+  if (mins < 60) return "Visto en la última hora";
+  if (mins < 48 * 60) return "Visto hace " + std::to_string(mins / 60) + " h";
+  return "Visto hace " + std::to_string(mins / 1440) + " días";
+}
+
+// Los móviles con Spectre Holder que leen esta nube (sus avisos en spectre/moviles/).
+void PhoneList(const SettingsModel& m, const SettingsActions& a) {
+  const Palette& p = Colors();
+  const CloudStatus& st = m.cloud;
+  if (!st.phonesListed) {
+    if (st.phonesChecking) {
+      Gap(6);
+      UpdateStatusLine(p.textMuted, true, "Mirando qué móviles están emparejados…");
+    } else if (!st.phonesError.empty()) {
+      Gap(6);
+      ErrorText(("No se pudo ver qué móviles están emparejados: " + st.phonesError).c_str());
+    }
+    return;
+  }
+  Gap(10);
+  FieldLabel(st.phones.empty() ? "Móviles emparejados: ninguno todavía" : "Móviles emparejados");
+  const float rowW = std::min(ImGui::GetContentRegionAvail().x, Px(620));
+  const float btnW = Px(90);
+  for (const auto& d : st.phones) {
+    ImGui::PushID(d.id.c_str());
+    const ImVec2 q = ImGui::GetCursorScreenPos();
+    const float rowH = Px(30);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    Text(dl, ImGui::GetFont(), Px(kSmall), ImVec2(q.x, q.y + Px(2)), C(p.text),
+         Ellipsize(ImGui::GetFont(), Px(kSmall), d.name, rowW - btnW - Px(12)).c_str());
+    std::string sub = PhoneSeenText(d.seenMs);
+    if (!d.app.empty()) sub += "  ·  Spectre Holder " + d.app;
+    Text(dl, ImGui::GetFont(), Px(kHint), ImVec2(q.x, q.y + Px(kSmall) + Px(5)), C(p.textFaint),
+         Ellipsize(ImGui::GetFont(), Px(kHint), sub, rowW - btnW - Px(12)).c_str());
+    ImGui::SetCursorScreenPos(ImVec2(q.x + rowW - btnW, q.y + (rowH - Px(26)) * 0.5f + Px(2)));
+    if (GhostButton("forget", "Quitar", btnW, Tone::Normal, 26) && a.forgetPhone) a.forgetPhone(d.id);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Lo quita de esta lista (vuelve a salir si ese móvil abre Spectre Holder). Sigue teniendo "
+                        "las claves: para que deje de leer tu nube, cámbialas en Ajustes > Nube.");
+    dl->AddRectFilled(ImVec2(q.x, q.y + rowH + Px(4)), ImVec2(q.x + rowW, q.y + rowH + Px(4) + Px(1)), C(p.line));
+    ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + rowH + Px(8)));
+    ImGui::Dummy(ImVec2(rowW, 0));
+    ImGui::PopID();
+  }
+  if (!st.phonesError.empty()) {
+    Gap(2);
+    ErrorText(("No se pudo volver a mirar: " + st.phonesError).c_str());
+  }
+}
+
 // Ajustes > Móvil: Spectre Holder, la app para Android. Instalarla (QR de la
 // release), emparejarla (QR con la nube y las claves) y lo que se le manda.
 void PagePhone(SettingsModel& m, const SettingsActions& a) {
@@ -1960,8 +2019,14 @@ void PagePhone(SettingsModel& m, const SettingsActions& a) {
     Gap(4);
     if (SolidButton("phone-cloud", "Configurar la nube", Px(190), 30)) m.jump = SettingsPage::Cloud;
   } else if (!m.phoneShown) {
-    Help("2. Abre Spectre Holder, pulsa «Escanear el código» y apunta a este QR. Lleva la dirección de tu nube y "
-         "sus claves: enséñalo solo a tu móvil.");
+    if (!st.pairedName.empty()) {
+      UpdateStatusLine(p.accent, false, "Emparejado con " + st.pairedName, true);
+      Help("Ya puedes mandarle clips: en la biblioteca, clic derecho > «Enviar al móvil», o en el panel (Alt+Z) > "
+           "«Enviar al móvil». Salen en Spectre Holder al abrirla.");
+      Gap(8);
+    }
+    Help("2. Abre Spectre Holder en el móvil, pulsa «Escanear el código» y apunta a este QR. Se lee desde la app: "
+         "la cámara del móvil no sabe abrirlo. Lleva la dirección de tu nube y sus claves: enséñalo solo a tu móvil.");
     Gap(4);
     if (SolidButton("phone-show", "Enseñar el código", Px(190), 30) && a.showPhoneCode) a.showPhoneCode();
     ImGui::SameLine(0, Px(6));
@@ -1973,13 +2038,19 @@ void PagePhone(SettingsModel& m, const SettingsActions& a) {
                               : "Para pegarlo en la app con «Pegar el código». Lleva tus claves: no lo mandes "
                                 "por un chat que vea otra gente");
   } else {
-    Help("Escanéalo con Spectre Holder («Escanear el código»). Lleva las claves de tu nube: desde ahora y hasta "
-         "que cierres esta ventana, no sale en los clips, las grabaciones ni las capturas. Ocúltalo al terminar.");
+    Help("Escanéalo desde Spectre Holder («Escanear el código»), no con la cámara del móvil. Lleva las claves de "
+         "tu nube: desde ahora y hasta que cierres esta ventana, no sale en los clips, las grabaciones ni las "
+         "capturas.");
     Gap(6);
     if (!DrawQr(1, m.phoneCode, Px(300))) ErrorText("No se pudo hacer el código: la dirección de la nube es demasiado larga.");
     Gap(6);
+    if (st.pairWaiting) {
+      UpdateStatusLine(p.textMuted, true, "Esperando a que el móvil lo lea: entonces se cierra solo.");
+      Gap(4);
+    }
     if (SolidButton("phone-hide", "Ocultar", Px(120), 30)) ForgetPhoneCode(m);
   }
+  if (st.configured) PhoneList(m, a);
   if (st.configured)
     Help("Si cambias de nube o de claves, vuelve a emparejar el móvil (en la app: Ajustes > «Emparejar con otro código»).");
 

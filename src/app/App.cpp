@@ -583,6 +583,7 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     s.phoneCode = PhonePairingCode();
     s.phoneShown = !s.phoneCode.empty();
     if (!s.phoneShown) Toast("Primero guarda tu nube y sus claves en Ajustes > Nube", true);
+    else cloud_.WatchPairing(10 * 60 * 1000); // hasta que el móvil lo lea: entonces el QR se cierra solo
   };
   settings.copyPhoneCode = [this] {
     Defer([this] {
@@ -597,12 +598,15 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
       }
       const bool ok = CopyTextToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, code, true);
       SecureZeroMemory(code.data(), code.size());
-      if (ok)
+      if (ok) {
         Toast("Código copiado. En Spectre Holder pulsa «Pegar el código». Lleva tus claves: bórralo de donde lo pegues");
-      else
+        cloud_.WatchPairing(10 * 60 * 1000);
+      } else {
         Toast("No se pudo copiar al portapapeles", true);
+      }
     });
   };
+  settings.forgetPhone = [this](const std::string& id) { cloud_.ForgetPhone(id); };
   settings.copyText = [this](const std::string& text) {
     Defer([this, text] {
       if (CopyTextToClipboard(appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_, text))
@@ -2429,6 +2433,9 @@ void App::CloseApp() {
   CancelHotkeyCapture(appModel_.settings, appActions_.settings);
   ForgetPhoneCode(appModel_.settings); // el QR de emparejar lleva las claves
   phoneCodeHidden_ = false;
+  phonePageOpen_ = false; // al volver a abrirla en Ajustes > Móvil se mira otra vez quién está emparejado
+  if (phoneCodeShown_) cloud_.WatchPairing(60 * 1000);
+  phoneCodeShown_ = false;
   appUi_.OnClosed();
   appWindow_.Close();
   // Cerrada no se queda con nada: ni la lista de la biblioteca ni los dispositivos.
@@ -2734,7 +2741,7 @@ void App::SendToPhone(const std::vector<std::string>& paths) {
     Notify({NoticeKind::Working, "Enviando al móvil", what + ". Ábrelo en Spectre Holder cuando acabe de subir"});
 }
 
-std::string App::PhonePairingCode() const {
+std::string App::PhonePairingCode() {
   wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
   DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
   std::string pc = GetComputerNameW(name, &size) ? Narrow(name) : std::string("PC");
@@ -2845,6 +2852,12 @@ void App::OnCloudChanged() {
   bool removed = false;
   const HWND owner = appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_;
   for (const CloudEvent& ev : cloud_.TakeEvents()) {
+    if (ev.paired) {
+      // Un móvil leyó el código: el QR (con las claves) ya no hace falta.
+      if (appModel_.settings.phoneShown) ForgetPhoneCode(appModel_.settings);
+      Toast("Móvil emparejado: " + ev.name + ". Ya puedes mandarle clips con «Enviar al móvil»");
+      continue;
+    }
     if (ev.deleted) {
       library_->Forget({ev.path});
       removed = true;
@@ -2880,9 +2893,17 @@ void App::OnCloudChanged() {
 
 void App::GuardPhoneCode() {
   SettingsModel& s = appModel_.settings;
+  const bool onPage = appWindow_.Visible() && appModel_.page == AppPage::Settings &&
+                      appModel_.settingsPage == SettingsPage::Phone;
   // Solo en su página: al irse a la biblioteca u otra parte se olvida.
-  if (s.phoneShown && !(appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Phone))
-    ForgetPhoneCode(s);
+  if (s.phoneShown && !onPage) ForgetPhoneCode(s);
+  // Al abrir la página, quién está emparejado (una lista del bucket).
+  if (onPage && !phonePageOpen_) cloud_.CheckPhones();
+  phonePageOpen_ = onPage;
+  // Oculto sin que ningún móvil lo leyera: se mira un minuto más (quizá lo
+  // leyó justo antes) y se deja de preguntar al bucket.
+  if (phoneCodeShown_ && !s.phoneShown) cloud_.WatchPairing(60 * 1000);
+  phoneCodeShown_ = s.phoneShown;
   const HWND hwnd = appWindow_.Visible() ? appWindow_.Hwnd() : nullptr;
   // Una vez fuera de la captura, la ventana sigue así hasta cerrarla: el
   // último frame con el QR se compone después de presentarlo, y quitarlo al

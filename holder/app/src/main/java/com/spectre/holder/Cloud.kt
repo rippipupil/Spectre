@@ -23,6 +23,10 @@ import javax.crypto.spec.SecretKeySpec
 // spectre/movil/<id>-<código>/<nombre del archivo> y esta app lo lista, lo
 // descarga y lo borra. Las peticiones van firmadas (AWS Signature V4) con las
 // claves que trae el código del PC: sin servidores intermedios.
+//
+// Al emparejarse, el móvil deja spectre/moviles/<id>.json (su nombre y el
+// código "c" del QR que leyó): así el PC sabe que está conectado, cierra el
+// QR y lo enseña en Ajustes > Móvil. Se vuelve a dejar de vez en cuando.
 
 data class CloudConfig(
   val host: String,
@@ -33,13 +37,18 @@ data class CloudConfig(
   val secret: String,
   val prefix: String,
   val pcName: String,
+  val nonce: String = "", // el del QR que se leyó: el PC lo busca para saber que fue este móvil
 ) {
   fun toJson(): JSONObject = JSONObject()
     .put("h", host).put("p", port).put("r", region).put("b", bucket)
-    .put("k", keyId).put("s", secret).put("x", prefix).put("n", pcName)
+    .put("k", keyId).put("s", secret).put("x", prefix).put("n", pcName).put("c", nonce)
+
+  // El mismo bucket (aunque con otras claves): el aviso de este móvil es el mismo archivo.
+  fun sameBucket(o: CloudConfig?): Boolean = o != null && o.host == host && o.port == port && o.bucket == bucket
 
   companion object {
     const val CODE_PREFIX = "spectre-holder:"
+    const val PHONES_PREFIX = "spectre/moviles/" // un <id>.json por móvil emparejado
 
     fun fromJson(j: JSONObject): CloudConfig? {
       val c = CloudConfig(
@@ -51,11 +60,13 @@ data class CloudConfig(
         secret = j.optString("s").trim(),
         prefix = j.optString("x").ifEmpty { "spectre/movil/" },
         pcName = j.optString("n").trim(),
+        nonce = j.optString("c").trim().take(64),
       )
       val hostOk = c.host.isNotEmpty() && c.host.none { it == '/' || it == '@' || it == '?' || it == '#' || it == ' ' }
       if (!hostOk || c.port !in 1..65535 || c.bucket.isEmpty() || c.keyId.isEmpty() || c.secret.isEmpty()) return null
-      // Solo lo de Spectre para el móvil: la app nunca toca el resto del bucket.
-      if (!c.prefix.startsWith("spectre/") || !c.prefix.endsWith("/")) return null
+      // Solo lo de Spectre para el móvil: la app nunca toca el resto del bucket
+      // (ni lo subido con enlace ni los avisos de spectre/moviles/).
+      if (!c.prefix.startsWith("spectre/movil/") || !c.prefix.endsWith("/")) return null
       return c
     }
 
@@ -94,13 +105,15 @@ class S3(private val c: CloudConfig) {
     return hmac(k, "aws4_request")
   }
 
-  // Petición firmada, todavía sin conectar. Sin cuerpo: solo GET, HEAD y DELETE.
+  // Petición firmada, todavía sin conectar. payloadHash: el SHA-256 del cuerpo
+  // (sin cuerpo, el de nada: GET, HEAD y DELETE).
   fun request(
     method: String,
     key: String,
     query: List<Pair<String, String>> = emptyList(),
     headers: Map<String, String> = emptyMap(),
     timeoutMs: Int = 20000,
+    payloadHash: String = EMPTY_SHA256,
   ): HttpURLConnection {
     val now = Instant.now()
     val amzDate = AMZ_DATE.format(now)
@@ -109,8 +122,8 @@ class S3(private val c: CloudConfig) {
     val q = canonicalQuery(query)
     val scope = "$day/${c.region}/s3/aws4_request"
     val signedNames = "host;x-amz-content-sha256;x-amz-date"
-    val canonical = "$method\n$path\n$q\nhost:$hostHeader\nx-amz-content-sha256:$EMPTY_SHA256\n" +
-      "x-amz-date:$amzDate\n\n$signedNames\n$EMPTY_SHA256"
+    val canonical = "$method\n$path\n$q\nhost:$hostHeader\nx-amz-content-sha256:$payloadHash\n" +
+      "x-amz-date:$amzDate\n\n$signedNames\n$payloadHash"
     val toSign = "AWS4-HMAC-SHA256\n$amzDate\n$scope\n" + hex(sha256(canonical.toByteArray(Charsets.UTF_8)))
     val signature = hex(hmac(signingKey(day), toSign))
     val url = URL("https://$hostHeader$path" + if (q.isEmpty()) "" else "?$q")
@@ -123,7 +136,7 @@ class S3(private val c: CloudConfig) {
     // Sin gzip: los tamaños y los rangos tienen que ser los del archivo.
     conn.setRequestProperty("Accept-Encoding", "identity")
     conn.setRequestProperty("x-amz-date", amzDate)
-    conn.setRequestProperty("x-amz-content-sha256", EMPTY_SHA256)
+    conn.setRequestProperty("x-amz-content-sha256", payloadHash)
     conn.setRequestProperty(
       "Authorization",
       "AWS4-HMAC-SHA256 Credential=${c.keyId}/$scope, SignedHeaders=$signedNames, Signature=$signature",
@@ -169,6 +182,20 @@ class S3(private val c: CloudConfig) {
 
   fun delete(key: String) {
     call(request("DELETE", key))
+  }
+
+  // Un archivo pequeño de una vez (el aviso de spectre/moviles/).
+  fun put(key: String, body: ByteArray, contentType: String) {
+    val conn = request("PUT", key, headers = mapOf("Content-Type" to contentType), payloadHash = hex(sha256(body)))
+    conn.doOutput = true
+    conn.setFixedLengthStreamingMode(body.size)
+    try {
+      conn.outputStream.use { it.write(body) }
+    } catch (e: IOException) {
+      conn.disconnect()
+      throw offline(e)
+    }
+    call(conn)
   }
 
   // Abre la descarga desde `offset`. Devuelve la conexión ya respondida (200 o 206).

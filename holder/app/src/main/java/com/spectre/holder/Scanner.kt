@@ -28,6 +28,7 @@ import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.ReaderException
+import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import java.util.concurrent.Executor
@@ -52,6 +53,7 @@ class Scanner(context: Context, private val ui: Ui, private val onText: (String)
   @Volatile private var done = false
   private var running = false
   private var luma = ByteArray(0)
+  private var frames = 0
 
   init {
     setBackgroundColor(C.BG)
@@ -215,9 +217,19 @@ class Scanner(context: Context, private val ui: Ui, private val onText: (String)
         buf.get(luma, y * w, minOf(w, buf.remaining()))
       }
     }
-    val source = PlanarYUVLuminanceSource(luma, w, hgt, 0, 0, w, hgt, false)
+    // Cada imagen prueba una forma distinta: el centro (donde está el marco,
+    // con los módulos más grandes para ZXing), la imagen entera y el centro
+    // con otro umbral (un monitor con reflejos o brillo desigual).
+    val attempt = frames++ % 3
+    val side = minOf(w, hgt)
+    val source = if (attempt == 1) {
+      PlanarYUVLuminanceSource(luma, w, hgt, 0, 0, w, hgt, false)
+    } else {
+      PlanarYUVLuminanceSource(luma, w, hgt, (w - side) / 2, (hgt - side) / 2, side, side, false)
+    }
+    val binarizer = if (attempt == 2) GlobalHistogramBinarizer(source) else HybridBinarizer(source)
     val text = try {
-      qr.decode(BinaryBitmap(HybridBinarizer(source)), hints).text
+      qr.decode(BinaryBitmap(binarizer), hints).text
     } catch (e: ReaderException) {
       null
     } catch (e: Exception) {

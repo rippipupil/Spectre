@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -45,6 +46,8 @@ constexpr char kKeyPrefix[] = "spectre/";
 constexpr char kExportPrefix[] = "spectre-nube:";
 constexpr char kPhonePrefix[] = "spectre/movil/";  // lo que espera al móvil (Spectre Holder)
 constexpr char kPairPrefix[] = "spectre-holder:";  // el código del QR de Ajustes > Móvil
+constexpr char kPhonesPrefix[] = "spectre/moviles/"; // cada Spectre Holder emparejado deja aquí <id>.json
+constexpr DWORD kPairPollMs = 3000;                  // con el código a la vista: cada cuánto mirar si un móvil lo leyó
 constexpr char kEntropy[] = "Spectre: claves de la nube";
 
 // ------------------------------------------------------------------ cifrado
@@ -861,6 +864,37 @@ struct CloudUploader::Shared {
   unsigned testGen = 0;
   uint64_t wake = 0;     // sube al cambiar algo que corta las esperas del hilo (reintentar, ajustes nuevos)
   std::mutex saveMutex;  // cloud.json lo escriben el hilo de subida y el de la interfaz
+  // Spectre Holder: los avisos de spectre/moviles/ (PhoneWatcher, un hilo como mucho).
+  struct PhoneMarker {
+    std::string etag;
+    PhoneDevice device;
+    std::string nonce; // el del código que leyó
+  };
+  std::vector<PhoneDevice> phones;
+  std::unordered_map<std::string, PhoneMarker> phoneMarkers; // clave del aviso -> lo que dice
+  bool phonesListed = false;
+  bool phonesChecking = false;
+  bool phonesThread = false;
+  bool phonesAgain = false; // otra lista en cuanto acabe la que va
+  std::string phonesError;
+  std::vector<std::string> phoneForget; // avisos que borrar del bucket
+  unsigned phoneGen = 0;    // sube al cambiar de bucket: una lista de antes ya no vale
+  std::string pairNonce;    // el del último código enseñado o copiado (vacío: ya lo leyó un móvil)
+  std::string pairedName;   // el móvil que lo leyó
+  ULONGLONG watchUntil = 0; // hasta cuándo mirar cada pocos segundos si un móvil leyó el código
+
+  // Otro bucket u otra persona (modo cibercafé): nada de la lista de antes.
+  void ResetPhones() {
+    phones.clear();
+    phoneMarkers.clear();
+    phonesListed = false;
+    phonesError.clear();
+    phoneForget.clear();
+    ++phoneGen;
+    pairNonce.clear();
+    pairedName.clear();
+    watchUntil = 0;
+  }
 
   // Con el mutex cogido. progress: solo cambió el porcentaje (como mucho 4 avisos por segundo).
   void Changed(bool progress = false) {
@@ -1702,6 +1736,208 @@ void RunTest(std::shared_ptr<Shared> sh, unsigned gen, CloudConfig config, Cloud
                "). Si las claves solo pueden escribir, pon la dirección pública del bucket." + tail);
 }
 
+// ------------------------------------------------------- móviles emparejados
+
+// "2026-11-26T20:15:39.000Z" (LastModified de S3) en ms desde 1970; 0 si no se entiende.
+int64_t ParseS3Time(const std::string& text) {
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+  if (sscanf_s(text.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &sec) != 6) return 0;
+  std::tm tm{};
+  tm.tm_year = y - 1900;
+  tm.tm_mon = mo - 1;
+  tm.tm_mday = d;
+  tm.tm_hour = h;
+  tm.tm_min = mi;
+  tm.tm_sec = sec;
+  const time_t t = _mkgmtime(&tm);
+  return t < 0 ? 0 : int64_t(t) * 1000;
+}
+
+// Lo que escribió el móvil, para enseñarlo: sin caracteres de control y con
+// `max` bytes como mucho (sin partir una letra en UTF-8).
+std::string CleanText(std::string s, size_t max) {
+  for (char& c : s)
+    if ((unsigned char)c < 32 || c == 127) c = ' ';
+  if (s.size() > max) {
+    s.resize(max);
+    size_t start = s.size();
+    while (start > 0 && ((unsigned char)s[start - 1] & 0xC0) == 0x80) --start;
+    if (start > 0) {
+      const unsigned char lead = (unsigned char)s[start - 1];
+      const size_t len = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+      if (start - 1 + len > s.size()) s.resize(start - 1);
+    }
+  }
+  return Trim(s);
+}
+
+struct Listed {
+  std::string key, etag;
+  int64_t modified = 0;
+};
+
+// Una página de ListObjectsV2 (1000 objetos: para los avisos de los móviles sobra).
+std::vector<Listed> ParseListing(const std::string& xml) {
+  std::vector<Listed> out;
+  for (size_t at = xml.find("<Contents>"); at != std::string::npos; at = xml.find("<Contents>", at)) {
+    const size_t end = xml.find("</Contents>", at);
+    if (end == std::string::npos) break;
+    const std::string item = xml.substr(at, end - at);
+    Listed o{XmlTag(item, "Key"), XmlTag(item, "ETag"), ParseS3Time(XmlTag(item, "LastModified"))};
+    if (!o.key.empty()) out.push_back(std::move(o));
+    at = end;
+  }
+  return out;
+}
+
+// spectre/moviles/<id>.json: {"id", "name", "app", "c" (el código que leyó)...}.
+bool ReadPhoneMarker(Http& http, const Target& t, const std::string& key, Shared::PhoneMarker* m) {
+  const std::string uri = ObjectUri(t, key);
+  HttpResponse r;
+  http.Request(t.host, t.port, L"GET", uri, SignedHeaders(t, "GET", uri, "", Hex(Sha256("", 0))), nullptr, 0,
+               nullptr, &r);
+  if (r.netError != 0 || r.status != 200 || r.body.size() > 16 * 1024) return false;
+  try {
+    const nlohmann::json j = nlohmann::json::parse(r.body);
+    if (!j.is_object()) return false;
+    auto text = [&](const char* name, size_t max) {
+      const auto it = j.find(name);
+      return it != j.end() && it->is_string() ? CleanText(it->get<std::string>(), max) : std::string();
+    };
+    m->device.name = text("name", 60);
+    m->device.app = text("app", 20);
+    m->nonce = text("c", 64);
+  } catch (const std::exception&) {
+    return false;
+  }
+  // El id es el del nombre del aviso: con él se borra.
+  m->device.id = key.substr(strlen(kPhonesPrefix), key.size() - strlen(kPhonesPrefix) - 5);
+  if (m->device.name.empty()) m->device.name = "Móvil sin nombre";
+  return true;
+}
+
+// Lee spectre/moviles/ (y los avisos nuevos o cambiados). Mientras el código
+// de emparejar está a la vista (watchUntil), repite cada 3 s hasta que un
+// móvil deja el suyo. Borra antes los avisos de «Quitar».
+void PhoneWatcher(std::shared_ptr<Shared> sh) {
+  InstallThreadCrashHandler();
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  Http http;
+  std::unique_lock lock(sh->mutex);
+  for (;;) {
+    if (sh->stop || !sh->HaveTarget()) break;
+    const unsigned gen = sh->phoneGen;
+    const CloudConfig config = sh->config;
+    CloudKeys keys = sh->keys;
+    const auto known = sh->phoneMarkers;
+    const std::vector<std::string> forget = std::exchange(sh->phoneForget, {});
+    sh->phonesAgain = false;
+    sh->phonesChecking = true;
+    sh->Changed();
+    lock.unlock();
+
+    std::string error;
+    bool listed = false;
+    std::unordered_map<std::string, Shared::PhoneMarker> markers;
+    Target t;
+    if (MakeTarget(config, keys, &t, &error)) {
+      for (const auto& key : forget) {
+        const std::string uri = ObjectUri(t, key);
+        HttpResponse r;
+        http.Request(t.host, t.port, L"DELETE", uri, SignedHeaders(t, "DELETE", uri, "", Hex(Sha256("", 0))), nullptr,
+                     0, nullptr, &r);
+        if (r.netError != 0 || r.status >= 300) Log("Móvil: no se pudo borrar %s (%lu, HTTP %lu)", key.c_str(), r.netError, r.status);
+      }
+      const std::string uri = ObjectUri(t, "");
+      const std::string query = CanonicalQuery({{"list-type", "2"}, {"prefix", kPhonesPrefix}});
+      HttpResponse r;
+      http.Request(t.host, t.port, L"GET", uri + "?" + query, SignedHeaders(t, "GET", uri, query, Hex(Sha256("", 0))),
+                   nullptr, 0, nullptr, &r);
+      if (Classify(r, t, &error) == Outcome::Done) {
+        listed = true;
+        const size_t prefix = strlen(kPhonesPrefix);
+        for (const auto& o : ParseListing(r.body)) {
+          if (o.key.size() <= prefix + 5 || !EndsWith(o.key, ".json") || o.key.find('/', prefix) != std::string::npos)
+            continue;
+          if (std::find(forget.begin(), forget.end(), o.key) != forget.end()) continue;
+          Shared::PhoneMarker m;
+          const auto it = known.find(o.key);
+          if (it != known.end() && !o.etag.empty() && it->second.etag == o.etag)
+            m = it->second;
+          else if (!ReadPhoneMarker(http, t, o.key, &m))
+            continue;
+          m.etag = o.etag;
+          m.device.seenMs = o.modified;
+          markers.emplace(o.key, std::move(m));
+          if (markers.size() >= 50) break;
+        }
+      } else if (r.netError == 0 && r.status == 403) {
+        error = "Las claves no dejan ver lo que hay en el bucket, así que Spectre no sabe qué móviles están "
+                "emparejados. Spectre Holder también lo necesita: dales permiso de lectura y escritura.";
+      }
+    }
+    Wipe(keys.secret);
+    Wipe(t.keys.secret);
+
+    lock.lock();
+    sh->phonesChecking = false;
+    if (sh->phoneGen == gen) {
+      if (listed) {
+        // Los que se pidió quitar mientras se leía la lista no vuelven a salir.
+        for (const auto& key : sh->phoneForget) markers.erase(key);
+        sh->phoneMarkers = std::move(markers);
+        sh->phones.clear();
+        for (const auto& [key, m] : sh->phoneMarkers) sh->phones.push_back(m.device);
+        std::sort(sh->phones.begin(), sh->phones.end(),
+                  [](const PhoneDevice& a, const PhoneDevice& b) { return a.seenMs > b.seenMs; });
+        sh->phonesListed = true;
+        sh->phonesError.clear();
+        if (!sh->pairNonce.empty()) {
+          for (const auto& [key, m] : sh->phoneMarkers) {
+            if (m.nonce != sh->pairNonce) continue;
+            Log("Móvil: %s leyó el código de emparejar", m.device.name.c_str());
+            sh->pairedName = m.device.name;
+            CloudEvent ev;
+            ev.name = m.device.name;
+            ev.ok = true;
+            ev.phone = true;
+            ev.paired = true;
+            sh->events.push_back(std::move(ev)); // el aviso sale ya, aunque la ventana esté cerrada
+            sh->pairNonce.clear();
+            sh->watchUntil = 0;
+            break;
+          }
+        }
+      } else {
+        sh->phonesError = error;
+      }
+    }
+    sh->Changed();
+    if (sh->stop) break;
+    if (sh->phonesAgain || !sh->phoneForget.empty()) continue;
+    const ULONGLONG now = GetTickCount64();
+    if (now >= sh->watchUntil) break;
+    sh->cv.wait_for(lock, std::chrono::milliseconds(std::min<ULONGLONG>(kPairPollMs, sh->watchUntil - now)),
+                    [&] { return sh->stop || sh->phonesAgain || !sh->phoneForget.empty(); });
+    if (sh->stop) break;
+    if (!sh->phonesAgain && sh->phoneForget.empty() && GetTickCount64() >= sh->watchUntil) break;
+  }
+  sh->phonesThread = false;
+  sh->phonesChecking = false;
+  sh->Changed();
+}
+
+// Con el mutex cogido. Si ya hay un hilo, que lea otra vez en cuanto pueda.
+void StartPhoneWatcher(const std::shared_ptr<Shared>& sh) {
+  if (sh->phonesThread) {
+    sh->phonesAgain = true;
+    sh->cv.notify_all();
+    return;
+  }
+  sh->phonesThread = true;
+  std::thread([sh] { PhoneWatcher(sh); }).detach();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- CloudUploader
@@ -1777,6 +2013,8 @@ std::vector<std::string> CloudUploader::RemoveUploaded(bool atExit, bool cyberEn
 void CloudUploader::Configure(const CloudConfig& config) {
   {
     std::lock_guard lock(shared_->mutex);
+    const CloudConfig& old = shared_->config;
+    if (Trim(old.endpoint) != Trim(config.endpoint) || CloudBucket(old) != CloudBucket(config)) shared_->ResetPhones();
     shared_->config = config;
     shared_->SortOtherClouds();
     ++shared_->wake;
@@ -1880,6 +2118,7 @@ void CloudUploader::EndCyberSession() {
     Wipe(sh.keys.secret);
     sh.keys = {};
     sh.keysStored = false;
+    sh.ResetPhones(); // los móviles del cliente que se va
     sh.CyberCleanup();
     sh.Disown();
     ++sh.wake;
@@ -2055,14 +2294,20 @@ void CloudUploader::SendToPhone(const std::string& path, CloudDelete removal, bo
   Kick();
 }
 
-std::string CloudUploader::PhonePairingCode(const std::string& pcName) const {
+std::string CloudUploader::PhonePairingCode(const std::string& pcName) {
   CloudConfig config;
   CloudKeys keys;
+  const std::string nonce = RandomCode(12);
+  if (nonce.empty()) return {};
   {
     std::lock_guard lock(shared_->mutex);
     if (!shared_->HaveTarget()) return {};
     config = shared_->config;
     keys = shared_->keys;
+    // El móvil que lo lea lo deja en su aviso: así se sabe que fue él.
+    shared_->pairNonce = nonce;
+    shared_->pairedName.clear();
+    shared_->Changed();
   }
   Endpoint ep;
   if (!ParseEndpoint(config.endpoint, &ep, nullptr)) {
@@ -2078,7 +2323,8 @@ std::string CloudUploader::PhonePairingCode(const std::string& pcName) const {
                       {"k", keys.keyId},
                       {"s", keys.secret},
                       {"x", kPhonePrefix},
-                      {"n", pcName}};
+                      {"n", pcName},
+                      {"c", nonce}};
   Wipe(keys.secret);
   std::string plain = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
   std::string code = Base64(plain);
@@ -2087,6 +2333,39 @@ std::string CloudUploader::PhonePairingCode(const std::string& pcName) const {
   for (char& c : code) c = c == '+' ? '-' : c == '/' ? '_' : c;
   while (!code.empty() && code.back() == '=') code.pop_back();
   return std::string(kPairPrefix) + code;
+}
+
+void CloudUploader::CheckPhones() {
+  std::lock_guard lock(shared_->mutex);
+  if (shared_->stop || !shared_->HaveTarget()) return;
+  StartPhoneWatcher(shared_);
+}
+
+void CloudUploader::WatchPairing(DWORD ms) {
+  std::lock_guard lock(shared_->mutex);
+  Shared& sh = *shared_;
+  if (sh.stop || !sh.HaveTarget() || sh.pairNonce.empty()) return;
+  sh.watchUntil = GetTickCount64() + ms;
+  sh.Changed();
+  StartPhoneWatcher(shared_);
+}
+
+void CloudUploader::ForgetPhone(const std::string& id) {
+  std::lock_guard lock(shared_->mutex);
+  Shared& sh = *shared_;
+  std::string key;
+  for (auto it = sh.phoneMarkers.begin(); it != sh.phoneMarkers.end(); ++it) {
+    if (it->second.device.id != id) continue;
+    key = it->first;
+    sh.phoneMarkers.erase(it);
+    break;
+  }
+  if (key.empty()) return;
+  sh.phones.erase(std::remove_if(sh.phones.begin(), sh.phones.end(), [&](const PhoneDevice& d) { return d.id == id; }),
+                  sh.phones.end());
+  sh.phoneForget.push_back(key);
+  sh.Changed();
+  if (!sh.stop && sh.HaveTarget()) StartPhoneWatcher(shared_);
 }
 
 namespace {
@@ -2356,6 +2635,12 @@ CloudStatus CloudUploader::Status() const {
       }
     }
   }
+  s.phones = sh.phones;
+  s.phonesListed = sh.phonesListed;
+  s.phonesChecking = sh.phonesChecking;
+  s.phonesError = sh.phonesError;
+  s.pairWaiting = !sh.pairNonce.empty() && sh.watchUntil > GetTickCount64();
+  s.pairedName = sh.pairedName;
   s.test = sh.test;
   s.testMessage = sh.testMessage;
   s.version = sh.version;
