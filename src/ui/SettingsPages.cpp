@@ -1598,10 +1598,13 @@ void UpdatesSection(SettingsModel& m, const SettingsActions& a) {
     break;
   }
   case S::Launching:
-    if (m.stats.recording)
+    if (m.stats.recording) {
       UpdateStatusLine(p.accent, false, "Actualización lista: se instalará cuando detengas la grabación.");
-    else
-      UpdateStatusLine(p.accent, true, "Abriendo el instalador. Spectre se cerrará y volverá a abrirse al terminar.");
+    } else {
+      snprintf(buf, sizeof(buf), "Instalando la versión %s: Spectre se cierra unos segundos y se vuelve a abrir solo.",
+               u.latest.c_str());
+      UpdateStatusLine(p.accent, true, buf);
+    }
     break;
   case S::Error:
     UpdateStatusLine(p.danger, false, u.message);

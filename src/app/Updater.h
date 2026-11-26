@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -37,12 +38,24 @@ public:
   // Idle en vez de dejar un error en Ajustes.
   void Check(bool background = false);
   // Descarga el instalador y, al terminar, avisa a hwnd con
-  // WM_SPECTRE_UPDATE_READY (lParam = new std::wstring* con la ruta).
+  // WM_SPECTRE_UPDATE_READY (lParam = new std::wstring* con la ruta). Si ya
+  // está en la carpeta temporal y su SHA-256 coincide, no se vuelve a bajar;
+  // una descarga cortada sigue donde se quedó.
   void Download(HWND hwnd);
   void Cancel();
 
-  // Lanza el instalador en modo silencioso; con relaunch vuelve a abrir Spectre al acabar.
-  static bool LaunchInstaller(const std::wstring& path, bool relaunch);
+  // Lanza el instalador sin preguntas. Con relaunch vuelve a abrir Spectre al
+  // acabar; con progress enseña su ventana de progreso (no encima de un juego).
+  // El instalador espera a que este proceso termine antes de tocar nada.
+  static bool LaunchInstaller(const std::wstring& path, bool relaunch, bool progress);
+  // El registro del último instalador lanzado desde Spectre.
+  static std::filesystem::path InstallLogPath();
+  // Tras una actualización que no se pudo instalar (--update-failed): copia el
+  // final del registro del instalador a spectre.log y devuelve el motivo en
+  // lenguaje claro.
+  static std::string FailedInstallReason();
+  // Borra los instaladores descargados (tras actualizar ya no sirven).
+  static void RemoveDownloadedInstallers();
 
 private:
   struct Shared;

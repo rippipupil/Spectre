@@ -223,7 +223,7 @@ int64_t UnixNow() {
 }
 } // namespace
 
-int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
+int App::Run(HINSTANCE instance, bool startInTray, bool updated, bool updateFailed) {
   instance_ = instance;
   config_ = LoadConfig();
   // El instalador puede haber activado el inicio con Windows: el registro manda.
@@ -625,15 +625,23 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
   EnforceStorageLimit();
   if (config_.discordPresence) discord_.Start(hwnd_, WM_SPECTRE_DISCORD);
   UpdatePresence();
-  if (updated)
+  if (updated) {
     Notify({NoticeKind::Update, "Spectre actualizado", "Ya tienes la versión " SPECTRE_VERSION ". Tus ajustes se conservan"});
+    Updater::RemoveDownloadedInstallers(); // el de esta versión ya no hace falta
+  } else if (updateFailed) {
+    Notice notice{NoticeKind::Warning, "La actualización no se instaló",
+                  Updater::FailedInstallReason() + " Sigues con la versión " SPECTRE_VERSION
+                  ". Vuelve a probar en Ajustes > General: no se descarga otra vez"};
+    notice.warning = true;
+    Notify(std::move(notice));
+  }
   // La primera comprobación de versiones, un minuto después de arrancar: no
   // compite con el arranque de la captura.
   nextUpdateCheck_ = GetTickCount64() + 60 * 1000;
   // Abrir Spectre (menú Inicio, el exe, el instalador) abre su ventana. Con
   // Windows (--tray) arranca solo en la bandeja, y tras una actualización
   // tampoco se abre encima de un juego a pantalla completa.
-  if (!startInTray && !(updated && GameActive())) OpenApp();
+  if (!startInTray && !((updated || updateFailed) && GameActive())) OpenApp();
 
   // Bucle de mensajes: bloqueante cuando no hay nada en pantalla (0 % CPU).
   // El menú y los avisos van a ~60 fps mientras se ven; la ventana de Spectre
@@ -712,10 +720,12 @@ int App::Run(HINSTANCE instance, bool startInTray, bool updated) {
     if (undeleted.size() > 8) text += L"\n... y " + std::to_wstring(undeleted.size() - 8) + L" más";
     MessageBoxW(nullptr, text.c_str(), L"Spectre", MB_OK | MB_ICONWARNING);
   }
-  // Spectre ya soltó la captura y terminó de escribir: el instalador puede
-  // reemplazar los archivos y vuelve a abrir la app al acabar.
+  // Spectre ya soltó la captura y terminó de escribir. El instalador espera a
+  // que este proceso termine del todo (main.cpp no deja que una cámara lo
+  // retenga), reemplaza los archivos y vuelve a abrir la app al acabar.
   // Con "Salir de Spectre" se instala igualmente, pero sin volver a abrir la app.
-  if (!installerPath_.empty() && !Updater::LaunchInstaller(installerPath_, relaunchAfterUpdate_)) {
+  if (!installerPath_.empty() &&
+      !Updater::LaunchInstaller(installerPath_, relaunchAfterUpdate_, relaunchAfterUpdate_ && installWithProgress_)) {
     std::wstring text = L"No se pudo abrir el instalador de la actualización. Puedes abrirlo a mano desde:\n" +
                         installerPath_;
     MessageBoxW(nullptr, text.c_str(), L"Spectre", MB_OK | MB_ICONWARNING);
@@ -1680,6 +1690,8 @@ void App::InstallPendingUpdate() {
   // cancelarían al cerrar: el temporizador de cada segundo vuelve a probar.
   if (installerPath_.empty() || pipeline_.Recording() || editWorker_.Busy() || ExportBusy()) return;
   relaunchAfterUpdate_ = true;
+  // La ventana de progreso del instalador, solo sin juego delante: no le quita el foco.
+  installWithProgress_ = !GameActive();
   Quit();
 }
 

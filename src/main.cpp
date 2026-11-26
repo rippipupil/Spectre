@@ -22,6 +22,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   std::wstring commandLine = cmdLine ? cmdLine : L"";
   bool tray = commandLine.find(L"--tray") != std::wstring::npos;          // inicio con Windows
   bool updated = commandLine.find(L"--updated") != std::wstring::npos;    // lo pasa el instalador tras actualizar
+  // El instalador no pudo actualizar y vuelve a abrir la versión que había.
+  bool updateFailed = commandLine.find(L"--update-failed") != std::wstring::npos;
 
   // Una sola instancia: si ya hay una, se le pide que traiga su ventana al
   // frente (abrir Spectre otra vez desde el menú Inicio o el exe).
@@ -29,20 +31,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
     if (tray) return 0;
     // Recién abierta (doble clic dos veces seguidas), su ventana oculta puede
-    // no existir todavía: se espera un poco.
-    HWND other = FindWindowW(L"SpectreMain", nullptr);
-    for (int i = 0; !other && i < 40; ++i) {
-      Sleep(50);
-      other = FindWindowW(L"SpectreMain", nullptr);
+    // no existir todavía. O la otra ya no tiene ventana y está terminando de
+    // cerrarse (tras actualizar, o si un driver la retiene): en cuanto suelte
+    // el mutex, esta pasa a ser la instancia. Tras el instalador se espera
+    // más y no se busca ventana: la que haya es la que se está cerrando.
+    const bool afterInstaller = updated || updateFailed;
+    HWND other = nullptr;
+    bool owned = false;
+    for (int i = 0; i < (afterInstaller ? 300 : 100); ++i) {
+      if (!afterInstaller && (other = FindWindowW(L"SpectreMain", nullptr)) != nullptr) break;
+      DWORD wait = WaitForSingleObject(mutex, 100);
+      if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
+        owned = true;
+        break;
+      }
     }
-    if (other) {
-      // Le cedemos el primer plano: si no, Windows no deja que su ventana se ponga delante.
-      DWORD pid = 0;
-      GetWindowThreadProcessId(other, &pid);
-      AllowSetForegroundWindow(pid);
-      PostMessageW(other, WM_SPECTRE_SHOW_APP, 0, 0);
+    if (!owned) {
+      if (other) {
+        // Le cedemos el primer plano: si no, Windows no deja que su ventana se ponga delante.
+        DWORD pid = 0;
+        GetWindowThreadProcessId(other, &pid);
+        AllowSetForegroundWindow(pid);
+        PostMessageW(other, WM_SPECTRE_SHOW_APP, 0, 0);
+      }
+      return 0;
     }
-    return 0;
   }
 
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -60,13 +73,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     if (!text.empty()) Log("ffmpeg: %s", text.c_str());
   });
 
-  Log("Spectre %s iniciado%s", SPECTRE_VERSION, tray ? " (con Windows)" : updated ? " (tras actualizar)" : "");
+  Log("Spectre %s iniciado%s", SPECTRE_VERSION,
+      tray ? " (con Windows)" : updated ? " (tras actualizar)" : updateFailed ? " (la actualización no se instaló)" : "");
 
   int code;
   {
     App app;
     try {
-      code = app.Run(instance, tray, updated);
+      code = app.Run(instance, tray, updated, updateFailed);
     } catch (const std::exception& e) {
       Log("CRASH: excepción C++ en el hilo principal: %s", e.what());
       throw; // std::terminate -> volcado
@@ -76,7 +90,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
 
   // Los hilos de las cámaras ya paradas usan Media Foundation hasta que el
   // driver las suelta.
-  if (mf) Camera::WaitForThreads(2000);
+  if (mf && !Camera::WaitForThreads(2000)) {
+    // Uno sigue dentro del driver. MFShutdown o la descarga de las DLL al
+    // salir pueden quedarse esperándolo, y el proceso seguiría vivo sin
+    // ventana: con el exe y las DLL en uso (una actualización no podría
+    // reemplazarlas) y el mutex tomado (Spectre no se volvería a abrir).
+    // Todo está guardado y cerrado: se termina ya.
+    Log("Spectre termina sin esperar a la cámara");
+    TerminateProcess(GetCurrentProcess(), UINT(code));
+  }
   if (mf) MFShutdown();
   winrt::uninit_apartment();
   if (mutex) {

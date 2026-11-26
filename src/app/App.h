@@ -36,7 +36,7 @@ namespace spectre {
 
 class App {
 public:
-  int Run(HINSTANCE instance, bool startInTray, bool updated);
+  int Run(HINSTANCE instance, bool startInTray, bool updated, bool updateFailed);
 
 private:
   static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -281,6 +281,7 @@ private:
   Updater updater_;
   std::wstring installerPath_; // actualización descargada: se lanza al terminar de cerrar
   bool relaunchAfterUpdate_ = false; // la salida la pidió la actualización, no el usuario
+  bool installWithProgress_ = false; // sin juego delante: el instalador enseña su progreso
 
   // Marcas (atajo de marca): momentos de la partida en QPC. Al guardar un clip
   // entran las de sus últimos segundos; las de una grabación, al detenerla.

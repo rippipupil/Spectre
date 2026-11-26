@@ -73,10 +73,50 @@ end;
 var
   InstallFinished: Boolean;
 
-// Spectre lanza el instalador con /SILENT /RELAUNCH=1 al actualizarse desde la app.
+// Spectre lanza el instalador con /SILENT o /VERYSILENT y /RELAUNCH=1 al actualizarse desde la app.
 function RelaunchAfterUpdate(): Boolean;
 begin
   Result := WizardSilent and (ExpandConstant('{param:relaunch|0}') = '1');
+end;
+
+const
+  SpectreMutex = 'Local\SpectreSingleInstance';
+
+// Espera como mucho Ms milisegundos a que ningún Spectre tenga su mutex de
+// instancia única, que suelta al terminar del todo.
+function WaitSpectreGone(Ms: Integer): Boolean;
+var
+  Waited: Integer;
+begin
+  Waited := 0;
+  while CheckForMutexes(SpectreMutex) and (Waited < Ms) do begin
+    Sleep(200);
+    Waited := Waited + 200;
+  end;
+  Result := not CheckForMutexes(SpectreMutex);
+  if Result and (Waited > 0) then
+    Log(Format('Spectre termino de cerrarse en %d ms', [Waited]));
+end;
+
+// Spectre lanza la actualización mientras termina de cerrarse. Si algo lo
+// retiene (el driver de una webcam que no suelta la cámara), su exe y sus DLL
+// siguen en uso, los archivos no se pueden reemplazar y la instalación se
+// deshace. Se espera a que termine y, si no termina, se cierra a la fuerza: a
+// esas alturas ya lo guardó todo.
+procedure WaitForSpectreToExit();
+var
+  Pid, Code: Integer;
+  Filter: String;
+begin
+  if WaitSpectreGone(20000) then Exit;
+  // Solo el proceso que lanzó la actualización, y solo si sigue siendo Spectre.
+  Pid := StrToIntDef(ExpandConstant('{param:spectrepid|0}'), 0);
+  Filter := '/FI "IMAGENAME eq spectre.exe"';
+  if Pid > 0 then Filter := Filter + ' /FI "PID eq ' + IntToStr(Pid) + '"';
+  Log('Spectre sigue abierto 20 s despues de lanzar la actualizacion: se cierra a la fuerza');
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F ' + Filter, '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if not WaitSpectreGone(30000) then
+    Log('Spectre sigue sin cerrarse: la instalacion puede fallar por archivos en uso');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -86,7 +126,8 @@ end;
 
 // Si la actualización silenciosa falla o se cancela, [Run] no llega a
 // ejecutarse: se vuelve a abrir la versión que haya quedado instalada para
-// que el usuario no se quede sin Spectre.
+// que el usuario no se quede sin Spectre. --update-failed hace que avise de
+// que no se instaló y por qué (lo lee del registro de /LOG).
 procedure DeinitializeSetup();
 var
   Dir: String;
@@ -95,7 +136,7 @@ begin
   if RelaunchAfterUpdate() and not InstallFinished and
      RegQueryStringValue(HKCU, ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1'), 'InstallLocation', Dir) and
      FileExists(AddBackslash(Dir) + 'spectre.exe') then
-    Exec(AddBackslash(Dir) + 'spectre.exe', '', Dir, SW_SHOWNORMAL, ewNoWait, Code);
+    Exec(AddBackslash(Dir) + 'spectre.exe', '--update-failed', Dir, SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
 // Las ediciones N/KN de Windows no traen Media Foundation. Spectre funciona
@@ -103,6 +144,8 @@ end;
 function InitializeSetup(): Boolean;
 begin
   Result := True;
+  // Una instalación silenciosa es la actualización lanzada desde Spectre.
+  if WizardSilent then WaitForSpectreToExit();
   // En una actualización silenciosa no se pregunta nada (ya se avisó al instalar).
   if not WizardSilent and not FileExists(ExpandConstant('{sys}\mfplat.dll')) then
     MsgBox('Tu Windows no incluye Media Foundation (ediciones N). Spectre funcionará, pero sin webcam. Para usarla, instala el "Paquete de características multimedia" desde Configuración > Aplicaciones > Características opcionales.', mbInformation, MB_OK);
