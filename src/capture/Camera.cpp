@@ -262,11 +262,12 @@ std::string Camera::TakeStall() {
   return "La cámara dejó de dar imagen. El resto se sigue grabando";
 }
 
-void Camera::WaitForThreads(DWORD timeoutMs) {
+bool Camera::WaitForThreads(DWORD timeoutMs) {
   CameraThreads& t = Threads();
   std::unique_lock lock(t.mutex);
-  if (!t.done.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&t] { return t.count == 0; }))
-    Log("Cámara: %d hilos siguen sin terminar al salir", t.count);
+  if (t.done.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&t] { return t.count == 0; })) return true;
+  Log("Cámara: %d hilos siguen sin terminar al salir", t.count);
+  return false;
 }
 
 void Camera::Run(std::shared_ptr<Session> s, std::wstring id, UINT wantWidth) {

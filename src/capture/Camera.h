@@ -51,8 +51,8 @@ public:
   std::string TakeStall();
 
   // Al salir: espera (como mucho timeoutMs) a que terminen los hilos de las
-  // cámaras ya paradas, antes de MFShutdown.
-  static void WaitForThreads(DWORD timeoutMs);
+  // cámaras ya paradas, antes de MFShutdown. false si alguno sigue dentro del driver.
+  static bool WaitForThreads(DWORD timeoutMs);
 
 private:
   struct Session;
