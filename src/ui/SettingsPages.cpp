@@ -1973,7 +1973,8 @@ void PagePhone(SettingsModel& m, const SettingsActions& a) {
                               : "Para pegarlo en la app con «Pegar el código». Lleva tus claves: no lo mandes "
                                 "por un chat que vea otra gente");
   } else {
-    Help("Escanéalo con Spectre Holder («Escanear el código»). Lleva las claves de tu nube: ocúltalo al terminar.");
+    Help("Escanéalo con Spectre Holder («Escanear el código»). Lleva las claves de tu nube: mientras se ve, esta "
+         "ventana no sale en los clips, las grabaciones ni las capturas. Ocúltalo al terminar.");
     Gap(6);
     if (!DrawQr(1, m.phoneCode, Px(300))) ErrorText("No se pudo hacer el código: la dirección de la nube es demasiado larga.");
     Gap(6);
@@ -1991,7 +1992,8 @@ void PagePhone(SettingsModel& m, const SettingsActions& a) {
   ImGui::EndDisabled();
   Help("A mano: en la biblioteca, clic derecho > «Enviar al móvil» (también con varios elegidos), o en el panel "
        "(Alt+Z) > «Enviar al móvil». Con un juego abierto se sube con el límite de Ajustes > Nube.");
-  Help("Lo que el móvil no descarga, Spectre Holder lo borra de la nube a los 7 días (se cambia en la app).");
+  Help("Lo que el móvil no descarga, Spectre Holder lo borra de la nube 7 días después de enseñarlo (se cambia en "
+       "la app).");
   if (st.phoneQueued > 0 || st.phoneFailed > 0) {
     Gap(6);
     if (st.currentPhone && !st.current.empty()) {

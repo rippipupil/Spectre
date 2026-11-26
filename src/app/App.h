@@ -127,6 +127,9 @@ private:
   CloudDelete ManualRemoval(const std::string& path) const;
   // WM_SPECTRE_CLOUD: avisos de lo que terminó y estado para la ventana.
   void OnCloudChanged();
+  // Antes y después de cada frame de la ventana: el QR de emparejar solo se
+  // ve en Ajustes > Móvil y con la ventana fuera de la captura.
+  void GuardPhoneCode();
   void CopyCloudLink(const std::string& path);
   void PasteCloudSettings(bool cyber);
   // Ajustes > Almacenamiento > ShadowPlay: copia o mueve sus clips a la carpeta de Spectre.
@@ -345,6 +348,9 @@ private:
   // Nube y ShadowPlay
   CloudUploader cloud_;
   uint64_t cloudVersion_ = 0; // la de appModel_.cloud
+  // El QR de emparejar el móvil lleva las claves: mientras se ve, la ventana
+  // no sale en los clips ni en las capturas (SetWindowDisplayAffinity).
+  bool phoneCodeHidden_ = false;
   uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
   std::unordered_set<std::string> cyberCancelled_; // en minúsculas: canceladas a mano en esta sesión
   std::shared_ptr<std::atomic<bool>> importCancel_;

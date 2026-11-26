@@ -44,10 +44,23 @@ class MainActivity : Activity() {
     ui = Ui(this)
     root = FrameLayout(this).apply { setBackgroundColor(C.BG) }
     // Android 15 dibuja la app bajo las barras del sistema: el contenido se aparta de ellas.
+    // WindowInsets.Type es de Android 11; en el 10 valen los insets de siempre.
     root.setOnApplyWindowInsetsListener { v, insets ->
-      val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-      v.setPadding(i.left, i.top, i.right, i.bottom)
-      WindowInsets.CONSUMED
+      if (Build.VERSION.SDK_INT >= 30) {
+        val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+        v.setPadding(i.left, i.top, i.right, i.bottom)
+        WindowInsets.CONSUMED
+      } else {
+        @Suppress("DEPRECATION")
+        v.setPadding(
+          insets.systemWindowInsetLeft,
+          insets.systemWindowInsetTop,
+          insets.systemWindowInsetRight,
+          insets.systemWindowInsetBottom,
+        )
+        @Suppress("DEPRECATION")
+        insets.consumeSystemWindowInsets()
+      }
     }
     setContentView(root)
     if (Build.VERSION.SDK_INT >= 33) {
@@ -206,6 +219,13 @@ class MainActivity : Activity() {
     val cm = getSystemService(ClipboardManager::class.java)
     val text = cm?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
     val config = CloudConfig.fromCode(text)
+    // Lleva las claves: fuera del portapapeles (y de su historial en teclados como Gboard).
+    if (config != null) {
+      try {
+        cm?.clearPrimaryClip()
+      } catch (e: Exception) {
+      }
+    }
     if (config == null) {
       message(
         "No hay un código en el portapapeles",
@@ -227,8 +247,20 @@ class MainActivity : Activity() {
     val data = intent?.dataString ?: return
     val config = CloudConfig.fromCode(data) ?: return
     intent.data = null
-    val name = config.pcName.ifEmpty { "el PC" }
-    showSheet("Emparejar con $name", "Spectre Holder leerá lo que $name te mande a su nube.", listOf("Emparejar" to Ui.Style.PRIMARY)) {
+    // Un enlace puede venir de cualquiera (un chat): se dice a qué nube lleva y
+    // si cambia la de ahora.
+    val name = config.pcName.ifEmpty { "un PC" }
+    val now = Holder.cloud
+    val where = "${config.bucket} en ${config.host}"
+    val text = if (now == null) {
+      "Spectre Holder leerá lo que $name mande a $where. Empareja solo si es tu PC."
+    } else if (now.host == config.host && now.bucket == config.bucket) {
+      "Es la misma nube de ahora ($where), con las claves de $name."
+    } else {
+      "Cambia la nube de ahora (${now.bucket} en ${now.host}) por $where, de $name. Si no lo has pedido tú, " +
+        "no lo aceptes: verías y descargarías lo que otra persona sube."
+    }
+    showSheet("¿Emparejar con $name?", text, listOf("Emparejar" to Ui.Style.PRIMARY)) {
       paired(config)
     }
   }
@@ -539,8 +571,8 @@ class MainActivity : Activity() {
 
       private fun expiry(): String {
         val days = Holder.store.keepDays
-        if (days <= 0 || clip.modified <= 0) return "Espera en la nube"
-        val left = (clip.modified + days * 86_400_000L - System.currentTimeMillis()) / 86_400_000.0
+        if (days <= 0 || clip.seen <= 0) return "Espera en la nube"
+        val left = (clip.seen + days * 86_400_000L - System.currentTimeMillis()) / 86_400_000.0
         return when {
           left < 1 -> "Se borra de la nube hoy"
           left < 2 -> "Se borra de la nube mañana"

@@ -16,8 +16,11 @@ import javax.crypto.spec.GCMParameterSpec
 
 enum class Kind(val label: String) { CLIP("Clip"), RECORDING("Grabación"), SCREENSHOT("Captura"), OTHER("Archivo") }
 
-// Algo que el PC mandó al móvil y está en la nube.
-data class Clip(val key: String, val size: Long, val modified: Long) {
+// Algo que el PC mandó al móvil y está en la nube. seen: cuándo lo vio este
+// móvil por primera vez (los días de «Borrar de la nube a los N días» cuentan
+// desde ahí, no desde la subida: si la app no se abre en una semana, lo nuevo
+// no se borra en la misma apertura en que se iba a enseñar).
+data class Clip(val key: String, val size: Long, val modified: Long, val seen: Long = modified) {
   val name: String = key.substringAfterLast('/')
   val image: Boolean
   val kind: Kind
@@ -130,6 +133,22 @@ class Store(context: Context) {
     }
     val sealed = seal(config.toJson().toString()) ?: return
     prefs.edit().putString("cloud", sealed).apply()
+  }
+
+  // Cuándo vio este móvil cada objeto de la nube por primera vez. Lo que ya
+  // no está en la lista se olvida.
+  @Synchronized
+  fun markSeen(keys: Collection<String>, now: Long): Map<String, Long> {
+    val old = JSONObject(prefs.getString("seen", "{}") ?: "{}")
+    val out = HashMap<String, Long>()
+    val next = JSONObject()
+    for (k in keys) {
+      val t = old.optLong(k, 0L).takeIf { it > 0 } ?: now
+      out[k] = t
+      next.put(k, t)
+    }
+    prefs.edit().putString("seen", next.toString()).apply()
+    return out
   }
 
   // Descargas a medias: clave del objeto -> {uri, bytes}. Siguen donde iban.

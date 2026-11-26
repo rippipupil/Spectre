@@ -140,6 +140,9 @@ public:
   // «Mandar al móvil cada clip nuevo», sin prisa; a mano va la primera.
   void SendToPhone(const std::string& path, CloudDelete removal, bool automatic);
   void CancelPhone(const std::string& path);
+  // Modo cibercafé: se copió para pegarlo con Ctrl+V. Ninguna de sus entradas
+  // (enlace o móvil, subida o no) lo borra antes de salir.
+  void KeepForPaste(const std::string& path);
   CloudFileState PhoneState(const std::string& path) const;
   // "spectre-holder:<base64url>" con el bucket y las claves para la app del
   // móvil (el QR de Ajustes > Móvil). Vacío sin nube configurada.
@@ -179,7 +182,9 @@ private:
   void Kick(); // arranca el hilo de subida si hay trabajo y no va ya
   // Borra del PC lo subido que quedó por borrar (atExit: también lo de salir).
   // Devuelve lo que sigue sin poder borrarse.
-  std::vector<std::string> RemoveUploaded(bool atExit);
+  // cyberEnd: acaba una sesión del modo cibercafé (también lo que esperaba a
+  // otra entrada del mismo archivo).
+  std::vector<std::string> RemoveUploaded(bool atExit, bool cyberEnd = false);
   std::shared_ptr<Shared> shared_;
 };
 

@@ -918,6 +918,38 @@ struct CloudUploader::Shared {
                                  [](const Entry& e) { return e.st == Entry::St::Done && !e.deletePending; }),
                   entries.end());
   }
+  // Qué hacer con el archivo del PC al terminar de subirse `e` (aún sin
+  // marcarla subida). Un archivo puede ir a la vez con enlace y al móvil: lo
+  // de salir manda (se copió para pegarlo y Ctrl+V tiene que seguir pegándolo)
+  // y, si no, se borra al subirse la última de sus entradas.
+  enum class Removal { Keep, Now, AtExit, Wait };
+  Removal RemovalFor(const Entry& e) const {
+    bool after = false, atExit = false, pending = false;
+    for (const auto& x : entries) {
+      if (x.lower != e.lower) continue;
+      if (&x != &e && x.st != Entry::St::Done) pending = true;
+      if (x.st == Entry::St::Done && !x.local) continue; // de una versión que ya no está en el PC
+      after |= x.deleteAfter;
+      atExit |= x.deleteAtExit;
+    }
+    if (atExit) return stop ? Removal::Now : Removal::AtExit; // tras Stop, la limpieza de salir ya pasó
+    if (!after) return Removal::Keep;
+    // Al salir del cibercafé no se espera: lo tuyo no se queda en el PC.
+    return pending && !(stop && config.cyberMode) ? Removal::Wait : Removal::Now;
+  }
+  // Se quitó una entrada sin subir: si otra del mismo archivo ya subió y
+  // esperaba a esta para borrarlo, ya no espera (lo borra RemoveUploaded).
+  bool ReleaseWaiting(const std::string& lower) {
+    for (const auto& x : entries)
+      if (x.lower == lower && x.st != Entry::St::Done) return false;
+    bool any = false;
+    for (auto& x : entries)
+      if (x.lower == lower && x.st == Entry::St::Done && x.local && x.deleteAfter && !x.deletePending) {
+        x.deletePending = true;
+        any = true;
+      }
+    return any;
+  }
   // Lo que no llegó a subirse en una sesión del modo cibercafé ya no es de
   // nadie de ahora: no se sube solo a la nube de quien pegue la suya.
   void Disown() {
@@ -1450,7 +1482,8 @@ void Worker(std::shared_ptr<Shared> sh) {
     buffer.clear();
     buffer.shrink_to_fit(); // nada de memoria retenida entre archivos
 
-    bool deleted = false, handedOff = false;
+    bool deleted = false;
+    Shared::Removal removal = Shared::Removal::Keep;
     if (o == Outcome::Done) {
       // Sin la clave: con ella y la dirección pública, el log abriría el enlace.
       Log("Nube: subido %s (%s)", job.name.c_str(), FormatBytes(job.size).c_str());
@@ -1458,23 +1491,8 @@ void Worker(std::shared_ptr<Shared> sh) {
       {
         std::lock_guard lock(sh->mutex);
         Entry* e = sh->Find(job.id);
-        // Tras Stop (al salir) también lo que se borraba al salir: esa limpieza ya pasó.
-        if (e && (e->deleteAfter || (sh->stop && e->deleteAtExit))) {
-          // El mismo archivo aún tiene que subir con otro destino (enlace y
-          // móvil a la vez): lo borra ese al acabar.
-          Entry* other = nullptr;
-          for (auto& x : sh->entries)
-            if (&x != e && x.lower == e->lower && x.st != Entry::St::Done) {
-              other = &x;
-              break;
-            }
-          if (other && !sh->stop) {
-            other->deleteAfter = true;
-            handedOff = true;
-          } else {
-            removePath = e->path;
-          }
-        }
+        if (e) removal = sh->RemovalFor(*e);
+        if (removal == Shared::Removal::Now) removePath = e->path;
       }
       if (!removePath.empty()) {
         deleted = DeleteFileW(Widen(removePath).c_str()) != FALSE;
@@ -1515,7 +1533,20 @@ void Worker(std::shared_ptr<Shared> sh) {
       e->at = int64_t(UnixMillis());
       e->when = NowText();
       e->local = !deleted;
-      e->deletePending = !deleted && !handedOff && (e->deleteAfter || (sh->stop && e->deleteAtExit));
+      // No se pudo borrar ahora (abierto en otro programa): al salir o al volver a abrir Spectre.
+      e->deletePending = !deleted && removal == Shared::Removal::Now;
+      if (removal == Shared::Removal::AtExit) {
+        e->deleteAtExit = true; // RemoveUploaded(true) lo borra al salir desde esta entrada
+        e->deleteAfter = false;
+      }
+      // Wait: deleteAfter se queda y lo borra la última del archivo al subirse.
+      if (deleted) {
+        for (auto& x : sh->entries)
+          if (x.lower == e->lower && x.st == Entry::St::Done) {
+            x.local = false;
+            x.deletePending = false;
+          }
+      }
       sh->offline = false;
       CloudEvent ev;
       ev.path = e->path;
@@ -1707,12 +1738,16 @@ void CloudUploader::Start(HWND notify, const CloudConfig& config) {
   Kick();
 }
 
-std::vector<std::string> CloudUploader::RemoveUploaded(bool atExit) {
+std::vector<std::string> CloudUploader::RemoveUploaded(bool atExit, bool cyberEnd) {
   std::vector<std::string> paths;
   {
     std::lock_guard lock(shared_->mutex);
+    // Al acabar una sesión del cibercafé, también lo subido que esperaba a su
+    // otra entrada (enlace o móvil) para borrarse: ya está en la nube.
+    const bool cyber = cyberEnd || (atExit && shared_->config.cyberMode);
     for (const auto& e : shared_->entries)
-      if (e.st == Entry::St::Done && e.local && (e.deletePending || (atExit && e.deleteAtExit)))
+      if (e.st == Entry::St::Done && e.local &&
+          (e.deletePending || (atExit && e.deleteAtExit) || (cyber && e.deleteAfter)))
         paths.push_back(e.path);
   }
   std::vector<std::string> left;
@@ -1832,7 +1867,7 @@ void CloudUploader::ForgetKeys() {
 }
 
 void CloudUploader::EndCyberSession() {
-  RemoveUploaded(true); // lo copiado para pegarlo: la sesión acabó
+  RemoveUploaded(true, true); // lo copiado para pegarlo: la sesión acabó
   DeleteKeysFile();
   {
     std::lock_guard lock(shared_->mutex);
@@ -2091,6 +2126,7 @@ void AbortUploads(std::vector<PendingAbort> aborts, CloudKeys keys) {
 void CloudUploader::Cancel(const std::string& path) {
   std::vector<PendingAbort> aborts;
   CloudKeys keys;
+  bool release = false;
   {
     std::lock_guard lock(shared_->mutex);
     Shared& sh = *shared_;
@@ -2098,9 +2134,12 @@ void CloudUploader::Cancel(const std::string& path) {
     if (!e || e->st == Entry::St::Done) return;
     if (!e->uploadId.empty()) aborts.push_back(AbortFor(sh, *e));
     keys = sh.keys;
+    const std::string lower = e->lower;
     sh.entries.erase(sh.At(e));
+    release = sh.ReleaseWaiting(lower);
     sh.Changed();
   }
+  if (release) RemoveUploaded(false);
   SaveQueue(*shared_, true);
   shared_->cv.notify_all();
   AbortUploads(std::move(aborts), std::move(keys));
@@ -2109,6 +2148,7 @@ void CloudUploader::Cancel(const std::string& path) {
 void CloudUploader::CancelPhone(const std::string& path) {
   std::vector<PendingAbort> aborts;
   CloudKeys keys;
+  bool release = false;
   {
     std::lock_guard lock(shared_->mutex);
     Shared& sh = *shared_;
@@ -2116,12 +2156,32 @@ void CloudUploader::CancelPhone(const std::string& path) {
     if (!e || e->st == Entry::St::Done) return;
     if (!e->uploadId.empty()) aborts.push_back(AbortFor(sh, *e));
     keys = sh.keys;
+    const std::string lower = e->lower;
     sh.entries.erase(sh.At(e));
+    release = sh.ReleaseWaiting(lower);
     sh.Changed();
   }
+  // El enlace ya subió y solo esperaba a esta para borrar el archivo del PC.
+  if (release) RemoveUploaded(false);
   SaveQueue(*shared_, true);
   shared_->cv.notify_all();
   AbortUploads(std::move(aborts), std::move(keys));
+}
+
+void CloudUploader::KeepForPaste(const std::string& path) {
+  {
+    std::lock_guard lock(shared_->mutex);
+    Shared& sh = *shared_;
+    const std::string lower = LowerPath(path);
+    for (auto& e : sh.entries) {
+      if (e.lower != lower || (e.st == Entry::St::Done && !e.local)) continue;
+      e.deleteAtExit = true;
+      e.deleteAfter = false;
+      e.deletePending = false;
+    }
+    sh.Changed();
+  }
+  SaveQueue(*shared_, true);
 }
 
 void CloudUploader::Retry(const std::string& path) {

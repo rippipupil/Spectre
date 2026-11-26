@@ -29,6 +29,10 @@
 #define SPECTRE_VERSION "0.1.0"
 #endif
 
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011 // Windows 10 2004
+#endif
+
 namespace spectre {
 
 namespace {
@@ -2423,6 +2427,7 @@ void App::CloseApp() {
   if (!appWindow_.Visible()) return;
   CancelHotkeyCapture(appModel_.settings, appActions_.settings);
   ForgetPhoneCode(appModel_.settings); // el QR de emparejar lleva las claves
+  phoneCodeHidden_ = false;
   appUi_.OnClosed();
   appWindow_.Close();
   // Cerrada no se queda con nada: ni la lista de la biblioteca ni los dispositivos.
@@ -2466,6 +2471,8 @@ void App::RenderApp() {
     const bool focused = appWindow_.Focused();
     const AppPage page = appModel_.page == AppPage::Viewer ? appModel_.viewBack : appModel_.page;
     CancelHotkeyCapture(appModel_.settings, appActions_.settings);
+    ForgetPhoneCode(appModel_.settings); // la ventana nueva no está fuera de la captura
+    phoneCodeHidden_ = false;
     appUi_.OnClosed();
     appWindow_.Close();
     if (!appWindow_.Open(focused)) {
@@ -2491,9 +2498,11 @@ void App::RenderApp() {
   // Grabando un atajo y el usuario se va a otra ventana: se cancela (si no,
   // los atajos globales se quedarían sin registrar).
   if (s.capturing >= 0 && !appWindow_.Focused()) CancelHotkeyCapture(s, appActions_.settings);
+  GuardPhoneCode();
   inFrame_ = true;
   appWindow_.Render([this] { appUi_.Draw(appWindow_, appModel_, appActions_); });
   inFrame_ = false;
+  GuardPhoneCode(); // «Enseñar el código» se pulsó en este frame: fuera de la captura antes del siguiente
   // El tema no espera a Aplicar: se guarda al elegirlo y lo usan enseguida el
   // panel (Alt+Z) y los avisos, no solo esta ventana. Tampoco cuenta como
   // cambio sin aplicar.
@@ -2732,11 +2741,15 @@ std::string App::PhonePairingCode() const {
 }
 
 void App::AutoUpload(const std::string& path, MediaKind kind, bool forPaste) {
-  // «Mandar al móvil cada clip nuevo» (Ajustes > Móvil), aparte de la subida automática.
+  const CloudConfig& c = config_.cloud;
+  // «Mandar al móvil cada clip nuevo» (Ajustes > Móvil), aparte de la subida
+  // automática. En el cibercafé se borra al subirse, salvo lo copiado para
+  // pegarlo (al salir); si también sube con enlace, al subirse el último.
   if (config_.phone.autoSend && cloud_.Configured() &&
       (kind == MediaKind::Clip || (kind == MediaKind::Screenshot && config_.phone.sendScreenshots)))
-    cloud_.SendToPhone(path, ManualRemoval(path), true);
-  const CloudConfig& c = config_.cloud;
+    cloud_.SendToPhone(path,
+                       !c.cyberMode ? CloudDelete::Keep : forPaste ? CloudDelete::AtExit : CloudDelete::AfterUpload,
+                       true);
   if (!c.cyberMode && !c.autoUpload) return;
   const bool wanted = c.cyberMode || (kind == MediaKind::Recording    ? c.uploadRecordings
                                       : kind == MediaKind::Screenshot ? c.uploadScreenshots
@@ -2769,9 +2782,12 @@ CloudDelete App::ManualRemoval(const std::string& path) const {
 
 void App::KeepForPaste(const std::vector<std::string>& paths) {
   if (!config_.cloud.cyberMode) return;
-  for (const auto& path : paths)
-    if (CyberOwned(path) && cloud_.State(path).phase != CloudFileState::Phase::Done)
+  for (const auto& path : paths) {
+    if (!CyberOwned(path)) continue;
+    if (cloud_.State(path).phase != CloudFileState::Phase::Done)
       cloud_.Enqueue(path, false, false, CloudDelete::AtExit, true);
+    cloud_.KeepForPaste(path); // también lo que va al móvil y lo ya subido
+  }
 }
 
 void App::CyberSweep() {
@@ -2859,6 +2875,28 @@ void App::OnCloudChanged() {
   }
   if (menu_.Visible()) RefreshMenuModel();
   if (appWindow_.Visible()) appWindow_.Invalidate();
+}
+
+void App::GuardPhoneCode() {
+  SettingsModel& s = appModel_.settings;
+  // Solo en su página: al irse a la biblioteca u otra parte se olvida.
+  if (s.phoneShown && !(appModel_.page == AppPage::Settings && appModel_.settingsPage == SettingsPage::Phone))
+    ForgetPhoneCode(s);
+  const HWND hwnd = appWindow_.Visible() ? appWindow_.Hwnd() : nullptr;
+  const bool want = s.phoneShown && hwnd;
+  if (want == phoneCodeHidden_ || !hwnd) return;
+  if (!SetWindowDisplayAffinity(hwnd, want ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE)) {
+    Log("Móvil: SetWindowDisplayAffinity falló (%lu)", GetLastError());
+    if (want) {
+      // Sin eso, el QR saldría en el replay: mejor no enseñarlo.
+      ForgetPhoneCode(s);
+      Toast("Windows no deja sacar esta ventana de los clips, así que el código no se enseña. Usa «Copiar el "
+            "código» y pégalo en Spectre Holder.",
+            true);
+    }
+    return;
+  }
+  phoneCodeHidden_ = want;
 }
 
 void App::CopyCloudLink(const std::string& path) {

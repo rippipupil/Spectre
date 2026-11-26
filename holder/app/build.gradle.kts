@@ -67,6 +67,9 @@ android {
     // assembleRelease pasa la revisión de errores graves (lintVital); los
     // textos van en el código, en español, sin traducciones.
     disable += setOf("MissingTranslation", "SetTextI18n", "HardcodedText", "GradleDependency", "OldTargetApi")
+    // Una llamada de una versión de Android más nueva que minSdk cierra la app
+    // en los móviles viejos: que pare la compilación (lintVital solo mira lo fatal).
+    fatal += setOf("NewApi")
   }
 }
 

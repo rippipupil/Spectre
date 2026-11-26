@@ -109,16 +109,18 @@ object Holder {
     refreshing = true
     changed()
     Thread {
-      var list: List<RemoteObject>? = null
+      var list: List<Clip>? = null
       var err: String? = null
       try {
         val s3 = S3(config)
         val all = s3.list()
-        // Lo que lleva más días de los elegidos se borra de la nube (no del móvil).
+        val now = System.currentTimeMillis()
+        val firstSeen = store.markSeen(all.map { it.key }, now)
+        // Lo que este móvil vio hace más días de los elegidos se borra de la nube (no del móvil).
         val days = store.keepDays
         val old = if (days > 0) {
-          val limit = System.currentTimeMillis() - days * 86_400_000L
-          all.filter { it.modified in 1 until limit && it.key != current?.key && !queued(it.key) }
+          val limit = now - days * 86_400_000L
+          all.filter { (firstSeen[it.key] ?: now) < limit && it.key != current?.key && !queued(it.key) }
         } else {
           emptyList()
         }
@@ -127,19 +129,22 @@ object Holder {
           try {
             s3.delete(o.key)
             removed += o.key
-          } catch (e: IOException) {
+          } catch (e: Exception) {
             break // sin permiso o sin red: se intenta la próxima vez
           }
         }
-        list = all.filter { it.key !in removed }
+        list = all.filter { it.key !in removed }.map { Clip(it.key, it.size, it.modified, firstSeen[it.key] ?: now) }
       } catch (e: IOException) {
         err = e.message ?: "No se pudo leer la nube."
+      } catch (e: Exception) {
+        // Una respuesta rota (XML a medias, un proxy): no cierra la app.
+        err = "La nube respondió algo que Spectre Holder no entiende. Prueba otra vez."
       }
       main.post {
         refreshing = false
         if (cloud != config) return@post // se desemparejó mientras tanto
         if (list != null) {
-          clips = list.map { Clip(it.key, it.size, it.modified) }.sortedByDescending { it.modified }
+          clips = list.sortedByDescending { it.modified }
           listed = true
           refreshedAt = System.currentTimeMillis()
           error = null
@@ -204,6 +209,8 @@ object Holder {
         null
       } catch (e: IOException) {
         e.message ?: "No se pudo borrar."
+      } catch (e: Exception) {
+        "No se pudo borrar."
       }
       main.post {
         if (err == null) clips = clips.filter { it.key != clip.key }
@@ -240,6 +247,10 @@ object Holder {
         err = "Android no deja guardar en la galería."
       } catch (e: IllegalStateException) {
         err = "Android no deja guardar en la galería."
+      } catch (e: Exception) {
+        // Cualquier otra cosa (MediaStore, una respuesta rota) es un fallo de esta
+        // descarga: el hilo sigue con la cola y se quita al acabarla.
+        err = "La descarga falló: ${e.javaClass.simpleName}."
       }
       if (ok) {
         doneKeys += c.key
@@ -250,7 +261,7 @@ object Holder {
               clips = clips.filter { it.key != c.key }
               changed()
             }
-          } catch (e: IOException) {
+          } catch (e: Exception) {
             // Se queda en la nube; se borra sola al pasar los días elegidos.
           }
         }
