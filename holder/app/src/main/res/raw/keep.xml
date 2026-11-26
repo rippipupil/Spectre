@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- El logo de la pantalla de inicio se busca por nombre: que no lo quite el encogido de recursos. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@drawable/ic_logo" />
