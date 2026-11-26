@@ -881,7 +881,6 @@ struct CloudUploader::Shared {
   unsigned phoneGen = 0;    // sube al cambiar de bucket: una lista de antes ya no vale
   std::string pairNonce;    // el del último código enseñado o copiado (vacío: ya lo leyó un móvil)
   std::string pairedName;   // el móvil que lo leyó
-  uint64_t pairedSerial = 0;
   ULONGLONG watchUntil = 0; // hasta cuándo mirar cada pocos segundos si un móvil leyó el código
 
   // Otro bucket u otra persona (modo cibercafé): nada de la lista de antes.
@@ -1742,7 +1741,7 @@ void RunTest(std::shared_ptr<Shared> sh, unsigned gen, CloudConfig config, Cloud
 // "2026-11-26T20:15:39.000Z" (LastModified de S3) en ms desde 1970; 0 si no se entiende.
 int64_t ParseS3Time(const std::string& text) {
   int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
-  if (sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &sec) != 6) return 0;
+  if (sscanf_s(text.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &sec) != 6) return 0;
   std::tm tm{};
   tm.tm_year = y - 1900;
   tm.tm_mon = mo - 1;
@@ -1898,7 +1897,12 @@ void PhoneWatcher(std::shared_ptr<Shared> sh) {
             if (m.nonce != sh->pairNonce) continue;
             Log("Móvil: %s leyó el código de emparejar", m.device.name.c_str());
             sh->pairedName = m.device.name;
-            ++sh->pairedSerial;
+            CloudEvent ev;
+            ev.name = m.device.name;
+            ev.ok = true;
+            ev.phone = true;
+            ev.paired = true;
+            sh->events.push_back(std::move(ev)); // el aviso sale ya, aunque la ventana esté cerrada
             sh->pairNonce.clear();
             sh->watchUntil = 0;
             break;
@@ -2637,7 +2641,6 @@ CloudStatus CloudUploader::Status() const {
   s.phonesError = sh.phonesError;
   s.pairWaiting = !sh.pairNonce.empty() && sh.watchUntil > GetTickCount64();
   s.pairedName = sh.pairedName;
-  s.pairedSerial = sh.pairedSerial;
   s.test = sh.test;
   s.testMessage = sh.testMessage;
   s.version = sh.version;

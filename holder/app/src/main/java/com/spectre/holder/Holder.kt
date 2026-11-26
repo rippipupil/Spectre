@@ -98,8 +98,10 @@ object Holder {
     listed = false
     error = null
     failed.clear()
-    // Otra nube: el aviso de la de antes se quita (allí ya no se lee nada).
-    if (old != null && !old.sameCloud(config)) forget(old)
+    // Otro bucket: el aviso de antes se quita (allí ya no se lee nada). En el
+    // mismo, el aviso nuevo lo sobrescribe: borrarlo a la vez podría llegar
+    // después y quitar el nuevo.
+    if (old != null && !old.sameBucket(config)) forget(old)
     announce()
     refresh()
   }

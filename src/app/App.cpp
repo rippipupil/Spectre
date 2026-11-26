@@ -2550,14 +2550,6 @@ void App::RefreshAppModel() {
     appModel_.cloud = cloud_.Snapshot();
     appModel_.phone = cloud_.PhoneSnapshot();
     s.cloud = cloud_.Status();
-    // Un móvil acaba de leer el código: el QR (con las claves) ya no hace falta.
-    if (s.cloud.pairedSerial != pairedSerial_) {
-      pairedSerial_ = s.cloud.pairedSerial;
-      if (!s.cloud.pairedName.empty()) {
-        if (s.phoneShown) ForgetPhoneCode(s);
-        Toast("Móvil emparejado: " + s.cloud.pairedName + ". Ya puedes mandarle clips con «Enviar al móvil»");
-      }
-    }
   }
   s.shadowPlayTotal = importing_ ? importTotal_->load() : 0;
   s.shadowPlayDone = importDone_->load();
@@ -2860,6 +2852,12 @@ void App::OnCloudChanged() {
   bool removed = false;
   const HWND owner = appWindow_.Visible() ? appWindow_.Hwnd() : hwnd_;
   for (const CloudEvent& ev : cloud_.TakeEvents()) {
+    if (ev.paired) {
+      // Un móvil leyó el código: el QR (con las claves) ya no hace falta.
+      if (appModel_.settings.phoneShown) ForgetPhoneCode(appModel_.settings);
+      Toast("Móvil emparejado: " + ev.name + ". Ya puedes mandarle clips con «Enviar al móvil»");
+      continue;
+    }
     if (ev.deleted) {
       library_->Forget({ev.path});
       removed = true;

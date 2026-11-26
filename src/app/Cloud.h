@@ -70,6 +70,7 @@ struct CloudEvent {
   bool automatic = false; // subida automática: el aviso es más discreto
   bool deleted = false;   // se borró del PC al subirse
   bool phone = false;     // «Enviar al móvil»: ya está en la nube esperando al móvil
+  bool paired = false;    // un móvil leyó el código de emparejar (name: el móvil); nada más que ver
 };
 
 // Un móvil con Spectre Holder emparejado (su aviso en spectre/moviles/).
@@ -114,7 +115,6 @@ struct CloudStatus {
   std::string phonesError;     // la última lista falló
   bool pairWaiting = false;    // mirando cada pocos segundos si un móvil leyó el último código
   std::string pairedName;      // el móvil que lo leyó ("" = todavía ninguno)
-  uint64_t pairedSerial = 0;   // sube cada vez que un móvil lee un código
   enum class Test { Idle, Running, Ok, Warning, Failed };
   Test test = Test::Idle;
   std::string testMessage;

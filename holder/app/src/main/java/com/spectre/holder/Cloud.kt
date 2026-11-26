@@ -43,9 +43,8 @@ data class CloudConfig(
     .put("h", host).put("p", port).put("r", region).put("b", bucket)
     .put("k", keyId).put("s", secret).put("x", prefix).put("n", pcName).put("c", nonce)
 
-  // La misma nube (bucket y claves), aunque venga de otro código.
-  fun sameCloud(o: CloudConfig?): Boolean =
-    o != null && o.host == host && o.port == port && o.bucket == bucket && o.keyId == keyId && o.secret == secret
+  // El mismo bucket (aunque con otras claves): el aviso de este móvil es el mismo archivo.
+  fun sameBucket(o: CloudConfig?): Boolean = o != null && o.host == host && o.port == port && o.bucket == bucket
 
   companion object {
     const val CODE_PREFIX = "spectre-holder:"
@@ -65,8 +64,9 @@ data class CloudConfig(
       )
       val hostOk = c.host.isNotEmpty() && c.host.none { it == '/' || it == '@' || it == '?' || it == '#' || it == ' ' }
       if (!hostOk || c.port !in 1..65535 || c.bucket.isEmpty() || c.keyId.isEmpty() || c.secret.isEmpty()) return null
-      // Solo lo de Spectre para el móvil: la app nunca toca el resto del bucket.
-      if (!c.prefix.startsWith("spectre/") || !c.prefix.endsWith("/")) return null
+      // Solo lo de Spectre para el móvil: la app nunca toca el resto del bucket
+      // (ni lo subido con enlace ni los avisos de spectre/moviles/).
+      if (!c.prefix.startsWith("spectre/movil/") || !c.prefix.endsWith("/")) return null
       return c
     }
 

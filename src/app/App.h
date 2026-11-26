@@ -354,7 +354,6 @@ private:
   bool phoneCodeHidden_ = false;
   bool phonePageOpen_ = false;  // Ajustes > Móvil a la vista (al abrirla se lee la lista de móviles)
   bool phoneCodeShown_ = false; // el QR estaba a la vista en el frame anterior
-  uint64_t pairedSerial_ = 0;   // el último móvil emparejado del que se avisó
   uint64_t cyberSince_ = 0;   // FILETIME de cuando se activó el modo cibercafé (0 = apagado)
   std::unordered_set<std::string> cyberCancelled_; // en minúsculas: canceladas a mano en esta sesión
   std::shared_ptr<std::atomic<bool>> importCancel_;
